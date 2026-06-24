@@ -1,0 +1,5 @@
+# Visual Studio workspace metadata (parent folder)
+.vs/
+
+# Vendor RFID SDK — local reference only, not app source
+SDK Kit for ETS-IR 04/

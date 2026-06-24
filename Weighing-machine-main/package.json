@@ -1,0 +1,58 @@
+{
+  "name": "weighbridge-app",
+  "version": "0.1.0",
+  "description": "Professional industrial Weighbridge Management System (Electron + React + SQLite)",
+  "main": "electron/main.js",
+  "author": "Your Company",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c yellow,cyan \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite --config frontend/vite.config.js",
+    "dev:electron": "wait-on http://localhost:5173 && cross-env APP_ENV=development electron .",
+    "build": "npm run build:rfid-bridge && npm run build:renderer && npm run build:installer",
+    "build:rfid-bridge": "powershell -ExecutionPolicy Bypass -File rfid-bridge/build.ps1",
+    "build:renderer": "vite build --config frontend/vite.config.js",
+    "build:installer": "electron-builder --config electron-builder.config.js",
+    "reset-db": "cross-env APP_ENV=development ELECTRON_RUN_AS_NODE=1 electron scripts/reset-db.js",
+    "clear-data": "cross-env APP_ENV=development ELECTRON_RUN_AS_NODE=1 electron scripts/clear-all-data.js",
+    "upsert-hr38-vehicle": "cross-env APP_ENV=development ELECTRON_RUN_AS_NODE=1 electron scripts/upsert-hr38-vehicle.js",
+    "rebuild": "electron-rebuild -f -o better-sqlite3",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1061.0",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "axios": "^1.7.7",
+    "better-sqlite3": "^11.3.0",
+    "electron-store": "^8.2.0",
+    "exceljs": "^4.4.0",
+    "ffmpeg-static": "^5.3.0",
+    "node-cron": "^3.0.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
+    "serialport": "^13.0.0",
+    "uuid": "^10.0.0",
+    "winston": "^3.15.0",
+    "winston-transport": "^4.9.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.2",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.5",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.0.5",
+    "electron-rebuild": "^3.2.9",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "vite": "^5.4.8",
+    "wait-on": "^8.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

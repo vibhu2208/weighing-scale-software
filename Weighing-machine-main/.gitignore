@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output
+dist/
+release/
+release-new/
+release2/
+out/
+bin/
+*.tsbuildinfo
+
+# C# RFID bridge build artifacts
+rfid-bridge/bin/
+rfid-bridge/obj/
+
+# Environment files (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Runtime data – keep folders, ignore contents
+database/*
+!database/.gitkeep
+uploads/*
+!uploads/.gitkeep
+reports/*
+!reports/.gitkeep
+images/*
+!images/.gitkeep
+backups/*
+!backups/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+
+# Electron
+electron/dist/
+*.dmg
+*.exe
+*.AppImage
+*.blockmap
+win-unpacked/
+
+# Misc
+.cache/
+coverage/
+*.log
