@@ -437,9 +437,13 @@ async function openTicketSave({
     );
   }
 
+  const SlipNumberService = require('./SlipNumberService');
+  const slipNumber = await SlipNumberService.allocate();
+
   const createResult = TransactionService.create({
     truck_number: truckNumber,
     rfid_tag: rfidTag,
+    slip_number: slipNumber,
     status: TRANSACTION_STATUS.PENDING,
     ticket_status: TICKET_STATUS.OPEN,
     timestamp_in: ts.now(),

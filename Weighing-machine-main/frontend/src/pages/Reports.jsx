@@ -10,6 +10,7 @@ import {
   ticketStatusLabel,
   ticketStatusVariant,
 } from '../lib/ticketStatus.js';
+import { mcgStatusLabel, mcgStatusTitle, mcgStatusVariant } from '../lib/mcgStatus.js';
 import { getPeriodRange, todayISO, toFilterTimestamps } from '../lib/reportDates.js';
 import { listTripCameraImages } from '../lib/tripPhotos.js';
 
@@ -554,6 +555,7 @@ export default function Reports() {
                     <th className="px-3 py-3">Arrival</th>
                     <th className="px-3 py-3">Departure</th>
                     <th className="px-3 py-3">Status</th>
+                    <th className="px-3 py-3">MCG</th>
                     <th className="px-3 py-3">Photos</th>
                     <th className="px-3 py-3">Actions</th>
                   </tr>
@@ -561,7 +563,7 @@ export default function Reports() {
                 <tbody>
                   {rows.length === 0 ? (
                     <tr>
-                      <td colSpan={16} className="px-4 py-8 text-center text-slate-500">
+                      <td colSpan={17} className="px-4 py-8 text-center text-slate-500">
                         No tickets match the current filters.
                       </td>
                     </tr>
@@ -606,6 +608,15 @@ export default function Reports() {
                           </td>
                           <td className="px-3 py-2">
                             <Badge label={ticketStatusLabel(t)} variant={ticketStatusVariant(t)} />
+                          </td>
+                          <td className="px-3 py-2">
+                            {isClosedTicket(t) ? (
+                              <span title={mcgStatusTitle(t)}>
+                                <Badge label={mcgStatusLabel(t)} variant={mcgStatusVariant(t)} />
+                              </span>
+                            ) : (
+                              '—'
+                            )}
                           </td>
                           <td className="px-3 py-2">
                             {photoCount > 0 ? (

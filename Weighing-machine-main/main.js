@@ -114,6 +114,21 @@ async function bootstrapBackend() {
   const queue = safeRequire('../backend/engine/SyncQueue', 'SyncQueue');
   await tryInvoke('startSyncQueue', queue && (queue.start || queue.default?.start));
 
+  const SlipNumberService = safeRequire(
+    '../backend/services/SlipNumberService',
+    'SlipNumberService',
+  );
+  await tryInvoke('syncSlipCounter', SlipNumberService && SlipNumberService.syncOnStartup);
+
+  const remoteTripSync = safeRequire(
+    '../backend/services/RemoteTripSyncService',
+    'RemoteTripSyncService',
+  );
+  await tryInvoke(
+    'startRemoteTripSync',
+    remoteTripSync && remoteTripSync.start,
+  );
+
   const workflow = safeRequire('../backend/engine/WorkflowEngine', 'WorkflowEngine');
   if (workflow) {
     await tryInvoke('initWorkflowEngine', async () => {

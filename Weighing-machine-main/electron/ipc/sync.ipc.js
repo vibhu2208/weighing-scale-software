@@ -15,6 +15,11 @@ function register(ipcMain) {
     return SyncService.triggerManualSync();
   });
 
+  ipcMain.handle(`${NAMESPACE}:syncRemoteTripsNow`, async () => {
+    const RemoteTripSyncService = require('../../backend/services/RemoteTripSyncService');
+    return RemoteTripSyncService.processNow();
+  });
+
   ipcMain.handle(`${NAMESPACE}:getSyncHistory`, async (_e, limit) =>
     SyncService.getHistory(limit || 50),
   );

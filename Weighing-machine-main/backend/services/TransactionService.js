@@ -10,6 +10,7 @@ const {
   SYNC_STATUS,
 } = require('../utils/constants');
 const { isHywa } = require('../utils/vehicleTypes');
+const SlipNumberService = require('./SlipNumberService');
 
 function lookupVehicleType(truckNumber, rfidTag) {
   const db = getDb();
@@ -98,26 +99,11 @@ const TransactionService = {
   },
 
   generateSlipNumber() {
-    const db = getDb();
-    const allocate = db.transaction(() => {
-      ensureSlipCounter(db);
-      const row = db
-        .prepare(
-          'SELECT id, prefix, current_value FROM slip_counter ORDER BY id LIMIT 1',
-        )
-        .get();
-      if (!row) {
-        throw new Error('slip_counter could not be initialised');
-      }
-      const nextValue = row.current_value + 1;
-      const now = ts.now();
-      db.prepare(
-        'UPDATE slip_counter SET current_value = ?, updated_at = ? WHERE id = ?',
-      ).run(nextValue, now, row.id);
-      const prefix = row.prefix || 'WB';
-      return `${prefix}${String(nextValue).padStart(4, '0')}`;
-    });
-    return allocate();
+    return SlipNumberService.generateSlipNumberLocal();
+  },
+
+  generateSlipNumberLocal() {
+    return SlipNumberService.generateSlipNumberLocal();
   },
 
   /** Single source of truth: OPEN ticket by vehicle number or RFID. */
@@ -353,6 +339,139 @@ const TransactionService = {
     return { isDuplicate: false, transaction: this.getById(id) };
   },
 
+  getByRemotePgId(remotePgId) {
+    if (!remotePgId) return null;
+    return rowToTransaction(
+      getDb()
+        .prepare(`${SELECT_WITH_VEHICLE} WHERE t.remote_pg_id = ? LIMIT 1`)
+        .get(String(remotePgId)),
+    );
+  },
+
+  getBySlipNumber(slipNumber) {
+    if (!slipNumber) return null;
+    return rowToTransaction(
+      getDb()
+        .prepare(`${SELECT_WITH_VEHICLE} WHERE t.slip_number = ? LIMIT 1`)
+        .get(String(slipNumber).trim()),
+    );
+  },
+
+  /**
+   * Import a closed trip from RDS into local SQLite (dedup by remote_pg_id / slip_number).
+   */
+  importClosedTrip(data) {
+    const remotePgId = data.remote_pg_id ? String(data.remote_pg_id).trim() : null;
+    if (!remotePgId) {
+      throw new Error('remote_pg_id is required for import');
+    }
+
+    const existingByPg = this.getByRemotePgId(remotePgId);
+    if (existingByPg) {
+      return { imported: false, transaction: existingByPg, existing: true };
+    }
+
+    const slipNumber = String(data.slip_number || '').trim();
+    if (!slipNumber) {
+      throw new Error('slip_number is required for import');
+    }
+
+    const existingBySlip = this.getBySlipNumber(slipNumber);
+    if (existingBySlip) {
+      return { imported: false, transaction: existingBySlip, existing: true };
+    }
+
+    const truckNumber = String(data.truck_number || '')
+      .trim()
+      .toUpperCase();
+    if (!truckNumber) {
+      throw new Error('truck_number is required for import');
+    }
+
+    const grossWeight = Number(data.gross_weight);
+    const tareWeight = Number(data.tare_weight);
+    if (!Number.isFinite(grossWeight) || !Number.isFinite(tareWeight)) {
+      throw new Error('gross_weight and tare_weight are required for import');
+    }
+
+    const id = data.id ? String(data.id) : uuidv4();
+    const now = ts.now();
+    const timestampIn = data.timestamp_in || now;
+    const timestampOut = data.timestamp_out || now;
+
+    const db = getDb();
+    const insert = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO transactions (
+          id, truck_number, rfid_tag, gross_weight, tare_weight,
+          timestamp_in, timestamp_out, image_path, operator_id,
+          slip_number, sync_status, status, notes, created_at, updated_at,
+          ticket_status, material, driver, customer_name, destination, operator_name,
+          arrival_photo_1, arrival_photo_2, arrival_photo_3,
+          departure_photo_1, departure_photo_2, departure_photo_3,
+          report_path, remote_pg_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        truckNumber,
+        data.rfid_tag || null,
+        grossWeight,
+        tareWeight,
+        timestampIn,
+        timestampOut,
+        data.image_path || data.departure_photo_1 || data.arrival_photo_1 || null,
+        data.operator_id || null,
+        slipNumber,
+        SYNC_STATUS.SYNCED,
+        data.status || TRANSACTION_STATUS.CAPTURED,
+        data.notes || null,
+        now,
+        now,
+        TICKET_STATUS.CLOSED,
+        data.material || null,
+        data.driver || null,
+        data.customer_name || null,
+        data.destination || null,
+        data.operator_name || null,
+        data.arrival_photo_1 || null,
+        data.arrival_photo_2 || null,
+        data.arrival_photo_3 || null,
+        data.departure_photo_1 || null,
+        data.departure_photo_2 || null,
+        data.departure_photo_3 || null,
+        data.report_path || null,
+        remotePgId,
+      );
+    });
+
+    insert();
+
+    const numeric = SlipNumberService.parseSlipNumeric(slipNumber);
+    if (numeric > 0) {
+      ensureSlipCounter(db);
+      const row = db
+        .prepare('SELECT id, current_value FROM slip_counter ORDER BY id LIMIT 1')
+        .get();
+      if (row && row.current_value < numeric) {
+        db.prepare(
+          'UPDATE slip_counter SET current_value = ?, updated_at = ? WHERE id = ?',
+        ).run(numeric, now, row.id);
+      }
+    }
+
+    logger.info('Imported closed trip from RDS', {
+      transactionId: id,
+      slipNumber,
+      remotePgId,
+    });
+
+    return {
+      imported: true,
+      transaction: this.getById(id),
+      existing: false,
+    };
+  },
+
   updateFields(id, fields = {}) {
     const existing = this.getById(id);
     if (!existing) throw new Error(`Transaction not found: ${id}`);
@@ -385,6 +504,9 @@ const TransactionService = {
       'departure_photo_2',
       'departure_photo_3',
       'report_path',
+      'mcg_status',
+      'mcg_error',
+      'mcg_sent_at',
     ];
     const sets = [];
     const params = [];

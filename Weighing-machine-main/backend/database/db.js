@@ -24,6 +24,8 @@ const migration008 = require('./migrations/008_ticket_status_repair');
 const migration009 = require('./migrations/009_sync_trip_photo_columns');
 const migration010 = require('./migrations/010_repair_departure_photos');
 const migration011 = require('./migrations/011_trip_customer_destination_operator');
+const migration012 = require('./migrations/012_remote_pg_id');
+const migration013 = require('./migrations/013_mcg_status');
 
 let db = null;
 
@@ -56,6 +58,8 @@ function runMigrations(handle = db) {
     migration009,
     migration010,
     migration011,
+    migration012,
+    migration013,
   ];
 
   const apply = handle.transaction(() => {

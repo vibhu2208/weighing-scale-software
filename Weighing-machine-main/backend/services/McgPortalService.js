@@ -174,6 +174,29 @@ async function postPayload(payload, { label = 'MCG portal' } = {}) {
   }
 }
 
+function recordMcgResult(transactionId, result) {
+  const now = ts.now();
+  if (result?.skipped && result?.reason === 'not_configured') {
+    TransactionService.updateFields(transactionId, {
+      mcg_status: 'skipped',
+      mcg_error: null,
+    });
+    return;
+  }
+  if (result?.ok) {
+    TransactionService.updateFields(transactionId, {
+      mcg_status: 'sent',
+      mcg_error: null,
+      mcg_sent_at: now,
+    });
+    return;
+  }
+  TransactionService.updateFields(transactionId, {
+    mcg_status: 'failed',
+    mcg_error: result?.error || result?.reason || 'unknown',
+  });
+}
+
 const McgPortalService = {
   getConfig,
   isConfigured,
@@ -183,7 +206,9 @@ const McgPortalService = {
   async postClosedTicket(transactionId) {
     if (!isConfigured()) {
       logger.debug('MCG portal not configured — skipping', { transactionId });
-      return { ok: true, skipped: true, reason: 'not_configured' };
+      const result = { ok: true, skipped: true, reason: 'not_configured' };
+      recordMcgResult(transactionId, result);
+      return result;
     }
 
     const transaction = TransactionService.getById(transactionId);
@@ -207,7 +232,9 @@ const McgPortalService = {
       testMode: getConfig().testMode,
     });
 
-    return postPayload(payload, { label: 'MCG portal' });
+    const result = await postPayload(payload, { label: 'MCG portal' });
+    recordMcgResult(transactionId, result);
+    return result;
   },
 
   async testPost() {
