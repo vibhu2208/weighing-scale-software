@@ -161,27 +161,35 @@ function mapPhotoPaths(snapshots, prefix) {
  */
 async function resolveTripCaptures({ imageBase64, imagePath, transactionId, passKey = 'capture' }) {
   const snapshots = [];
+  const explicitCapture = !!(imageBase64 || imagePath);
 
   if (imagePath && typeof imagePath === 'string') {
-    snapshots.push({ id: 'uploaded', label: 'Capture', path: imagePath });
+    const resolved = normalizePath(imagePath);
+    if (!resolved || !fs.existsSync(resolved)) {
+      throw new Error('Camera image file is missing on disk');
+    }
+    const savedPath = saveImage(fs.readFileSync(resolved), transactionId, passKey);
+    snapshots.push({ id: 'uploaded', label: 'Capture', path: savedPath });
   } else if (imageBase64) {
     const imageBuffer = parseImageBase64(imageBase64);
     const savedPath = saveImage(imageBuffer, transactionId, passKey);
     snapshots.push({ id: 'webcam', label: 'Webcam', path: savedPath });
   }
 
-  const { snapshots: rtspSnapshots, failures: rtspFailures } =
-    await CameraCaptureService.captureAllSnapshots(transactionId, passKey);
-  if (rtspFailures?.length) {
-    logger.warn('Some cameras failed during trip capture', {
-      transactionId,
-      passKey,
-      failed: rtspFailures.map((f) => f.label),
-    });
-  }
-  for (const snap of rtspSnapshots) {
-    if (!snapshots.some((s) => s.path === snap.path)) {
-      snapshots.push(snap);
+  if (!explicitCapture) {
+    const { snapshots: rtspSnapshots, failures: rtspFailures } =
+      await CameraCaptureService.captureAllSnapshots(transactionId, passKey);
+    if (rtspFailures?.length) {
+      logger.warn('Some cameras failed during trip capture', {
+        transactionId,
+        passKey,
+        failed: rtspFailures.map((f) => f.label),
+      });
+    }
+    for (const snap of rtspSnapshots) {
+      if (!snapshots.some((s) => s.path === snap.path)) {
+        snapshots.push(snap);
+      }
     }
   }
 
@@ -254,6 +262,10 @@ async function resolveCapturesForSave({
  * - OPEN ticket exists → close ticket (gross + departure photos + report)
  */
 async function saveTripCapture(data = {}) {
+  if (data.manualHywaClose) {
+    return manualCloseHywaTicket(data);
+  }
+
   let truckNumber = String(data.truckNumber || '').trim().toUpperCase();
 
   let openTicket = null;
@@ -318,7 +330,6 @@ async function saveTripCapture(data = {}) {
   const manualPhoto = useManualPhotoConfirm();
   if (
     manualPhoto &&
-    isCameraRequired() &&
     !data.imageBase64 &&
     !data.imagePath &&
     !(data.confirmedSnapshots?.length)
@@ -494,7 +505,6 @@ async function openTicketSave({
   const transaction = TransactionService.updateFields(txnId, {
     ...weightFields,
     weight_offset_kg: weightOffsetKg,
-    image_path: primaryPath || null,
     timestamp_in: capturedAt,
     status: TRANSACTION_STATUS.WEIGHING,
     ticket_status: TICKET_STATUS.OPEN,
@@ -535,6 +545,8 @@ async function closeTicket({
   imageBase64,
   imagePath,
   confirmedSnapshots,
+  preresolvedCaptures,
+  capturedAtOverride,
   truckNumber,
   rfidTag,
   vehicleType: vehicleTypeIn,
@@ -586,21 +598,23 @@ async function closeTicket({
   }
 
   const txnId = openTicket.id;
-  const { primaryPath, snapshots } = await resolveCapturesForSave({
-    imageBase64,
-    imagePath,
-    confirmedSnapshots,
-    transactionId: txnId,
-    passKey: 'departure',
-  });
+  const { primaryPath, snapshots } = preresolvedCaptures
+    ? preresolvedCaptures
+    : await resolveCapturesForSave({
+        imageBase64,
+        imagePath,
+        confirmedSnapshots,
+        transactionId: txnId,
+        passKey: 'departure',
+      });
 
-  if (!primaryPath && isCameraRequired()) {
+  if (!primaryPath && isCameraRequired() && !preresolvedCaptures) {
     throw new Error('Could not capture images from any camera');
   }
 
   const departurePhotos = mapPhotoPaths(snapshots, 'departure');
   verifyPhotoFields(departurePhotos, 'departure');
-  const capturedAt = ts.now();
+  const capturedAt = capturedAtOverride || ts.now();
 
   const weightFields = hywa
     ? {
@@ -678,12 +692,113 @@ async function closeTicket({
   };
 }
 
+/**
+ * Admin-only: close an open HYWA ticket with manual tare weight, close time, photo, and trip fields.
+ * Report generation and sync behave the same as a normal weighment close.
+ */
+async function manualCloseHywaTicket(data = {}) {
+  const OperatorAuthService = require('./OperatorAuthService');
+  OperatorAuthService.assertManualHywaSectionAccess();
+
+  const openTicket = TransactionService.findOpenTicketById(data.openTicketId);
+  if (!openTicket) {
+    throw new Error('Open ticket not found');
+  }
+  if (openTicket.ticket_status !== TICKET_STATUS.OPEN) {
+    throw new Error('Ticket is not OPEN — cannot close');
+  }
+
+  const truckNumber = String(openTicket.truck_number || '').trim().toUpperCase();
+  const vehicle = VehicleService.findByNumber(truckNumber);
+  const vehicleType = resolveVehicleType(vehicle, openTicket);
+  if (!isHywa(vehicleType)) {
+    throw new Error('Manual close is only available for HYWA vehicles');
+  }
+  if (!openTicketHasFirstWeigh(openTicket, vehicleType)) {
+    throw new Error('Open HYWA ticket has no gross weight — cannot close');
+  }
+
+  const weightKg = Math.round(Number(data.weightKg));
+  if (!Number.isFinite(weightKg) || weightKg <= 0) {
+    throw new Error('Valid tare weight (kg) is required');
+  }
+
+  let capturedAtOverride;
+  if (data.timestampOut != null && String(data.timestampOut).trim() !== '') {
+    const parsed = new Date(data.timestampOut);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error('Invalid close date/time');
+    }
+    capturedAtOverride = parsed.toISOString();
+  }
+
+  if (!data.imageBase64 && !(Array.isArray(data.manualImages) && data.manualImages.length)) {
+    throw new Error('At least one departure photo is required');
+  }
+
+  const txnId = openTicket.id;
+  const snapshots = [];
+  if (Array.isArray(data.manualImages)) {
+    for (const item of data.manualImages) {
+      if (!item?.imageBase64) continue;
+      const slot = Number(item.slot);
+      if (!Number.isFinite(slot) || slot < 1 || slot > 3) {
+        throw new Error('Invalid photo slot — use 1, 2, or 3');
+      }
+      const imageBuffer = parseImageBase64(item.imageBase64);
+      const savedPath = saveImage(imageBuffer, txnId, `departure-cam-${slot}`);
+      snapshots.push({ id: `cam-${slot}`, label: `Camera ${slot}`, path: savedPath });
+    }
+  } else if (data.imageBase64) {
+    const imageBuffer = parseImageBase64(data.imageBase64);
+    const savedPath = saveImage(imageBuffer, txnId, 'departure');
+    snapshots.push({ id: 'cam-1', label: 'Camera 1', path: savedPath });
+  }
+
+  if (!snapshots.length) {
+    throw new Error('At least one departure photo is required');
+  }
+
+  snapshots.sort((a, b) => {
+    const slotA = parseInt(String(a.id).replace('cam-', ''), 10) || 0;
+    const slotB = parseInt(String(b.id).replace('cam-', ''), 10) || 0;
+    return slotA - slotB;
+  });
+
+  const preresolvedCaptures = {
+    primaryPath: snapshots[0].path,
+    snapshots,
+  };
+
+  let rfidTag = openTicket.rfid_tag ? String(openTicket.rfid_tag).trim().toUpperCase() : null;
+  if (!rfidTag && vehicle?.rfid_tag) {
+    rfidTag = String(vehicle.rfid_tag).trim().toUpperCase();
+  }
+
+  return closeTicket({
+    openTicket,
+    weightKg,
+    rawWeightKg: weightKg,
+    weightOffsetKg: 0,
+    preresolvedCaptures,
+    capturedAtOverride,
+    truckNumber,
+    rfidTag,
+    vehicleType,
+    material: data.material,
+    customer_name: data.customer_name,
+    destination: data.destination,
+    operator_name: data.operator_name,
+  });
+}
+
 module.exports = {
   saveTripCapture,
   resolveTripCaptures,
   mergeCameraSnapshots,
   openTicketSave,
   closeTicket,
+  manualCloseHywaTicket,
   isCameraRequired,
   getRequiredPhotoCount,
 };

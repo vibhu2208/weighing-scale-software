@@ -16,7 +16,6 @@ write(
 import useDeviceStore from '../store/deviceStore.js';
 import useTransactionStore from '../store/transactionStore.js';
 import useThrottledValue from '../hooks/useThrottledValue.js';
-import SimulatorPanel from '../components/simulator/SimulatorPanel.jsx';
 import ConfirmModal from '../components/shared/ConfirmModal.jsx';
 import Badge from '../components/shared/Badge.jsx';
 import {
@@ -254,7 +253,6 @@ export default function WeighmentScreen() {
             </button>
           )}
 
-          <SimulatorPanel embedded />
         </div>
       </div>
 

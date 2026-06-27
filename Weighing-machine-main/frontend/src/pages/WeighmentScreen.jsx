@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useDeviceStore from '../store/deviceStore.js';
 import useTransactionStore from '../store/transactionStore.js';
 import useStableLiveWeight from '../hooks/useStableLiveWeight.js';
-import SimulatorPanel from '../components/simulator/SimulatorPanel.jsx';
 import ConfirmModal from '../components/shared/ConfirmModal.jsx';
 import Badge from '../components/shared/Badge.jsx';
 import StatusDot from '../components/shared/StatusDot.jsx';
@@ -113,7 +112,7 @@ export default function WeighmentScreen() {
     return hywaVehicle ? first - live : live - first;
   }, [weighMode, openTicket, vehicleType, hywaVehicle, kg]);
 
-  const testMode = testConfig?.useWebcamCamera || testConfig?.mockWeighbridge;
+  const testMode = testConfig?.useWebcamCamera;
   const requiredPhotos = testConfig?.enabledPhotos ?? testConfig?.requiredPhotos ?? 1;
   const configuredCameras = testConfig?.cameras || [];
   const minPhotosToSave = testConfig?.minPhotosToSave ?? 1;
@@ -1342,7 +1341,6 @@ export default function WeighmentScreen() {
             </button>
           )}
 
-          <SimulatorPanel embedded />
         </div>
       </div>
 

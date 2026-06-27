@@ -78,12 +78,20 @@ export function listTripCameraImages(t) {
 
   if (t.image_path) {
     const pass = isClosedTrip(t) ? 'departure' : 'arrival';
-    add({
-      id: pass === 'departure' ? 'primary-gross' : 'primary-arrival',
-      label: pass === 'departure' ? 'Primary gross' : 'Primary arrival',
-      path: t.image_path,
-      pass,
-    });
+    const arrivalPaths = new Set(
+      ['arrival_photo_1', 'arrival_photo_2', 'arrival_photo_3', 'tare_image_path']
+        .map((col) => t[col])
+        .filter(Boolean),
+    );
+    const duplicateArrival = pass === 'departure' && arrivalPaths.has(t.image_path);
+    if (!duplicateArrival) {
+      add({
+        id: pass === 'departure' ? 'primary-gross' : 'primary-arrival',
+        label: pass === 'departure' ? 'Primary gross' : 'Primary arrival',
+        path: t.image_path,
+        pass,
+      });
+    }
   }
 
   return out;

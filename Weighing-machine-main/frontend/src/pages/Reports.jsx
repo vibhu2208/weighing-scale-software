@@ -3,6 +3,7 @@ import { reportAPI } from '../api/ipc.js';
 import Badge from '../components/shared/Badge.jsx';
 import ExportCenter from '../components/reports/ExportCenter.jsx';
 import ReportDownloadPanel from '../components/reports/ReportDownloadPanel.jsx';
+import DateRangeCalendar from '../components/reports/DateRangeCalendar.jsx';
 import PhotoGalleryModal from '../components/reports/PhotoGalleryModal.jsx';
 import ReportPreviewModal from '../components/reports/ReportPreviewModal.jsx';
 import {
@@ -96,6 +97,7 @@ export default function Reports() {
   const [exportOpen, setExportOpen] = useState(false);
   const [previewTicket, setPreviewTicket] = useState(null);
   const [galleryTicket, setGalleryTicket] = useState(null);
+  const [calendarOpen, setCalendarOpen] = useState(false);
 
   useEffect(() => {
     const range = getPeriodRange(period, from, to);
@@ -406,18 +408,6 @@ export default function Reports() {
               <option value="custom">Custom Range</option>
             </select>
           </label>
-          {period === 'custom' && (
-            <>
-              <label className="text-sm">
-                <span className="text-slate-400 block mb-1">From</span>
-                <input type="date" className="field-input" value={from} onChange={(e) => { setFrom(e.target.value); setPage(0); }} />
-              </label>
-              <label className="text-sm">
-                <span className="text-slate-400 block mb-1">To</span>
-                <input type="date" className="field-input" value={to} onChange={(e) => { setTo(e.target.value); setPage(0); }} />
-              </label>
-            </>
-          )}
           <label className="text-sm min-w-[120px]">
             <span className="text-slate-400 block mb-1">Status</span>
             <select className="field-input" value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }}>
@@ -445,10 +435,36 @@ export default function Reports() {
               ))}
             </select>
           </label>
+          <button
+            type="button"
+            className={`btn-ghost text-xs px-2.5 py-1.5 border ${
+              calendarOpen ? 'border-brand-600/50 text-brand-300 bg-brand-950/30' : 'border-slate-700 text-slate-300'
+            }`}
+            onClick={() => setCalendarOpen((open) => !open)}
+            aria-expanded={calendarOpen}
+            aria-controls="filter-ticket-calendar"
+          >
+            {calendarOpen ? '▾' : '▸'} Calendar
+          </button>
           <button type="button" className="btn-ghost" onClick={load} disabled={loading}>
             Refresh
           </button>
         </div>
+
+        {calendarOpen && (
+          <div id="filter-ticket-calendar">
+            <DateRangeCalendar
+              from={from}
+              to={to}
+              onChange={({ from: nextFrom, to: nextTo }) => {
+                setPeriod('custom');
+                setFrom(nextFrom);
+                setTo(nextTo);
+                setPage(0);
+              }}
+            />
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-2 items-end">
           <label className="text-sm flex-1 min-w-[240px]">

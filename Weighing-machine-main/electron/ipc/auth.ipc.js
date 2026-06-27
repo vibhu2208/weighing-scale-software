@@ -16,6 +16,18 @@ function register(ipcMain) {
   ipcMain.handle(`${NAMESPACE}:getSession`, async () =>
     OperatorAuthService.getSession(),
   );
+
+  ipcMain.handle(`${NAMESPACE}:verifyManualHywaPin`, async (_e, pin) =>
+    OperatorAuthService.verifyManualHywaPin(pin),
+  );
+
+  ipcMain.handle(`${NAMESPACE}:lockManualHywaClose`, async () =>
+    OperatorAuthService.lockManualHywaClose(),
+  );
+
+  ipcMain.handle(`${NAMESPACE}:getManualHywaCloseSession`, async () =>
+    OperatorAuthService.getManualHywaCloseSession(),
+  );
 }
 
 module.exports = { register, NAMESPACE };

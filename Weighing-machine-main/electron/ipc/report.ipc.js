@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { dialog } = require('electron');
 const ReportService = require('../../backend/services/ReportService');
+const AdminReportService = require('../../backend/services/AdminReportService');
 
 const NAMESPACE = 'reports';
 
@@ -194,6 +195,22 @@ function register(ipcMain) {
 
   ipcMain.handle(`${NAMESPACE}:printSlip`, async (_e, transactionId) =>
     ReportService.printSlip(transactionId),
+  );
+
+  ipcMain.handle(`${NAMESPACE}:listRecentClosedReports`, async (_e, options) =>
+    AdminReportService.listRecentClosedReports(options || {}),
+  );
+
+  ipcMain.handle(`${NAMESPACE}:getClosedReportBySlip`, async (_e, slipNumber) =>
+    AdminReportService.getClosedReportBySlip(slipNumber),
+  );
+
+  ipcMain.handle(`${NAMESPACE}:adminUpdateClosedReport`, async (_e, data) =>
+    AdminReportService.updateClosedReport(data || {}),
+  );
+
+  ipcMain.handle(`${NAMESPACE}:adminDeleteClosedReport`, async (_e, data) =>
+    AdminReportService.deleteClosedReport(data || {}),
   );
 }
 

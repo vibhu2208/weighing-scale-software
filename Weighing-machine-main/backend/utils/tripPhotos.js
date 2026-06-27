@@ -1,5 +1,8 @@
 'use strict';
 
+const { isHywa, cameraSnapshotPassKey } = require('./vehicleTypes');
+const { normalizePath } = require('./fileStorage');
+
 function parseCameraSnapshots(raw) {
   if (!raw) return { tare: [], gross: [] };
   if (typeof raw === 'object') {
@@ -54,16 +57,36 @@ function photoColumnFields(snapshots, kind) {
   };
 }
 
+function resolveVehicleTypeFromRow(row) {
+  return row?.vehicle_type || row?.vehicle?.vehicle_type || null;
+}
+
 function photoPathFromSnapshots(row, passLabel, slotIndex) {
-  const passKey = passLabel === 'departure' ? 'gross' : 'tare';
+  const passKey = cameraSnapshotPassKey(resolveVehicleTypeFromRow(row), passLabel);
   const snaps = parseCameraSnapshots(row?.camera_snapshots);
   const camId = `cam-${slotIndex}`;
   const match = (snaps[passKey] || []).find((s) => s.id === camId);
   return match?.path || null;
 }
 
+function arrivalPhotoPathsOnRow(row) {
+  const paths = new Set();
+  for (const col of ['arrival_photo_1', 'arrival_photo_2', 'arrival_photo_3', 'tare_image_path']) {
+    const raw = row?.[col];
+    if (!raw) continue;
+    const resolved = normalizePath(raw);
+    if (resolved) paths.add(resolved);
+  }
+  return paths;
+}
+
 function listTripCameraImages(row) {
   if (!row) return [];
+
+  const vehicleType = resolveVehicleTypeFromRow(row);
+  const hywa = isHywa(vehicleType);
+  const arrivalSnapKey = cameraSnapshotPassKey(vehicleType, 'arrival');
+  const departureSnapKey = cameraSnapshotPassKey(vehicleType, 'departure');
 
   const seen = new Set();
   const out = [];
@@ -98,10 +121,10 @@ function listTripCameraImages(row) {
   }
 
   const snaps = parseCameraSnapshots(row.camera_snapshots);
-  for (const s of snaps.tare || []) {
+  for (const s of snaps[arrivalSnapKey] || []) {
     add({ ...s, pass: 'arrival' });
   }
-  for (const s of snaps.gross || []) {
+  for (const s of snaps[departureSnapKey] || []) {
     add({ ...s, pass: 'departure' });
   }
 
@@ -110,18 +133,25 @@ function listTripCameraImages(row) {
       id: 'primary-tare',
       label: 'Primary tare',
       path: row.tare_image_path,
-      pass: 'arrival',
+      pass: hywa ? 'departure' : 'arrival',
     });
   }
 
   if (row.image_path) {
     const pass = isClosedTrip(row) ? 'departure' : 'arrival';
-    add({
-      id: pass === 'departure' ? 'primary-gross' : 'primary-arrival',
-      label: pass === 'departure' ? 'Primary gross' : 'Primary arrival',
-      path: row.image_path,
-      pass,
-    });
+    const resolvedImagePath = normalizePath(row.image_path);
+    const duplicateArrival =
+      pass === 'departure' &&
+      resolvedImagePath &&
+      arrivalPhotoPathsOnRow(row).has(resolvedImagePath);
+    if (!duplicateArrival) {
+      add({
+        id: pass === 'departure' ? 'primary-gross' : 'primary-arrival',
+        label: pass === 'departure' ? 'Primary gross' : 'Primary arrival',
+        path: row.image_path,
+        pass,
+      });
+    }
   }
 
   return out;

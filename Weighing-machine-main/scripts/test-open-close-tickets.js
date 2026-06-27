@@ -176,6 +176,83 @@ async function runHywaTicketTests() {
   }
 }
 
+async function runManualHywaCloseTests() {
+  const OperatorAuthService = require('../backend/services/OperatorAuthService');
+  const tempFiles = [];
+  const track = (p) => {
+    tempFiles.push(p);
+    return p;
+  };
+
+  try {
+    VehicleService.create({
+      vehicle_number: 'HYWA002',
+      rfid_tag: 'RFID-HYWA2',
+      owner_name: 'HYWA Owner 2',
+      vehicle_type: 'hywa',
+    });
+  } catch (err) {
+    if (!/already exists/.test(err.message)) throw err;
+  }
+
+  const openResult = await TripCaptureService.openTicketSave({
+    weightKg: 9000,
+    rawWeightKg: 9000,
+    weightOffsetKg: 0,
+    imagePath: track(fakePhoto()),
+    truckNumber: 'HYWA002',
+    rfidTag: 'RFID-HYWA2',
+    vehicleType: 'hywa',
+    material: 'Coal',
+    customer_name: 'MCG',
+    destination: 'MEERUT',
+    operator_name: 'Operator1',
+  });
+  const openTicket = TransactionService.findOpenTicket('HYWA002', 'RFID-HYWA2');
+  assert(openTicket, 'HYWA open ticket for manual close should exist');
+
+  const verifyResult = OperatorAuthService.verifyPin('1234');
+  if (!verifyResult.ok) {
+    console.log('Skipping manual HYWA close test — no admin PIN 1234 in DB');
+    return;
+  }
+
+  const closeAt = '2025-06-15T10:30:00.000Z';
+  const imageBuffer = fs.readFileSync(fakePhoto());
+  const imageBase64 = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
+
+  const manualResult = await TripCaptureService.manualCloseHywaTicket({
+    openTicketId: openTicket.id,
+    weightKg: 3500,
+    timestampOut: closeAt,
+    imageBase64,
+    material: 'Coal',
+    customer_name: 'MCG',
+    destination: 'MEERUT',
+    operator_name: 'Operator1',
+  });
+
+  assert(manualResult.pass === 'CLOSE', 'Manual HYWA close expected CLOSE pass');
+  assert(manualResult.transaction.tare_weight === 3500, 'Manual close should set tare_weight');
+  assert(manualResult.transaction.ticket_status === TICKET_STATUS.CLOSED, 'Manual close should close ticket');
+  assert(manualResult.transaction.net_weight === 5500, 'Manual HYWA net should be gross - tare');
+  assert(
+    manualResult.transaction.timestamp_out === closeAt,
+    'Manual close should use provided timestamp_out',
+  );
+  console.log('Manual HYWA close:', manualResult.transaction.slip_number);
+
+  OperatorAuthService.lockAdvanced();
+
+  for (const filePath of tempFiles) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 initDatabase();
 
 const slipSample = TransactionService.generateSlipNumber();
@@ -221,6 +298,8 @@ console.log('Cancelled A');
     console.log('Ticket field validation tests passed');
     await runHywaTicketTests();
     console.log('HYWA ticket tests passed');
+    await runManualHywaCloseTests();
+    console.log('Manual HYWA close tests passed');
   } catch (err) {
     console.error('Ticket field validation tests failed:', err.message);
     process.exitCode = 1;

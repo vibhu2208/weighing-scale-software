@@ -52,7 +52,7 @@ function makeProxy(namespace, methods) {
   }, {});
 }
 
-export const ticketAPI = makeProxy('tickets', ['listOpen', 'cancel']);
+export const ticketAPI = makeProxy('tickets', ['listOpen', 'cancel', 'manualCloseHywa']);
 
 export const transactionAPI = makeProxy('transactions', [
   'create',
@@ -76,12 +76,6 @@ export const vehicleAPI = makeProxy('vehicles', [
 export const deviceAPI = makeProxy('devices', [
   'getStatus',
   'setWeighmentContext',
-  'simulateRFID',
-  'simulateMultiRFID',
-  'simulateWeight',
-  'simulateCamera',
-  'simulateDisconnect',
-  'simulateReconnect',
   'testConnection',
   'testExternalDisplay',
   'listSerialPorts',
@@ -132,6 +126,10 @@ export const reportAPI = makeProxy('reports', [
   'printReports',
   'printFilteredReports',
   'printSlip',
+  'listRecentClosedReports',
+  'getClosedReportBySlip',
+  'adminUpdateClosedReport',
+  'adminDeleteClosedReport',
 ]);
 
 export const backupAPI = makeProxy('backup', [
@@ -166,7 +164,14 @@ export const settingsAPI = makeProxy('settings', [
   'setOperators',
 ]);
 
-export const authAPI = makeProxy('auth', ['verifyPin', 'lockAdvanced', 'getSession']);
+export const authAPI = makeProxy('auth', [
+  'verifyPin',
+  'lockAdvanced',
+  'getSession',
+  'verifyManualHywaPin',
+  'lockManualHywaClose',
+  'getManualHywaCloseSession',
+]);
 
 export const workflowAPI = makeProxy('workflow', [
   'getState',

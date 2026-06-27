@@ -3,9 +3,7 @@
 const logger = require('../utils/logger');
 const ts = require('../utils/timestamp');
 const { getDb } = require('../database/db');
-const MockRFIDAdapter = require('../adapters/mock/MockRFIDAdapter');
 const MockWeighbridgeAdapter = require('../adapters/mock/MockWeighbridgeAdapter');
-const MockCameraAdapter = require('../adapters/mock/MockCameraAdapter');
 const RealRFIDAdapter = require('../adapters/real/RealRFIDAdapter');
 const RealWeighbridgeAdapter = require('../adapters/real/RealWeighbridgeAdapter');
 const RealCameraAdapter = require('../adapters/real/RealCameraAdapter');
@@ -56,7 +54,6 @@ const retryState = {
 const rfidRetryState = new Map();
 
 const ENV_PREFERRED_KEYS = new Set([
-  'USE_MOCK_HARDWARE',
   'USE_MOCK_WEIGHBRIDGE',
   'USE_WEBCAM_CAMERA',
   'SIMULATE_WEIGHT_KG',
@@ -106,16 +103,9 @@ function settingFlagFalse(key) {
   return flag === 'false' || flag === '0';
 }
 
-function useMockHardware() {
-  return settingFlagTrue('USE_MOCK_HARDWARE', false);
-}
-
 function useMockWeighbridge() {
-  if (settingFlagTrue('USE_MOCK_WEIGHBRIDGE', false)) return true;
   if (settingFlagFalse('USE_MOCK_WEIGHBRIDGE')) return false;
-  if (useMockHardware()) return true;
-  const simulateKg = parseFloat(readSettingValue('SIMULATE_WEIGHT_KG'));
-  return Number.isFinite(simulateKg) && simulateKg > 0;
+  return settingFlagTrue('USE_MOCK_WEIGHBRIDGE', false);
 }
 
 function useWebcamCamera() {
@@ -933,28 +923,21 @@ function wireCameraAdapter(adapter) {
 
 function createAdapters() {
   const config = buildConfig();
-  const mock = useMockHardware();
 
-  if (mock) {
-    rfidAdapter = new MockRFIDAdapter(config.rfid);
-    rfidAdapters = [rfidAdapter];
-  } else {
-    const ipsFromList = parseRfidIps(config.rfid.ips);
-    const uniqueIps =
-      ipsFromList.length > 0
-        ? [...new Set(ipsFromList)]
-        : [config.rfid.ip].filter(Boolean);
-    const readerConfigs = uniqueIps;
+  const ipsFromList = parseRfidIps(config.rfid.ips);
+  const uniqueIps =
+    ipsFromList.length > 0
+      ? [...new Set(ipsFromList)]
+      : [config.rfid.ip].filter(Boolean);
 
-    rfidAdapters = readerConfigs.map((ip, index) =>
-      new RealRFIDAdapter({
-        ...config.rfid,
-        ip,
-        readerId: `reader-${index + 1}`,
-      }),
-    );
-    rfidAdapter = rfidAdapters[0] || null;
-  }
+  rfidAdapters = uniqueIps.map((ip, index) =>
+    new RealRFIDAdapter({
+      ...config.rfid,
+      ip,
+      readerId: `reader-${index + 1}`,
+    }),
+  );
+  rfidAdapter = rfidAdapters[0] || null;
 
   if (useMockWeighbridge()) {
     weighbridgeAdapter = new MockWeighbridgeAdapter(config.weighbridge);
@@ -964,8 +947,6 @@ function createAdapters() {
 
   if (useWebcamCamera()) {
     cameraAdapter = new WebcamCameraAdapter(config.camera);
-  } else if (mock) {
-    cameraAdapter = new MockCameraAdapter(config.camera);
   } else {
     cameraAdapter = new RealCameraAdapter(config.camera);
   }
@@ -1096,7 +1077,6 @@ async function start(windowGetter) {
     syncRfidToRenderer();
 
     logger.info('DeviceMonitorService started', {
-      mock: useMockHardware(),
       mockWeighbridge: useMockWeighbridge(),
       webcamCamera: useWebcamCamera(),
       simulateWeightKg: getSimulateWeightKg(),
@@ -1135,7 +1115,6 @@ async function restart(windowGetter) {
 }
 
 const DEVICE_RESTART_KEYS = new Set([
-  'USE_MOCK_HARDWARE',
   'USE_MOCK_WEIGHBRIDGE',
   'USE_WEBCAM_CAMERA',
   'SIMULATE_WEIGHT_KG',
@@ -1348,7 +1327,7 @@ async function stopRfidScan() {
   emitStatusUpdate();
 }
 function useRtspCamera() {
-  return !useWebcamCamera() && !useMockHardware();
+  return !useWebcamCamera();
 }
 
 function getCameraConfig() {
@@ -1370,7 +1349,6 @@ function getTestConfig() {
   return {
     useWebcamCamera: useWebcamCamera(),
     useRtspCamera: useRtspCamera(),
-    mockWeighbridge: useMockWeighbridge(),
     simulateWeightKg: getSimulateWeightKg(),
     cameras: cameras.map((c) => ({
       id: c.id,

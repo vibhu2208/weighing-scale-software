@@ -3,8 +3,15 @@
 const { getDb } = require('../database/db');
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_MANUAL_HYWA_CLOSE_PIN = '0824';
 
 let adminSession = null;
+let manualHywaCloseSession = null;
+
+function manualHywaClosePin() {
+  const fromEnv = String(process.env.MANUAL_HYWA_CLOSE_PIN || '').trim();
+  return fromEnv || DEFAULT_MANUAL_HYWA_CLOSE_PIN;
+}
 
 function isAdminSessionActive() {
   if (!adminSession) return false;
@@ -58,7 +65,70 @@ function verifyPin(pin) {
 
 function lockAdvanced() {
   adminSession = null;
+  manualHywaCloseSession = null;
   return { ok: true };
+}
+
+function isManualHywaCloseSessionActive() {
+  if (!manualHywaCloseSession) return false;
+  if (Date.now() > manualHywaCloseSession.expiresAt) {
+    manualHywaCloseSession = null;
+    return false;
+  }
+  return true;
+}
+
+function verifyManualHywaPin(pin) {
+  const trimmed = String(pin || '').trim();
+  if (!trimmed) {
+    return { ok: false, error: 'Passcode is required' };
+  }
+  if (trimmed !== manualHywaClosePin()) {
+    return { ok: false, error: 'Invalid passcode' };
+  }
+
+  const now = Date.now();
+  manualHywaCloseSession = {
+    unlockedAt: now,
+    expiresAt: now + SESSION_TTL_MS,
+  };
+
+  return {
+    ok: true,
+    expiresAt: manualHywaCloseSession.expiresAt,
+  };
+}
+
+function lockManualHywaClose() {
+  manualHywaCloseSession = null;
+  return { ok: true };
+}
+
+function getManualHywaCloseSession() {
+  if (!isManualHywaCloseSessionActive()) {
+    return { active: false };
+  }
+  return {
+    active: true,
+    expiresAt: manualHywaCloseSession.expiresAt,
+  };
+}
+
+function touchManualHywaCloseSession() {
+  if (isManualHywaCloseSessionActive()) {
+    manualHywaCloseSession.expiresAt = Date.now() + SESSION_TTL_MS;
+  }
+}
+
+function assertManualHywaSectionAccess() {
+  if (!isAdminSessionActive()) {
+    throw new Error('Admin session required — unlock Advance Setting first');
+  }
+  if (!isManualHywaCloseSessionActive()) {
+    throw new Error('Passcode required — unlock Manual HYWA section first');
+  }
+  touchSession();
+  touchManualHywaCloseSession();
 }
 
 function getSession() {
@@ -88,4 +158,10 @@ module.exports = {
   getSession,
   isAdminSessionActive,
   touchSession,
+  verifyManualHywaPin,
+  lockManualHywaClose,
+  getManualHywaCloseSession,
+  isManualHywaCloseSessionActive,
+  touchManualHywaCloseSession,
+  assertManualHywaSectionAccess,
 };

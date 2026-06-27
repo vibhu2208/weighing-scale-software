@@ -531,6 +531,15 @@ const TransactionService = {
     return this.getById(id);
   },
 
+  deleteById(id) {
+    const existing = this.getById(id);
+    if (!existing) throw new Error(`Transaction not found: ${id}`);
+    const db = getDb();
+    db.prepare('DELETE FROM sync_queue WHERE transaction_id = ?').run(id);
+    db.prepare('DELETE FROM transactions WHERE id = ?').run(id);
+    return existing;
+  },
+
   cancelTicket(id) {
     const existing = this.getById(id);
     if (!existing) throw new Error(`Transaction not found: ${id}`);

@@ -67,6 +67,16 @@ function reportListingTimestamp(row) {
   return row.timestamp_in || row.created_at || null;
 }
 
+/** camera_snapshots JSON key for arrival/departure on reports (standard: tare→arrival, gross→departure; HYWA: inverted). */
+function cameraSnapshotPassKey(vehicleType, passLabel) {
+  const hywa = isHywa(vehicleType);
+  const departure = passLabel === 'departure';
+  if (hywa) {
+    return departure ? 'tare' : 'gross';
+  }
+  return departure ? 'gross' : 'tare';
+}
+
 module.exports = {
   HYWA_TYPE,
   isHywa,
@@ -77,4 +87,5 @@ module.exports = {
   tareWeightTimestamp,
   netWeightTimestamp,
   reportListingTimestamp,
+  cameraSnapshotPassKey,
 };

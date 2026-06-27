@@ -694,6 +694,40 @@ const ReportService = {
     };
   },
 
+  async regenerateTripPDF(transactionId) {
+    const TransactionService = require('./TransactionService');
+    const txn = TransactionService.getById(transactionId);
+    if (!txn) {
+      return { ok: false, error: 'Transaction not found' };
+    }
+    if (!isClosedTrip(txn)) {
+      return { ok: false, error: 'Reports are only available for CLOSED tickets' };
+    }
+
+    const row = enrichReportRow(txn);
+    const day = reportDateIso(row);
+    const vehicle = sanitizeExportBasename(row.truck_number || 'vehicle');
+    const result = await buildAndSavePdf([row], {
+      filenamePrefix: day ? `${day}_${vehicle}` : vehicle,
+    });
+    if (!result.ok) return result;
+
+    if (row.slip_number) {
+      const reportCopy = path.join(PATHS.REPORTS, `${row.slip_number}_report.pdf`);
+      ensureDir(PATHS.REPORTS);
+      fs.copyFileSync(result.path, reportCopy);
+    }
+
+    TransactionService.updateFields(transactionId, { report_path: result.path });
+    logger.info('Trip PDF regenerated', { path: result.path, transactionId });
+    return {
+      ok: true,
+      path: result.path,
+      transactionId,
+      slip_number: row.slip_number,
+    };
+  },
+
   async printReports(transactionIds = [], options = {}) {
     const rows = transactionIds.length ? rowsByIds(transactionIds) : [];
     if (!rows.length) return { ok: false, error: 'No tickets to print' };

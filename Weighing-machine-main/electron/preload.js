@@ -23,7 +23,7 @@ const electronAPI = {
     'getTodayStats',
   ]),
 
-  tickets: buildNamespace('tickets', ['listOpen', 'cancel']),
+  tickets: buildNamespace('tickets', ['listOpen', 'cancel', 'manualCloseHywa']),
 
   vehicles: buildNamespace('vehicles', [
     'getAll',
@@ -39,12 +39,6 @@ const electronAPI = {
   devices: buildNamespace('devices', [
     'getStatus',
     'setWeighmentContext',
-    'simulateRFID',
-    'simulateMultiRFID',
-    'simulateWeight',
-    'simulateCamera',
-    'simulateDisconnect',
-    'simulateReconnect',
     'testConnection',
     'testExternalDisplay',
     'listSerialPorts',
@@ -104,6 +98,10 @@ const electronAPI = {
     'printReports',
     'printFilteredReports',
     'printSlip',
+    'listRecentClosedReports',
+    'getClosedReportBySlip',
+    'adminUpdateClosedReport',
+    'adminDeleteClosedReport',
   ]),
 
   backup: buildNamespace('backup', [
@@ -138,7 +136,14 @@ const electronAPI = {
     'setOperators',
   ]),
 
-  auth: buildNamespace('auth', ['verifyPin', 'lockAdvanced', 'getSession']),
+  auth: buildNamespace('auth', [
+    'verifyPin',
+    'lockAdvanced',
+    'getSession',
+    'verifyManualHywaPin',
+    'lockManualHywaClose',
+    'getManualHywaCloseSession',
+  ]),
 
   /**
    * Subscribe to backend push events (device status, weight ticks, sync progress, etc.).
