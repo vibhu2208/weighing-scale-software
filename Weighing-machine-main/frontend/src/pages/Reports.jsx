@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { reportAPI, transactionAPI } from '../api/ipc.js';
+import { reportAPI } from '../api/ipc.js';
 import Badge from '../components/shared/Badge.jsx';
 import ExportCenter from '../components/reports/ExportCenter.jsx';
 import ReportDownloadPanel from '../components/reports/ReportDownloadPanel.jsx';
@@ -96,7 +96,6 @@ export default function Reports() {
   const [exportOpen, setExportOpen] = useState(false);
   const [previewTicket, setPreviewTicket] = useState(null);
   const [galleryTicket, setGalleryTicket] = useState(null);
-  const [todayNetWeight, setTodayNetWeight] = useState(0);
 
   useEffect(() => {
     const range = getPeriodRange(period, from, to);
@@ -124,22 +123,10 @@ export default function Reports() {
     return { ...base, status };
   }, [from, to, period, status, operator, material, search, page]);
 
-  const loadTodayNetWeight = useCallback(async () => {
-    try {
-      const stats = await transactionAPI.getTodayStats();
-      setTodayNetWeight(stats?.totalWeight || 0);
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [data] = await Promise.all([
-        reportAPI.getPaginatedReport(filters),
-        loadTodayNetWeight(),
-      ]);
+      const data = await reportAPI.getPaginatedReport(filters);
       setRows(data?.rows || []);
       setSummary({ ...EMPTY_SUMMARY, ...(data?.summary || {}) });
       setPagination(data?.pagination || { page: 0, pageSize: PAGE_SIZE, total: 0, totalPages: 1 });
@@ -149,7 +136,7 @@ export default function Reports() {
     } finally {
       setLoading(false);
     }
-  }, [filters, loadTodayNetWeight]);
+  }, [filters]);
 
   useEffect(() => {
     load();
@@ -158,12 +145,6 @@ export default function Reports() {
   useEffect(() => {
     reportAPI.getFilterOptions().then(setFilterOptions).catch(() => {});
   }, []);
-
-  useEffect(() => {
-    loadTodayNetWeight();
-    const id = setInterval(loadTodayNetWeight, 30000);
-    return () => clearInterval(id);
-  }, [loadTodayNetWeight]);
 
   const allPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
   const someSelected = selected.size > 0;
@@ -350,26 +331,12 @@ export default function Reports() {
         </div>
       </header>
 
-      <section className="card border border-brand-800/40 bg-gradient-to-r from-brand-950/50 to-slate-900/60 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wider text-brand-300">Today&apos;s Net Weight</p>
-            <p className="mt-1 text-sm text-slate-400">Closed tickets completed today</p>
-          </div>
-          <div className="text-right">
-            <p className="text-2xl font-semibold tabular-nums text-white">{tons(todayNetWeight)} t</p>
-            <p className="text-xs tabular-nums text-slate-400">{todayNetWeight.toLocaleString('en-IN')} kg</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <SummaryCard label="Total Tickets" value={summary.total} />
         <SummaryCard label="Open Tickets" value={summary.open} />
         <SummaryCard label="Closed Tickets" value={summary.closed} />
         <SummaryCard label="Total Gross" value={`${summary.gross?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.gross)} t`} />
         <SummaryCard label="Total Tare" value={`${summary.tare?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.tare)} t`} />
-        <SummaryCard label="Total Net" value={`${summary.net?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.net)} t`} />
         <SummaryCard label="Total Vehicles" value={summary.vehicles} />
         <SummaryCard label="Reports Generated" value={summary.reportsGenerated} />
       </section>

@@ -94,7 +94,6 @@ export default function Dashboard() {
   }, [load]);
 
   const activeStep = stepIndex(workflowState);
-  const tons = ((todayStats.totalWeight || 0) / 1000).toFixed(2);
   const tableRows = recentTransactions.slice(0, 10);
 
   return (
@@ -104,11 +103,10 @@ export default function Dashboard() {
         <p className="mt-1 text-sm text-slate-400">Live operations overview</p>
       </header>
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <StatCard label="Today's Transactions" value={todayStats.total ?? 0} />
         <StatCard label="Completed" value={todayStats.completed ?? 0} />
         <StatCard label="Pending Sync" value={pendingSync} />
-        <StatCard label="Total Net Weight" value={`${tons} t`} sub="net weight today" />
       </section>
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
