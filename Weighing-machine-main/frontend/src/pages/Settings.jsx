@@ -545,45 +545,6 @@ export default function Settings() {
                 )}
               </div>
             )}
-            {f.key === 'WEIGHBRIDGE_STOP_BITS' && (
-              <div className="mb-4 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3">
-                <label className="flex items-center justify-between gap-3 cursor-pointer">
-                  <div>
-                    <p className="text-sm text-slate-200">Weighbridge test mode</p>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Use dummy scale weight instead of the serial port. Save settings and restart
-                      devices to apply.
-                    </p>
-                  </div>
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-brand-500"
-                    checked={
-                      values.USE_MOCK_WEIGHBRIDGE === 'true' ||
-                      values.USE_MOCK_WEIGHBRIDGE === true
-                    }
-                    onChange={(e) => update('USE_MOCK_WEIGHBRIDGE', e.target.checked ? 'true' : 'false')}
-                  />
-                </label>
-                {(values.USE_MOCK_WEIGHBRIDGE === 'true' || values.USE_MOCK_WEIGHBRIDGE === true) && (
-                  <label className="mt-3 block text-sm">
-                    <span className="text-slate-400">Test weight (kg)</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step={100}
-                      className="field-input mt-1 w-full"
-                      value={values.SIMULATE_WEIGHT_KG ?? ''}
-                      onChange={(e) => update('SIMULATE_WEIGHT_KG', e.target.value)}
-                      placeholder="e.g. 15000"
-                    />
-                    <p className="text-xs text-slate-500 mt-1">
-                      Shown on the weighment screen and external display while test mode is on.
-                    </p>
-                  </label>
-                )}
-              </div>
-            )}
             {f.key === 'EXTERNAL_DISPLAY_DECIMAL_PLACES' && (
               <div className="mb-3 flex items-center gap-2">
                 <button

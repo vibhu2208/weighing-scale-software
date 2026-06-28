@@ -1,5 +1,5 @@
 /** Display ticket lifecycle for UI badges (prefers ticket_status over legacy status). */
-import { isHywa } from './vehicleTypes.js';
+import { isHywa, resolveVehicleType } from './vehicleTypes.js';
 
 export function ticketStatusLabel(transaction) {
   if (!transaction) return '—';
@@ -31,7 +31,7 @@ export function isClosedTicket(transaction) {
 export function isClosableOpenTicket(transaction) {
   if (!transaction?.id) return false;
   if (transaction.ticket_status !== 'OPEN') return false;
-  const vehicleType = transaction.vehicle?.vehicle_type;
+  const vehicleType = resolveVehicleType(transaction.vehicle, transaction);
   if (isHywa(vehicleType)) {
     const gross = Number(transaction.gross_weight);
     return transaction.gross_weight != null && Number.isFinite(gross) && gross > 0;

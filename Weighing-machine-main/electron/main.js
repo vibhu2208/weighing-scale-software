@@ -298,7 +298,11 @@ async function startup() {
       initPackagedStorage(app.getPath('userData'));
       const userEnv = path.join(app.getPath('userData'), 'weighbridge-data', '.env');
       if (fs.existsSync(userEnv)) {
-        require('dotenv').config({ path: userEnv });
+        try {
+          require('dotenv').config({ path: userEnv });
+        } catch (e) {
+          console.warn('[main] user .env not loaded:', e && e.message);
+        }
       }
     }
 

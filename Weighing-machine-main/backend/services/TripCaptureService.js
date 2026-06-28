@@ -693,8 +693,8 @@ async function closeTicket({
 }
 
 /**
- * Admin-only: close an open HYWA ticket with manual tare weight, close time, photo, and trip fields.
- * Report generation and sync behave the same as a normal weighment close.
+ * Admin-only: close an open ticket with manual close weight, close time, photo, and trip fields.
+ * HYWA closes with tare; standard vehicles close with gross. Report/sync match normal close.
  */
 async function manualCloseHywaTicket(data = {}) {
   const OperatorAuthService = require('./OperatorAuthService');
@@ -711,16 +711,16 @@ async function manualCloseHywaTicket(data = {}) {
   const truckNumber = String(openTicket.truck_number || '').trim().toUpperCase();
   const vehicle = VehicleService.findByNumber(truckNumber);
   const vehicleType = resolveVehicleType(vehicle, openTicket);
-  if (!isHywa(vehicleType)) {
-    throw new Error('Manual close is only available for HYWA vehicles');
-  }
+  const hywa = isHywa(vehicleType);
   if (!openTicketHasFirstWeigh(openTicket, vehicleType)) {
-    throw new Error('Open HYWA ticket has no gross weight — cannot close');
+    throw new Error(
+      hywa ? 'Open ticket has no gross weight — cannot close' : 'Open ticket has no tare weight — cannot close',
+    );
   }
 
   const weightKg = Math.round(Number(data.weightKg));
   if (!Number.isFinite(weightKg) || weightKg <= 0) {
-    throw new Error('Valid tare weight (kg) is required');
+    throw new Error(hywa ? 'Valid tare weight (kg) is required' : 'Valid gross weight (kg) is required');
   }
 
   let capturedAtOverride;

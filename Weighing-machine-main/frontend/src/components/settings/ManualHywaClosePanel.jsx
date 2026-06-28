@@ -2,7 +2,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import ClosedReportManagePanel from './ClosedReportManagePanel.jsx';
 import { authAPI, deviceAPI, settingsAPI, ticketAPI } from '../../api/ipc.js';
 import { isClosableOpenTicket } from '../../lib/ticketStatus.js';
-import { isHywa, resolveVehicleType } from '../../lib/vehicleTypes.js';
+import {
+  openTicketFirstWeighKg,
+  openTicketFirstWeighLabel,
+  resolveAdjustmentPass,
+  resolveVehicleType,
+} from '../../lib/vehicleTypes.js';
 
 const PHOTO_SLOTS = [
   { slot: 1, label: 'Camera 1', required: true },
@@ -33,9 +38,9 @@ function fmtKg(kg) {
   return `${Number(kg).toLocaleString('en-IN')} kg`;
 }
 
-function isHywaClosableTicket(ticket) {
-  const vehicleType = resolveVehicleType(null, ticket);
-  return isHywa(vehicleType) && isClosableOpenTicket(ticket);
+function closeWeightLabel(vehicleType) {
+  const pass = resolveAdjustmentPass({ vehicleType, isClose: true });
+  return pass === 'TARE' ? 'Tare' : 'Gross';
 }
 
 function readFileAsDataUrl(file) {
@@ -64,9 +69,9 @@ export default function ManualHywaClosePanel() {
 
   const refreshTickets = useCallback(async () => {
     const list = await ticketAPI.listOpen();
-    const hywa = (list || []).filter(isHywaClosableTicket);
-    setOpenTickets(hywa);
-    return hywa;
+    const closable = (list || []).filter(isClosableOpenTicket);
+    setOpenTickets(closable);
+    return closable;
   }, []);
 
   useEffect(() => {
@@ -168,12 +173,14 @@ export default function ManualHywaClosePanel() {
     setError('');
     setSuccess('');
     if (!selectedId) {
-      setError('Select an open HYWA ticket');
+      setError('Select an open ticket');
       return;
     }
+    const vehicleType = resolveVehicleType(selectedTicket?.vehicle, selectedTicket);
+    const closeLabel = closeWeightLabel(vehicleType).toLowerCase();
     const weightKg = Number(form.weightKg);
     if (!Number.isFinite(weightKg) || weightKg <= 0) {
-      setError('Enter a valid tare weight (kg)');
+      setError(`Enter a valid ${closeLabel} weight (kg)`);
       return;
     }
     if (!form.photos[0]?.imageBase64) {
@@ -284,10 +291,10 @@ export default function ManualHywaClosePanel() {
           </div>
 
       {openTickets.length === 0 ? (
-        <p className="text-xs text-slate-500">No open HYWA tickets with gross weight.</p>
+        <p className="text-xs text-slate-500">No open tickets ready to close.</p>
       ) : (
         <label className="block text-xs text-slate-400">
-          Open HYWA ticket
+          Open ticket
           <select
             className="field-input w-full mt-1 text-sm"
             value={selectedId}
@@ -303,23 +310,37 @@ export default function ManualHywaClosePanel() {
             }}
           >
             <option value="">Select ticket…</option>
-            {openTickets.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.slip_number} · {t.truck_number} · gross {fmtKg(t.gross_weight)}
-              </option>
-            ))}
+            {openTickets.map((t) => {
+              const vType = resolveVehicleType(t.vehicle, t);
+              const firstLabel = openTicketFirstWeighLabel(vType).toLowerCase();
+              const firstKg = openTicketFirstWeighKg(t, vType);
+              const typeLabel = vType ? String(vType) : 'vehicle';
+              return (
+                <option key={t.id} value={t.id}>
+                  {t.slip_number} · {t.truck_number} · {typeLabel} · {firstLabel} {fmtKg(firstKg)}
+                </option>
+              );
+            })}
           </select>
         </label>
       )}
 
-      {selectedTicket && (
+      {selectedTicket && (() => {
+        const vehicleType = resolveVehicleType(selectedTicket.vehicle, selectedTicket);
+        const firstLabel = openTicketFirstWeighLabel(vehicleType);
+        const closeLabel = closeWeightLabel(vehicleType);
+        const firstKg = openTicketFirstWeighKg(selectedTicket, vehicleType);
+        return (
         <div className="space-y-3 rounded-lg border border-slate-700/60 bg-slate-900/40 p-3">
           <p className="text-xs text-slate-400">
-            Gross (open): <span className="text-white font-mono">{fmtKg(selectedTicket.gross_weight)}</span>
+            {firstLabel} (open): <span className="text-white font-mono">{fmtKg(firstKg)}</span>
+            {vehicleType && (
+              <span className="text-slate-500"> · {vehicleType}</span>
+            )}
           </p>
 
           <label className="block text-xs text-slate-400">
-            Tare weight (kg) *
+            {closeLabel} weight (kg) *
             <input
               type="number"
               min="1"
@@ -327,7 +348,7 @@ export default function ManualHywaClosePanel() {
               className="field-input w-full mt-1 text-sm"
               value={form.weightKg}
               onChange={(e) => updateField('weightKg', e.target.value)}
-              placeholder="Empty truck weight"
+              placeholder={closeLabel === 'Tare' ? 'Empty truck weight' : 'Loaded truck weight'}
             />
           </label>
 
@@ -376,7 +397,8 @@ export default function ManualHywaClosePanel() {
             {busy ? 'Closing…' : 'Close ticket & generate report'}
           </button>
         </div>
-      )}
+        );
+      })()}
 
       {error && <p className="text-xs text-red-400">{error}</p>}
       {success && <p className="text-xs text-emerald-400">{success}</p>}
