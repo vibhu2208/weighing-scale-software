@@ -15,7 +15,7 @@ function toDatetimeLocalValue(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function fmtKg(kg) {
@@ -290,6 +290,7 @@ export default function ClosedReportManagePanel() {
               {hywa ? 'Gross date & time (open)' : 'Tare date & time (open)'}
               <input
                 type="datetime-local"
+                step="1"
                 className="field-input w-full mt-1 text-sm"
                 value={form.timestamp_in}
                 onChange={(e) => updateField('timestamp_in', e.target.value)}
@@ -299,6 +300,7 @@ export default function ClosedReportManagePanel() {
               {hywa ? 'Tare date & time (close)' : 'Gross date & time (close)'}
               <input
                 type="datetime-local"
+                step="1"
                 className="field-input w-full mt-1 text-sm"
                 value={form.timestamp_out}
                 onChange={(e) => updateField('timestamp_out', e.target.value)}

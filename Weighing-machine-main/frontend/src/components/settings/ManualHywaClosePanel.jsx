@@ -30,7 +30,7 @@ const EMPTY_FORM = {
 function toDatetimeLocalValue(date = new Date()) {
   const d = date instanceof Date ? date : new Date(date);
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function fmtKg(kg) {
@@ -356,6 +356,7 @@ export default function ManualHywaClosePanel() {
             Close date &amp; time *
             <input
               type="datetime-local"
+              step="1"
               className="field-input w-full mt-1 text-sm"
               value={form.timestampOut}
               onChange={(e) => updateField('timestampOut', e.target.value)}
