@@ -101,6 +101,7 @@ const electronAPI = {
     'listRecentClosedReports',
     'getClosedReportBySlip',
     'adminUpdateClosedReport',
+    'updateSlipNumber',
     'adminDeleteClosedReport',
   ]),
 

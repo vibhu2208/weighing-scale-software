@@ -120,14 +120,18 @@ function touchManualHywaCloseSession() {
   }
 }
 
-function assertManualHywaSectionAccess() {
+function assertAdminAccess() {
   if (!isAdminSessionActive()) {
     throw new Error('Admin session required — unlock Advance Setting first');
   }
+  touchSession();
+}
+
+function assertManualHywaSectionAccess() {
+  assertAdminAccess();
   if (!isManualHywaCloseSessionActive()) {
     throw new Error('Passcode required — unlock Manual HYWA section first');
   }
-  touchSession();
   touchManualHywaCloseSession();
 }
 
@@ -163,5 +167,6 @@ module.exports = {
   getManualHywaCloseSession,
   isManualHywaCloseSessionActive,
   touchManualHywaCloseSession,
+  assertAdminAccess,
   assertManualHywaSectionAccess,
 };

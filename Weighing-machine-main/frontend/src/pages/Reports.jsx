@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { reportAPI } from '../api/ipc.js';
+import { reportAPI, transactionAPI } from '../api/ipc.js';
 import Badge from '../components/shared/Badge.jsx';
 import ExportCenter from '../components/reports/ExportCenter.jsx';
 import ReportDownloadPanel from '../components/reports/ReportDownloadPanel.jsx';
 import DateRangeCalendar from '../components/reports/DateRangeCalendar.jsx';
 import PhotoGalleryModal from '../components/reports/PhotoGalleryModal.jsx';
 import ReportPreviewModal from '../components/reports/ReportPreviewModal.jsx';
+import EditSlipModal from '../components/reports/EditSlipModal.jsx';
 import {
   isClosedTicket,
   ticketStatusLabel,
@@ -86,6 +87,7 @@ export default function Reports() {
 
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState(EMPTY_SUMMARY);
+  const [todayNetWeight, setTodayNetWeight] = useState(0);
   const [pagination, setPagination] = useState({ page: 0, pageSize: PAGE_SIZE, total: 0, totalPages: 1 });
   const [filterOptions, setFilterOptions] = useState({ operators: [], materials: [] });
 
@@ -96,6 +98,7 @@ export default function Reports() {
 
   const [exportOpen, setExportOpen] = useState(false);
   const [previewTicket, setPreviewTicket] = useState(null);
+  const [editSlipTicket, setEditSlipTicket] = useState(null);
   const [galleryTicket, setGalleryTicket] = useState(null);
   const [calendarOpen, setCalendarOpen] = useState(false);
 
@@ -128,10 +131,14 @@ export default function Reports() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await reportAPI.getPaginatedReport(filters);
+      const [data, todayStats] = await Promise.all([
+        reportAPI.getPaginatedReport(filters),
+        transactionAPI.getTodayStats(),
+      ]);
       setRows(data?.rows || []);
       setSummary({ ...EMPTY_SUMMARY, ...(data?.summary || {}) });
       setPagination(data?.pagination || { page: 0, pageSize: PAGE_SIZE, total: 0, totalPages: 1 });
+      setTodayNetWeight(todayStats?.totalWeight || 0);
       setSelected(new Set());
     } catch (e) {
       console.error(e);
@@ -311,6 +318,26 @@ export default function Reports() {
     }
   };
 
+  const refreshTicketRow = useCallback((updated) => {
+    const txn = updated?.transaction || updated;
+    if (!txn?.id) return;
+    setRows((prev) =>
+      prev.map((row) => (row.id === txn.id ? { ...row, ...txn } : row)),
+    );
+    setGalleryTicket((current) => {
+      if (!current || current.transactionId !== txn.id) return current;
+      return {
+        ...current,
+        slip_number: txn.slip_number || current.slip_number,
+        images: listTripCameraImages(txn),
+      };
+    });
+    setPreviewTicket((current) => {
+      if (!current || current.id !== txn.id) return current;
+      return { ...current, ...txn };
+    });
+  }, []);
+
   const applySearch = () => {
     setSearch(searchInput);
     setPage(0);
@@ -333,12 +360,18 @@ export default function Reports() {
         </div>
       </header>
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+      <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
         <SummaryCard label="Total Tickets" value={summary.total} />
         <SummaryCard label="Open Tickets" value={summary.open} />
         <SummaryCard label="Closed Tickets" value={summary.closed} />
         <SummaryCard label="Total Gross" value={`${summary.gross?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.gross)} t`} />
         <SummaryCard label="Total Tare" value={`${summary.tare?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.tare)} t`} />
+        <SummaryCard label="Total Net" value={`${summary.net?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.net)} t`} />
+        <SummaryCard
+          label="Total Net Weight Today"
+          value={`${todayNetWeight.toLocaleString('en-IN')} kg`}
+          sub={`${tons(todayNetWeight)} t · closed tickets weighed out today`}
+        />
         <SummaryCard label="Total Vehicles" value={summary.vehicles} />
         <SummaryCard label="Reports Generated" value={summary.reportsGenerated} />
       </section>
@@ -606,9 +639,31 @@ export default function Reports() {
                               <button
                                 type="button"
                                 className="text-xs text-brand-300 hover:text-brand-200"
-                                onClick={() => setGalleryTicket({ slip_number: t.slip_number, images: listTripCameraImages(t) })}
+                                onClick={() =>
+                                  setGalleryTicket({
+                                    transactionId: t.id,
+                                    slip_number: t.slip_number,
+                                    images: listTripCameraImages(t),
+                                    editable: isClosedTicket(t),
+                                  })
+                                }
                               >
                                 {photoLabel(photoCount)}
+                              </button>
+                            ) : isClosedTicket(t) ? (
+                              <button
+                                type="button"
+                                className="text-xs text-brand-300 hover:text-brand-200"
+                                onClick={() =>
+                                  setGalleryTicket({
+                                    transactionId: t.id,
+                                    slip_number: t.slip_number,
+                                    images: [],
+                                    editable: true,
+                                  })
+                                }
+                              >
+                                Add photos
                               </button>
                             ) : (
                               '—'
@@ -618,6 +673,13 @@ export default function Reports() {
                             <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs items-center">
                               <button type="button" className="text-brand-300" onClick={() => setPreviewTicket(t)}>
                                 Preview
+                              </button>
+                              <button
+                                type="button"
+                                className="text-amber-300 hover:text-amber-200"
+                                onClick={() => setEditSlipTicket(t)}
+                              >
+                                Edit Slip
                               </button>
                               {isClosedTicket(t) && (
                                 <button
@@ -701,12 +763,28 @@ export default function Reports() {
         <ReportPreviewModal
           transactionId={previewTicket.id}
           slipNumber={previewTicket.slip_number}
+          ticket={previewTicket}
+          editable={isClosedTicket(previewTicket)}
           onClose={() => setPreviewTicket(null)}
+          onPhotosUpdated={refreshTicketRow}
+        />
+      )}
+
+      {editSlipTicket && (
+        <EditSlipModal
+          ticket={editSlipTicket}
+          onClose={() => setEditSlipTicket(null)}
+          onSaved={refreshTicketRow}
         />
       )}
 
       {galleryTicket && (
-        <PhotoGalleryModal ticket={galleryTicket} onClose={() => setGalleryTicket(null)} />
+        <PhotoGalleryModal
+          ticket={galleryTicket}
+          editable={galleryTicket.editable}
+          onClose={() => setGalleryTicket(null)}
+          onPhotosUpdated={refreshTicketRow}
+        />
       )}
     </div>
   );

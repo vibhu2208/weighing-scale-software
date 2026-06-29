@@ -1,14 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { reportAPI, settingsAPI } from '../../api/ipc.js';
 import { isHywa } from '../../lib/vehicleTypes.js';
-
-const PHOTO_SLOTS = [
-  { slot: 1, label: 'Camera 1' },
-  { slot: 2, label: 'Camera 2' },
-  { slot: 3, label: 'Camera 3' },
-];
-
-const EMPTY_PHOTOS = PHOTO_SLOTS.map(() => ({ imageBase64: '', imageName: '' }));
+import LocalImage from '../shared/LocalImage.jsx';
+import ReportPhotosEditor from '../reports/ReportPhotosEditor.jsx';
+import { listReportPhotoSlots, listTripCameraImages } from '../../lib/tripPhotos.js';
 
 function toDatetimeLocalValue(iso) {
   if (!iso) return '';
@@ -23,14 +18,6 @@ function fmtKg(kg) {
   return `${Number(kg).toLocaleString('en-IN')} kg`;
 }
 
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Could not read image file'));
-    reader.readAsDataURL(file);
-  });
-}
 
 function buildEditForm(report) {
   return {
@@ -42,7 +29,6 @@ function buildEditForm(report) {
     customer_name: report?.customer_name || '',
     destination: report?.destination || '',
     operator_name: report?.operator_name || '',
-    photos: EMPTY_PHOTOS.map(() => ({ imageBase64: '', imageName: '' })),
   };
 }
 
@@ -58,6 +44,7 @@ export default function ClosedReportManagePanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [photoEditorOpen, setPhotoEditorOpen] = useState(false);
 
   const refreshRecent = useCallback(async (search = '') => {
     try {
@@ -112,26 +99,13 @@ export default function ClosedReportManagePanel() {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  async function onPhotoChange(slotIndex, e) {
-    const file = e.target.files?.[0];
-    if (!file) {
-      setForm((f) => {
-        const photos = [...f.photos];
-        photos[slotIndex] = { imageBase64: '', imageName: '' };
-        return { ...f, photos };
-      });
-      return;
+  function handlePhotosSaved(updated) {
+    const txn = updated?.transaction || updated;
+    if (txn) {
+      setLoaded(txn);
+      setSuccess(`Photos updated for ${txn.slip_number} and PDF regenerated.`);
     }
-    try {
-      const imageBase64 = await readFileAsDataUrl(file);
-      setForm((f) => {
-        const photos = [...f.photos];
-        photos[slotIndex] = { imageBase64, imageName: file.name };
-        return { ...f, photos };
-      });
-    } catch (err) {
-      setError(err.message || 'Could not read image file');
-    }
+    setPhotoEditorOpen(false);
   }
 
   async function saveReport() {
@@ -143,11 +117,6 @@ export default function ClosedReportManagePanel() {
     setError('');
     setSuccess('');
     try {
-      const manualImages = PHOTO_SLOTS.map((slot, index) => ({
-        slot: slot.slot,
-        imageBase64: form.photos[index]?.imageBase64 || '',
-      })).filter((item) => item.imageBase64);
-
       const result = await reportAPI.adminUpdateClosedReport({
         slipNumber: loaded.slip_number,
         gross_weight: form.gross_weight,
@@ -158,7 +127,6 @@ export default function ClosedReportManagePanel() {
         customer_name: form.customer_name.trim(),
         destination: form.destination.trim(),
         operator_name: form.operator_name.trim(),
-        manualImages: manualImages.length ? manualImages : undefined,
       });
 
       if (result?.ok === false) {
@@ -211,6 +179,7 @@ export default function ClosedReportManagePanel() {
 
   const vehicleType = loaded?.vehicle?.vehicle_type || loaded?.vehicle_type;
   const hywa = isHywa(vehicleType);
+  const reportPhotos = loaded ? listTripCameraImages(loaded) : [];
 
   return (
     <div className="mt-6 pt-4 border-t border-slate-700/60 space-y-3">
@@ -314,22 +283,39 @@ export default function ClosedReportManagePanel() {
           <EditField label="Operator" list={operators} value={form.operator_name} onChange={(v) => updateField('operator_name', v)} />
 
           <div className="space-y-2">
-            <p className="text-xs text-slate-400">Replace departure photos (optional)</p>
-            {PHOTO_SLOTS.map((slot, index) => (
-              <label key={slot.slot} className="block text-xs text-slate-400">
-                {slot.label}
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="block w-full mt-1 text-xs text-slate-300 file:mr-2 file:rounded file:border-0 file:bg-slate-700 file:px-2 file:py-1 file:text-xs file:text-white"
-                  onChange={(e) => onPhotoChange(index, e)}
-                />
-                {form.photos[index]?.imageName && (
-                  <span className="text-[10px] text-slate-500 mt-1 block">
-                    {form.photos[index].imageName}
-                  </span>
-                )}
-              </label>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-slate-400">Report photos</p>
+              <button
+                type="button"
+                className="btn-ghost text-xs py-0.5 text-brand-300"
+                onClick={() => setPhotoEditorOpen(true)}
+              >
+                {reportPhotos.length > 0 ? 'Edit photos' : 'Add photos'}
+              </button>
+            </div>
+            {listReportPhotoSlots(reportPhotos, { includeEmpty: true }).map((group) => (
+              <div key={group.pass}>
+                <p className="mb-1 text-[10px] uppercase tracking-wider text-slate-500">{group.title}</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {group.items.map((cam) =>
+                    cam.path ? (
+                      <LocalImage
+                        key={`${group.pass}-${cam.slot}`}
+                        path={cam.path}
+                        alt={cam.label}
+                        className="h-16 w-full rounded border border-slate-700 object-cover bg-slate-800"
+                      />
+                    ) : (
+                      <div
+                        key={`${group.pass}-${cam.slot}`}
+                        className="flex h-16 w-full items-center justify-center rounded border border-dashed border-slate-600 bg-slate-800 text-[10px] text-slate-500"
+                      >
+                        Empty
+                      </div>
+                    ),
+                  )}
+                </div>
+              </div>
             ))}
           </div>
 
@@ -356,6 +342,17 @@ export default function ClosedReportManagePanel() {
 
       {error && <p className="text-xs text-red-400">{error}</p>}
       {success && <p className="text-xs text-emerald-400">{success}</p>}
+
+      {photoEditorOpen && loaded && (
+        <ReportPhotosEditor
+          transactionId={loaded.id}
+          slipNumber={loaded.slip_number}
+          images={reportPhotos}
+          editable
+          onClose={() => setPhotoEditorOpen(false)}
+          onSaved={handlePhotosSaved}
+        />
+      )}
     </div>
   );
 }

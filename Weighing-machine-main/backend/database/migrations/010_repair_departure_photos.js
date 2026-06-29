@@ -43,6 +43,17 @@ function up(db) {
       (row.gross_weight != null && row.tare_weight != null);
     if (!closed) continue;
 
+    const vehicle = db
+      .prepare(
+        `SELECT vehicle_type FROM vehicles
+         WHERE vehicle_number = (SELECT truck_number FROM transactions WHERE id = ?)
+         LIMIT 1`,
+      )
+      .get(row.id);
+    if (String(vehicle?.vehicle_type || '').trim().toLowerCase() === 'hywa') {
+      continue;
+    }
+
     const snaps = parseSnapshots(row.camera_snapshots);
     let grossPaths = pathsFromSnaps(snaps.gross);
 

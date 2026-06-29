@@ -209,6 +209,10 @@ function register(ipcMain) {
     AdminReportService.updateClosedReport(data || {}),
   );
 
+  ipcMain.handle(`${NAMESPACE}:updateSlipNumber`, async (_e, data) =>
+    AdminReportService.updateSlipNumber(data || {}),
+  );
+
   ipcMain.handle(`${NAMESPACE}:adminDeleteClosedReport`, async (_e, data) =>
     AdminReportService.deleteClosedReport(data || {}),
   );

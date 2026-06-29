@@ -134,13 +134,14 @@ async function retryManualSessionPhoto({ sessionId, cameraId, passKey = 'arrival
   };
 }
 
-function finalizeSnapshotsForTransaction(snapshots, transactionId, passKey) {
+function finalizeSnapshotsForTransaction(snapshots, transactionId, passKey, vehicleNumber) {
   const list = validateSnapshots(snapshots, passKey);
   const finalized = [];
+  const saveOpts = { vehicleNumber };
 
   for (const snap of list) {
     const buffer = fs.readFileSync(snap.path);
-    const dest = saveCameraImage(buffer, transactionId, snap.id, passKey);
+    const dest = saveCameraImage(buffer, transactionId, snap.id, passKey, saveOpts);
     finalized.push({ id: snap.id, label: snap.label, path: dest });
   }
 

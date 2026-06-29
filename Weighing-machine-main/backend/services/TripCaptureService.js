@@ -159,7 +159,14 @@ function mapPhotoPaths(snapshots, prefix) {
  * Capture all configured cameras; merge with optional webcam/upload image.
  * @returns {Promise<{ primaryPath: string|null, snapshots: Array }>}
  */
-async function resolveTripCaptures({ imageBase64, imagePath, transactionId, passKey = 'capture' }) {
+async function resolveTripCaptures({
+  imageBase64,
+  imagePath,
+  transactionId,
+  passKey = 'capture',
+  vehicleNumber,
+}) {
+  const saveOpts = { vehicleNumber };
   const snapshots = [];
   const explicitCapture = !!(imageBase64 || imagePath);
 
@@ -168,17 +175,17 @@ async function resolveTripCaptures({ imageBase64, imagePath, transactionId, pass
     if (!resolved || !fs.existsSync(resolved)) {
       throw new Error('Camera image file is missing on disk');
     }
-    const savedPath = saveImage(fs.readFileSync(resolved), transactionId, passKey);
+    const savedPath = saveImage(fs.readFileSync(resolved), transactionId, passKey, saveOpts);
     snapshots.push({ id: 'uploaded', label: 'Capture', path: savedPath });
   } else if (imageBase64) {
     const imageBuffer = parseImageBase64(imageBase64);
-    const savedPath = saveImage(imageBuffer, transactionId, passKey);
+    const savedPath = saveImage(imageBuffer, transactionId, passKey, saveOpts);
     snapshots.push({ id: 'webcam', label: 'Webcam', path: savedPath });
   }
 
   if (!explicitCapture) {
     const { snapshots: rtspSnapshots, failures: rtspFailures } =
-      await CameraCaptureService.captureAllSnapshots(transactionId, passKey);
+      await CameraCaptureService.captureAllSnapshots(transactionId, passKey, saveOpts);
     if (rtspFailures?.length) {
       logger.warn('Some cameras failed during trip capture', {
         transactionId,
@@ -206,7 +213,7 @@ async function resolveTripCaptures({ imageBase64, imagePath, transactionId, pass
         if (legacyPath) {
           const fs = require('fs');
           const buffer = fs.readFileSync(legacyPath);
-          const savedPath = saveImage(buffer, transactionId, passKey);
+          const savedPath = saveImage(buffer, transactionId, passKey, saveOpts);
           snapshots.push({ id: 'cam-primary', label: 'Camera', path: savedPath });
         }
       }
@@ -231,11 +238,12 @@ async function resolveTripCaptures({ imageBase64, imagePath, transactionId, pass
   };
 }
 
-function resolveConfirmedSnapshots({ confirmedSnapshots, transactionId, passKey }) {
+function resolveConfirmedSnapshots({ confirmedSnapshots, transactionId, passKey, vehicleNumber }) {
   const finalized = ManualPhotoCaptureService.finalizeSnapshotsForTransaction(
     confirmedSnapshots,
     transactionId,
     passKey,
+    vehicleNumber,
   );
   return {
     primaryPath: pickPrimaryPath(finalized),
@@ -249,11 +257,12 @@ async function resolveCapturesForSave({
   transactionId,
   passKey,
   confirmedSnapshots,
+  vehicleNumber,
 }) {
   if (confirmedSnapshots?.length) {
-    return resolveConfirmedSnapshots({ confirmedSnapshots, transactionId, passKey });
+    return resolveConfirmedSnapshots({ confirmedSnapshots, transactionId, passKey, vehicleNumber });
   }
-  return resolveTripCaptures({ imageBase64, imagePath, transactionId, passKey });
+  return resolveTripCaptures({ imageBase64, imagePath, transactionId, passKey, vehicleNumber });
 }
 
 /**
@@ -479,6 +488,7 @@ async function openTicketSave({
     confirmedSnapshots,
     transactionId: txnId,
     passKey: 'arrival',
+    vehicleNumber: truckNumber,
   });
 
   if (!primaryPath && isCameraRequired()) {
@@ -514,6 +524,9 @@ async function openTicketSave({
     destination: destination || null,
     operator_name: operator_name || null,
     ...arrivalPhotos,
+    departure_photo_1: null,
+    departure_photo_2: null,
+    departure_photo_3: null,
   });
 
   RfidTagSelector.unlock();
@@ -606,6 +619,7 @@ async function closeTicket({
         confirmedSnapshots,
         transactionId: txnId,
         passKey: 'departure',
+        vehicleNumber: truckNumber,
       });
 
   if (!primaryPath && isCameraRequired() && !preresolvedCaptures) {
@@ -737,6 +751,7 @@ async function manualCloseHywaTicket(data = {}) {
   }
 
   const txnId = openTicket.id;
+  const saveOpts = { vehicleNumber: truckNumber };
   const snapshots = [];
   if (Array.isArray(data.manualImages)) {
     for (const item of data.manualImages) {
@@ -746,12 +761,12 @@ async function manualCloseHywaTicket(data = {}) {
         throw new Error('Invalid photo slot — use 1, 2, or 3');
       }
       const imageBuffer = parseImageBase64(item.imageBase64);
-      const savedPath = saveImage(imageBuffer, txnId, `departure-cam-${slot}`);
+      const savedPath = saveImage(imageBuffer, txnId, `departure-cam-${slot}`, saveOpts);
       snapshots.push({ id: `cam-${slot}`, label: `Camera ${slot}`, path: savedPath });
     }
   } else if (data.imageBase64) {
     const imageBuffer = parseImageBase64(data.imageBase64);
-    const savedPath = saveImage(imageBuffer, txnId, 'departure');
+    const savedPath = saveImage(imageBuffer, txnId, 'departure', saveOpts);
     snapshots.push({ id: 'cam-1', label: 'Camera 1', path: savedPath });
   }
 

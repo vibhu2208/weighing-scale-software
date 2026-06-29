@@ -8,7 +8,7 @@ const { normalizePath, PATHS } = require('./fileStorage');
 const {
   parseCameraSnapshots,
   listTripCameraImages,
-  photoPathFromSnapshots,
+  photoPathForSlot,
 } = require('./tripPhotos');
 const { isHywa, grossWeightTimestamp, tareWeightTimestamp, netWeightTimestamp } = require('./vehicleTypes');
 
@@ -73,42 +73,6 @@ function weightLine(label, kg, timestampIso) {
     <span class="field-label">${escapeHtml(label)}</span> : ${formatKgSlip(kg)}
     <span class="weight-ts">(${escapeHtml(tsText)})</span>
   </div>`;
-}
-
-function departureDuplicatesArrival(row, candidatePath) {
-  if (!candidatePath) return false;
-  const resolvedCandidate = normalizePath(candidatePath);
-  if (!resolvedCandidate) return false;
-  for (const col of ['arrival_photo_1', 'arrival_photo_2', 'arrival_photo_3', 'tare_image_path']) {
-    const raw = row?.[col];
-    if (!raw) continue;
-    const resolved = normalizePath(raw);
-    if (resolved && resolved === resolvedCandidate) return true;
-  }
-  return false;
-}
-
-function photoPathForSlot(row, passLabel, slotIndex) {
-  const prefix = passLabel === 'departure' ? 'departure' : 'arrival';
-  const columnPath = row[`${prefix}_photo_${slotIndex}`];
-  if (columnPath) {
-    if (passLabel === 'departure' && departureDuplicatesArrival(row, columnPath)) {
-      return null;
-    }
-    return columnPath;
-  }
-
-  const fromSnapshots = photoPathFromSnapshots(row, passLabel, slotIndex);
-  if (fromSnapshots) {
-    if (passLabel === 'departure' && departureDuplicatesArrival(row, fromSnapshots)) {
-      return null;
-    }
-    return fromSnapshots;
-  }
-
-  const items = listTripCameraImages(row).filter((cam) => cam.pass === passLabel);
-  const byCamId = items.find((cam) => cam.id === `cam-${slotIndex}`);
-  return byCamId?.path || items[slotIndex - 1]?.path || null;
 }
 
 function buildWeighmentPhotoRow(row, passLabel, sectionTitle) {

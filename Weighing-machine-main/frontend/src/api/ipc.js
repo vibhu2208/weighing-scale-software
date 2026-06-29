@@ -129,6 +129,7 @@ export const reportAPI = makeProxy('reports', [
   'listRecentClosedReports',
   'getClosedReportBySlip',
   'adminUpdateClosedReport',
+  'updateSlipNumber',
   'adminDeleteClosedReport',
 ]);
 

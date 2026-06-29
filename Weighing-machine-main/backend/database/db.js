@@ -26,6 +26,10 @@ const migration010 = require('./migrations/010_repair_departure_photos');
 const migration011 = require('./migrations/011_trip_customer_destination_operator');
 const migration012 = require('./migrations/012_remote_pg_id');
 const migration013 = require('./migrations/013_mcg_status');
+const migration014 = require('./migrations/014_repair_hywa_departure_photos');
+const migration015 = require('./migrations/015_restore_hywa_departure_photos');
+const migration016 = require('./migrations/016_fix_hywa_swapped_photos');
+const migration017 = require('./migrations/017_backfill_hywa_photo_columns');
 
 let db = null;
 
@@ -60,6 +64,10 @@ function runMigrations(handle = db) {
     migration011,
     migration012,
     migration013,
+    migration014,
+    migration015,
+    migration016,
+    migration017,
   ];
 
   const apply = handle.transaction(() => {

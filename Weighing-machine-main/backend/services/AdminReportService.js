@@ -5,10 +5,18 @@ const path = require('path');
 const TransactionService = require('./TransactionService');
 const ReportService = require('./ReportService');
 const OperatorAuthService = require('./OperatorAuthService');
+const SlipNumberService = require('./SlipNumberService');
 const { saveImage } = require('../utils/fileStorage');
 const { PATHS, normalizePath } = require('../utils/fileStorage');
-const { isClosedTrip } = require('../utils/tripPhotos');
-const { isHywa, resolveVehicleType } = require('../utils/vehicleTypes');
+const {
+  isClosedTrip,
+  cameraSlotFromId,
+  existingPassSnapshots,
+  mergeSnapshotsBySlot,
+  photoColumnUpdates,
+  setPassSnapshots,
+} = require('../utils/tripPhotos');
+const { resolveVehicleType, isHywa } = require('../utils/vehicleTypes');
 const { TICKET_STATUS } = require('../utils/constants');
 const { toPublicTransaction } = require('../utils/transactionPublic');
 const logger = require('../utils/logger');
@@ -28,48 +36,37 @@ function parseImageBase64(imageBase64) {
   return buffer;
 }
 
-function parseCameraSnapshots(raw) {
-  if (!raw) return { tare: [], gross: [] };
-  if (typeof raw === 'object') {
-    return { tare: raw.tare || [], gross: raw.gross || [] };
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return { tare: parsed.tare || [], gross: parsed.gross || [] };
-  } catch {
-    return { tare: [], gross: [] };
-  }
+function getSlipPrefix() {
+  const row = getDb().prepare('SELECT prefix FROM slip_counter ORDER BY id LIMIT 1').get();
+  return row?.prefix || 'WB';
 }
 
-function mergeDepartureSnapshots(existing, vehicleType, newSnapshots) {
-  const data = parseCameraSnapshots(existing);
-  const passKey = isHywa(vehicleType) ? 'tare' : 'gross';
-  data[passKey] = newSnapshots;
-  return JSON.stringify(data);
+function normalizeSlipNumber(input) {
+  const raw = String(input || '').trim().toUpperCase();
+  if (!raw) throw new Error('Slip number is required');
+  const match = raw.match(/^([A-Z]+)?(\d+)$/);
+  if (!match) throw new Error('Invalid slip number (e.g. WB0001 or 15)');
+  const prefix = match[1] || getSlipPrefix();
+  const num = parseInt(match[2], 10);
+  if (!Number.isFinite(num) || num <= 0) {
+    throw new Error('Slip number must be greater than zero');
+  }
+  return `${prefix}${String(num).padStart(4, '0')}`;
 }
 
-function mapDeparturePhotoFields(snapshots) {
-  const slots = { 1: null, 2: null, 3: null };
-  for (const snap of snapshots || []) {
-    if (!snap?.path) continue;
-    const match = String(snap.id || '').match(/^cam-(\d+)$/i);
-    const slot = match ? parseInt(match[1], 10) : null;
-    if (slot && slot >= 1 && slot <= 3) {
-      slots[slot] = snap.path;
-      continue;
-    }
-    for (let i = 1; i <= 3; i += 1) {
-      if (!slots[i]) {
-        slots[i] = snap.path;
-        break;
-      }
+function removeOldSlipFiles(oldSlip, keepPaths = new Set()) {
+  const candidates = [
+    path.join(PATHS.REPORTS, `${oldSlip}_report.pdf`),
+    path.join(PATHS.REPORTS, `${oldSlip}.pdf`),
+  ];
+  for (const filePath of candidates) {
+    if (keepPaths.has(path.resolve(filePath))) continue;
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (err) {
+      logger.warn('Failed to remove old slip file', { path: filePath, message: err.message });
     }
   }
-  return {
-    departure_photo_1: slots[1],
-    departure_photo_2: slots[2],
-    departure_photo_3: slots[3],
-  };
 }
 
 function findClosedBySlip(slipNumber) {
@@ -190,30 +187,54 @@ async function updateClosedReport(data = {}) {
   }
 
   if (Array.isArray(data.manualImages) && data.manualImages.length) {
-    const snapshots = [];
+    const byPass = { arrival: [], departure: [] };
     for (const item of data.manualImages) {
       if (!item?.imageBase64) continue;
       const slot = Number(item.slot);
       if (!Number.isFinite(slot) || slot < 1 || slot > 3) {
         throw new Error('Invalid photo slot — use 1, 2, or 3');
       }
+      const pass = item.pass === 'arrival' ? 'arrival' : 'departure';
       const imageBuffer = parseImageBase64(item.imageBase64);
-      const savedPath = saveImage(imageBuffer, txn.id, `departure-cam-${slot}`);
-      snapshots.push({ id: `cam-${slot}`, label: `Camera ${slot}`, path: savedPath });
-    }
-    if (snapshots.length) {
-      snapshots.sort((a, b) => {
-        const slotA = parseInt(String(a.id).replace('cam-', ''), 10) || 0;
-        const slotB = parseInt(String(b.id).replace('cam-', ''), 10) || 0;
-        return slotA - slotB;
+      const fileTag = pass === 'departure' ? 'departure-cam' : 'arrival-cam';
+      const savedPath = saveImage(imageBuffer, txn.id, `${fileTag}-${slot}`, {
+        vehicleNumber: txn.truck_number,
       });
-      Object.assign(updates, mapDeparturePhotoFields(snapshots));
-      updates.camera_snapshots = mergeDepartureSnapshots(
-        txn.camera_snapshots,
-        vehicleType,
-        snapshots,
+      byPass[pass].push({ id: `cam-${slot}`, label: `Camera ${slot}`, path: savedPath });
+    }
+
+    for (const pass of ['arrival', 'departure']) {
+      const newSnapshots = byPass[pass];
+      if (!newSnapshots.length) continue;
+
+      const workingRow = {
+        ...txn,
+        ...updates,
+        camera_snapshots: updates.camera_snapshots ?? txn.camera_snapshots,
+      };
+
+      const merged = mergeSnapshotsBySlot(
+        existingPassSnapshots(workingRow, vehicleType, pass),
+        newSnapshots,
       );
-      updates.image_path = snapshots[0].path;
+
+      Object.assign(updates, photoColumnUpdates(merged, pass));
+      updates.camera_snapshots = setPassSnapshots(
+        updates.camera_snapshots ?? txn.camera_snapshots,
+        vehicleType,
+        pass,
+        merged,
+      );
+
+      for (const snap of newSnapshots) {
+        const slot = cameraSlotFromId(snap.id);
+        if (slot !== 1) continue;
+        if (pass === 'departure') {
+          updates.image_path = snap.path;
+        } else if (!isHywa(vehicleType)) {
+          updates.tare_image_path = snap.path;
+        }
+      }
     }
   }
 
@@ -232,6 +253,98 @@ async function updateClosedReport(data = {}) {
     ok: true,
     transaction: toPublicTransaction(updated),
     reportPath: regen.path,
+  };
+}
+
+async function updateSlipNumber(data = {}) {
+  OperatorAuthService.assertAdminAccess();
+
+  const txn = data.transactionId
+    ? TransactionService.getById(data.transactionId)
+    : findClosedBySlip(data.oldSlipNumber || data.slipNumber);
+  if (!txn) {
+    throw new Error('Ticket not found');
+  }
+
+  const oldSlip = String(txn.slip_number || '').trim();
+  if (!oldSlip) {
+    throw new Error('Ticket has no slip number to change');
+  }
+
+  const newSlip = normalizeSlipNumber(data.newSlipNumber || data.slip_number);
+  if (newSlip === oldSlip) {
+    throw new Error('New slip number is the same as the current one');
+  }
+
+  const conflict = TransactionService.getBySlipNumber(newSlip);
+  if (conflict && conflict.id !== txn.id) {
+    throw new Error(`Slip number ${newSlip} is already used by another ticket`);
+  }
+
+  TransactionService.updateSlipNumber(txn.id, newSlip);
+
+  let reportPath = null;
+  if (isClosedTrip(txn)) {
+    const regen = await ReportService.regenerateTripPDF(txn.id);
+    if (!regen.ok) {
+      TransactionService.updateSlipNumber(txn.id, oldSlip);
+      throw new Error(regen.error || 'Report regeneration failed');
+    }
+    reportPath = regen.path;
+    const keep = new Set();
+    if (reportPath) keep.add(path.resolve(reportPath));
+    if (newSlip) keep.add(path.resolve(path.join(PATHS.REPORTS, `${newSlip}_report.pdf`)));
+    removeOldSlipFiles(oldSlip, keep);
+  } else {
+    const oldThermal = path.join(PATHS.REPORTS, `${oldSlip}.pdf`);
+    const newThermal = path.join(PATHS.REPORTS, `${newSlip}.pdf`);
+    if (fs.existsSync(oldThermal)) {
+      try {
+        if (fs.existsSync(newThermal)) fs.unlinkSync(newThermal);
+        fs.renameSync(oldThermal, newThermal);
+      } catch (err) {
+        logger.warn('Could not rename thermal slip PDF', {
+          oldSlip,
+          newSlip,
+          message: err.message,
+        });
+      }
+    }
+
+    const oldReport = txn.report_path ? normalizePath(txn.report_path) : null;
+    if (oldReport && oldReport.includes(oldSlip)) {
+      const nextReport = oldReport.replace(oldSlip, newSlip);
+      try {
+        if (fs.existsSync(oldReport)) {
+          fs.renameSync(oldReport, nextReport);
+        }
+        TransactionService.updateFields(txn.id, { report_path: nextReport });
+      } catch (err) {
+        logger.warn('Could not rename report file for slip change', {
+          oldSlip,
+          newSlip,
+          message: err.message,
+        });
+      }
+    }
+    removeOldSlipFiles(oldSlip);
+  }
+
+  const updated = TransactionService.getById(txn.id);
+  logger.info('Slip number corrected', {
+    transactionId: txn.id,
+    oldSlip,
+    newSlip,
+    counterUnchanged: true,
+  });
+
+  return {
+    ok: true,
+    transaction: toPublicTransaction(updated),
+    oldSlipNumber: oldSlip,
+    newSlipNumber: newSlip,
+    reportPath,
+    nextSlipHint: SlipNumberService.getMaxLocalSlipNumeric(),
   };
 }
 
@@ -263,5 +376,6 @@ module.exports = {
   listRecentClosedReports,
   getClosedReportBySlip,
   updateClosedReport,
+  updateSlipNumber,
   deleteClosedReport,
 };

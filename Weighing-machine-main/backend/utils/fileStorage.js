@@ -76,72 +76,163 @@ if (!isInAsar) {
   ensureRuntimeDirs();
 }
 
+function sanitizeMediaBasename(name) {
+  return (
+    String(name || 'UNKNOWN')
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '')
+      .slice(0, 40) || 'UNKNOWN'
+  );
+}
+
+function isSaveOptions(value) {
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    !Buffer.isBuffer(value) &&
+    !(value instanceof Date) &&
+    (Object.prototype.hasOwnProperty.call(value, 'vehicleNumber') ||
+      Object.prototype.hasOwnProperty.call(value, 'date'))
+  );
+}
+
+function normalizePassLabel(passKey) {
+  const raw = String(passKey || 'capture').toLowerCase();
+  if (raw.includes('departure')) return 'departure';
+  if (raw.includes('arrival')) return 'arrival';
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function cameraIdFromPassKey(passKey) {
+  const raw = String(passKey || '');
+  const camMatch = raw.match(/cam-(\d+)/i);
+  if (camMatch) return `cam-${camMatch[1]}`;
+  return 'primary';
+}
+
+function buildPhotoFilename({ date, vehicleNumber, passKey, cameraId, transactionId }) {
+  const { year, month, day } = ts.parts(date);
+  const datePrefix = `${year}${month}${day}`;
+  const vehicle = sanitizeMediaBasename(vehicleNumber);
+  const pass = normalizePassLabel(passKey);
+  const cam = String(cameraId || 'cam').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const shortId = String(transactionId || '')
+    .replace(/-/g, '')
+    .slice(0, 8);
+  const parts = [datePrefix, vehicle, pass, cam];
+  if (shortId) parts.push(shortId);
+  return `${parts.join('_')}.jpg`;
+}
+
+function parsePathArgs(passKeyOrDate, maybeDate, maybeOptions) {
+  let passKey = null;
+  let date;
+  let options = {};
+
+  if (typeof passKeyOrDate === 'string' && passKeyOrDate !== '') {
+    passKey = passKeyOrDate;
+  } else if (passKeyOrDate instanceof Date) {
+    date = passKeyOrDate;
+  } else if (passKeyOrDate && !isSaveOptions(passKeyOrDate)) {
+    date = passKeyOrDate;
+  } else if (isSaveOptions(passKeyOrDate)) {
+    options = passKeyOrDate;
+  }
+
+  if (maybeDate instanceof Date) {
+    date = maybeDate;
+  } else if (typeof maybeDate === 'string' && maybeDate !== '' && !isSaveOptions(maybeDate)) {
+    date = maybeDate;
+  } else if (isSaveOptions(maybeDate)) {
+    options = { ...options, ...maybeDate };
+  }
+
+  if (isSaveOptions(maybeOptions)) {
+    options = { ...options, ...maybeOptions };
+  }
+
+  if (options.date) date = options.date;
+
+  return { passKey, date, options };
+}
+
 /**
  * Path for a transaction's captured image:
- *   uploads/YYYY/MM/DD/{transactionId}.jpg
+ *   images/YYYY/MM/DD/YYYYMMDD_{vehicle}_{pass}_{camera}_{shortTxnId}.jpg
  */
-function getImagePath(transactionId, passKeyOrDate, maybeDate) {
+function getImagePath(transactionId, passKeyOrDate, maybeDate, maybeOptions) {
   if (!transactionId) {
     throw new Error('getImagePath: transactionId is required');
   }
-  let passKey = null;
-  let date = maybeDate;
-  if (typeof passKeyOrDate === 'string' && passKeyOrDate !== '') {
-    passKey = passKeyOrDate;
-  } else if (passKeyOrDate) {
-    date = passKeyOrDate;
-  }
+  const { passKey, date, options } = parsePathArgs(passKeyOrDate, maybeDate, maybeOptions);
   const { year, month, day } = ts.parts(date);
-  const dir = ensureDir(path.join(PATHS.UPLOADS, year, month, day));
-  const filename = passKey
-    ? `${transactionId}_${String(passKey).replace(/[^a-zA-Z0-9_-]/g, '_')}_primary.jpg`
-    : `${transactionId}.jpg`;
+  const dir = ensureDir(path.join(PATHS.IMAGES, year, month, day));
+  const filename = buildPhotoFilename({
+    date,
+    vehicleNumber: options.vehicleNumber,
+    passKey,
+    cameraId: cameraIdFromPassKey(passKey),
+    transactionId,
+  });
   return normalizePath(path.join(dir, filename));
 }
 
-/** Per-camera snapshot: uploads/YYYY/MM/DD/{transactionId}_{pass}_{cameraId}.jpg */
-function getCameraImagePath(transactionId, cameraId, passKeyOrDate, maybeDate) {
+/** Per-camera snapshot under images/YYYY/MM/DD/ */
+function getCameraImagePath(transactionId, cameraId, passKeyOrDate, maybeDate, maybeOptions) {
   if (!transactionId) {
     throw new Error('getCameraImagePath: transactionId is required');
   }
-  let passKey = null;
-  let date = maybeDate;
-  if (typeof passKeyOrDate === 'string' && passKeyOrDate !== '') {
-    passKey = passKeyOrDate;
-  } else if (passKeyOrDate) {
-    date = passKeyOrDate;
-  }
-  const safeId = String(cameraId || 'cam').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const safePass = passKey
-    ? `${String(passKey).replace(/[^a-zA-Z0-9_-]/g, '_')}_`
-    : '';
+  const { passKey, date, options } = parsePathArgs(passKeyOrDate, maybeDate, maybeOptions);
   const { year, month, day } = ts.parts(date);
-  const dir = ensureDir(path.join(PATHS.UPLOADS, year, month, day));
-  return normalizePath(path.join(dir, `${transactionId}_${safePass}${safeId}.jpg`));
+  const dir = ensureDir(path.join(PATHS.IMAGES, year, month, day));
+  const filename = buildPhotoFilename({
+    date,
+    vehicleNumber: options.vehicleNumber,
+    passKey,
+    cameraId,
+    transactionId,
+  });
+  return normalizePath(path.join(dir, filename));
 }
 
-function saveCameraImage(sourceBuffer, transactionId, cameraId, passKey, date) {
+function saveCameraImage(sourceBuffer, transactionId, cameraId, passKey, dateOrOptions, maybeOptions) {
   if (!Buffer.isBuffer(sourceBuffer)) {
     throw new Error('saveCameraImage: sourceBuffer must be a Buffer');
   }
+  let pass = passKey;
+  let date = dateOrOptions;
+  let options = maybeOptions;
   if (passKey && typeof passKey === 'object' && passKey.getTime) {
     date = passKey;
-    passKey = null;
+    pass = null;
+    options = dateOrOptions;
+  } else if (isSaveOptions(dateOrOptions)) {
+    options = dateOrOptions;
+    date = undefined;
   }
-  const dest = getCameraImagePath(transactionId, cameraId, passKey, date);
+  const dest = getCameraImagePath(transactionId, cameraId, pass, date, options);
   fs.writeFileSync(dest, sourceBuffer);
   return dest;
 }
 
-function saveImage(sourceBuffer, transactionId, passKey, date) {
+function saveImage(sourceBuffer, transactionId, passKey, dateOrOptions, maybeOptions) {
   if (!Buffer.isBuffer(sourceBuffer)) {
     throw new Error('saveImage: sourceBuffer must be a Buffer');
   }
+  let pass = passKey;
+  let date = dateOrOptions;
+  let options = maybeOptions;
   if (passKey && typeof passKey === 'object' && passKey.getTime) {
     date = passKey;
-    passKey = null;
+    pass = null;
+    options = dateOrOptions;
+  } else if (isSaveOptions(dateOrOptions)) {
+    options = dateOrOptions;
+    date = undefined;
   }
-  const dest = getImagePath(transactionId, passKey, date);
+  const dest = getImagePath(transactionId, pass, date, options);
   fs.writeFileSync(dest, sourceBuffer);
   return dest;
 }
@@ -153,12 +244,15 @@ function getImage(transactionId, date) {
 
 function deleteImage(transactionId, date) {
   const candidates = [];
+  const txnToken = String(transactionId || '');
   if (date) {
     const p = getImage(transactionId, date);
     if (p) candidates.push(p);
   } else {
-    walkUploadTree((filePath, name) => {
-      if (name === `${transactionId}.jpg`) candidates.push(filePath);
+    walkAllPhotoTrees((filePath, name) => {
+      if (name === `${transactionId}.jpg` || name.includes(txnToken)) {
+        candidates.push(filePath);
+      }
     });
   }
   let removed = 0;
@@ -177,9 +271,28 @@ function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-async function walkUploadTreeAsync(onFile) {
-  if (!fs.existsSync(PATHS.UPLOADS)) return;
-  const stack = [PATHS.UPLOADS];
+function walkJpegTree(root, onFile) {
+  if (!root || !fs.existsSync(root)) return;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) stack.push(full);
+      else if (ent.isFile() && ent.name.endsWith('.jpg')) onFile(normalizePath(full), ent.name);
+    }
+  }
+}
+
+async function walkJpegTreeAsync(root, onFile) {
+  if (!root || !fs.existsSync(root)) return;
+  const stack = [root];
   let dirsSinceYield = 0;
   while (stack.length) {
     if (dirsSinceYield >= WALK_YIELD_EVERY_DIRS) {
@@ -203,33 +316,38 @@ async function walkUploadTreeAsync(onFile) {
   }
 }
 
-function walkUploadTree(onFile) {
-  if (!fs.existsSync(PATHS.UPLOADS)) return;
-  const stack = [PATHS.UPLOADS];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) stack.push(full);
-      else if (ent.isFile() && ent.name.endsWith('.jpg')) onFile(normalizePath(full), ent.name);
-    }
-  }
+function walkAllPhotoTrees(onFile) {
+  walkJpegTree(PATHS.IMAGES, onFile);
+  walkJpegTree(PATHS.UPLOADS, onFile);
 }
 
-function listImages(date) {
-  const { year, month, day } = ts.parts(date);
-  const dir = path.join(PATHS.UPLOADS, year, month, day);
-  if (!fs.existsSync(dir)) return [];
+async function walkAllPhotoTreesAsync(onFile) {
+  await walkJpegTreeAsync(PATHS.IMAGES, onFile);
+  await walkJpegTreeAsync(PATHS.UPLOADS, onFile);
+}
+
+/** @deprecated Use walkAllPhotoTrees — kept for callers that only need uploads */
+function walkUploadTree(onFile) {
+  walkJpegTree(PATHS.UPLOADS, onFile);
+}
+
+async function walkUploadTreeAsync(onFile) {
+  await walkJpegTreeAsync(PATHS.UPLOADS, onFile);
+}
+
+function listJpegsInDir(dir) {
+  if (!dir || !fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
     .filter((f) => f.endsWith('.jpg') && !f.includes('_slip'))
     .map((f) => normalizePath(path.join(dir, f)));
+}
+
+function listImages(date) {
+  const { year, month, day } = ts.parts(date);
+  const imagesDir = path.join(PATHS.IMAGES, year, month, day);
+  const uploadsDir = path.join(PATHS.UPLOADS, year, month, day);
+  return [...listJpegsInDir(imagesDir), ...listJpegsInDir(uploadsDir)];
 }
 
 function tallyUploadFile(filePath, totals) {
@@ -254,7 +372,7 @@ function getStorageStats() {
     oldestDate: null,
     newestDate: null,
   };
-  walkUploadTree((filePath) => tallyUploadFile(filePath, totals));
+  walkAllPhotoTrees((filePath) => tallyUploadFile(filePath, totals));
   return totals;
 }
 
@@ -265,14 +383,14 @@ async function getStorageStatsAsync() {
     oldestDate: null,
     newestDate: null,
   };
-  await walkUploadTreeAsync((filePath) => tallyUploadFile(filePath, totals));
+  await walkAllPhotoTreesAsync((filePath) => tallyUploadFile(filePath, totals));
   return totals;
 }
 
 function deleteOlderThan(days = 90) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   let deleted = 0;
-  walkUploadTree((filePath) => {
+  walkAllPhotoTrees((filePath) => {
     if (filePath.includes('_slip.')) return;
     try {
       const st = fs.statSync(filePath);

@@ -357,6 +357,21 @@ const TransactionService = {
     );
   },
 
+  updateSlipNumber(id, slipNumber) {
+    const existing = this.getById(id);
+    if (!existing) throw new Error(`Transaction not found: ${id}`);
+    const slip = String(slipNumber || '').trim().toUpperCase();
+    if (!slip) throw new Error('Slip number is required');
+    const conflict = this.getBySlipNumber(slip);
+    if (conflict && conflict.id !== id) {
+      throw new Error(`Slip number ${slip} is already assigned to another ticket`);
+    }
+    getDb()
+      .prepare('UPDATE transactions SET slip_number = ?, updated_at = ? WHERE id = ?')
+      .run(slip, ts.now(), id);
+    return this.getById(id);
+  },
+
   /**
    * Import a closed trip from RDS into local SQLite (dedup by remote_pg_id / slip_number).
    */

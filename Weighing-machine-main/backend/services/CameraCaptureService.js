@@ -75,7 +75,7 @@ async function captureCameraSnapshotOnce(
       const reason = isBlankJpegBuffer(buffer) ? 'blank frame' : 'invalid frame';
       throw new Error(`${reason} from ${camera.label} (${buffer?.length || 0} bytes)`);
     }
-    const filePath = saveCameraImage(buffer, transactionId, camera.id, passKey);
+    const filePath = saveCameraImage(buffer, transactionId, camera.id, passKey, options);
     logger.info(`Camera snapshot saved${source ? ` (${source})` : ''}`, {
       camera: camera.label,
       path: filePath,
@@ -200,7 +200,7 @@ async function waitForPreviewWarmup(cameras, maxWaitMs = 6000) {
   });
 }
 
-async function captureAllSnapshots(transactionId, passKey = 'capture') {
+async function captureAllSnapshots(transactionId, passKey = 'capture', saveOptions = {}) {
   if (!transactionId) {
     throw new Error('transactionId is required for camera capture');
   }
@@ -210,6 +210,12 @@ async function captureAllSnapshots(transactionId, passKey = 'capture') {
   if (!cameras.length) {
     return { snapshots: [], failures: [] };
   }
+
+  const captureOpts = {
+    ...saveOptions,
+    timeoutMs: CAPTURE_TIMEOUT_MS,
+    maxRetries: CAPTURE_RETRY_COUNT,
+  };
 
   const MultiCameraPreviewService = require('./MultiCameraPreviewService');
   const saveOnlyCapture = useOnDemandCameraPreview() || !MultiCameraPreviewService.isStarted();
@@ -243,6 +249,7 @@ async function captureAllSnapshots(transactionId, passKey = 'capture') {
       }
 
       const { snapshot, error } = await captureCameraSnapshot(camera, transactionId, passKey, {
+        ...captureOpts,
         timeoutMs: isLastCamera ? CAPTURE_TIMEOUT_MS + 15000 : CAPTURE_TIMEOUT_MS,
         maxRetries: CAPTURE_RETRY_COUNT,
       });
@@ -264,7 +271,7 @@ async function captureAllSnapshots(transactionId, passKey = 'capture') {
   }
 }
 
-async function captureSingleSnapshot(transactionId, cameraId, passKey = 'capture') {
+async function captureSingleSnapshot(transactionId, cameraId, passKey = 'capture', saveOptions = {}) {
   if (!transactionId) {
     throw new Error('transactionId is required for camera capture');
   }
@@ -277,6 +284,7 @@ async function captureSingleSnapshot(transactionId, cameraId, passKey = 'capture
   }
 
   const { snapshot, error } = await captureCameraSnapshot(camera, transactionId, passKey, {
+    ...saveOptions,
     timeoutMs: CAPTURE_TIMEOUT_MS + 15000,
     maxRetries: CAPTURE_RETRY_COUNT,
   });

@@ -64,7 +64,9 @@ async function downloadRemotePhotos(row, localTxnId) {
   for (const slot of slots) {
     const s3Key = row[slot.col];
     if (!s3Key) continue;
-    const localPath = getCameraImagePath(localTxnId, slot.cam, slot.pass, date);
+    const localPath = getCameraImagePath(localTxnId, slot.cam, slot.pass, date, {
+      vehicleNumber: row.truck_number,
+    });
     // eslint-disable-next-line no-await-in-loop
     const saved = await downloadPhotoIfPresent(s3Key, localPath);
     if (saved) {
