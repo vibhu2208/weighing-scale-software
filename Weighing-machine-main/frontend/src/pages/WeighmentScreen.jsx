@@ -9,12 +9,14 @@ import WebcamPreview from '../components/device/WebcamPreview.jsx';
 import { useLocation } from 'react-router-dom';
 import {
   deviceAPI,
+  reportAPI,
   settingsAPI,
   ticketAPI,
   vehicleAPI,
   workflowAPI,
   transactionAPI,
 } from '../api/ipc.js';
+import EditSlipModal from '../components/reports/EditSlipModal.jsx';
 import LocalImage from '../components/shared/LocalImage.jsx';
 import { isStuckOpenTicket } from '../lib/ticketStatus.js';
 import {
@@ -72,6 +74,7 @@ export default function WeighmentScreen() {
   const [operatorsList, setOperatorsList] = useState([]);
   const [openTickets, setOpenTickets] = useState([]);
   const [selectedOpenTicket, setSelectedOpenTicket] = useState(null);
+  const [editOpenTicket, setEditOpenTicket] = useState(null);
   const [manualPhotos, setManualPhotos] = useState(null);
   const [capturingPhotos, setCapturingPhotos] = useState(false);
   const [retryingCameraId, setRetryingCameraId] = useState(null);
@@ -213,6 +216,26 @@ export default function WeighmentScreen() {
       .then(setOpenTickets)
       .catch(() => setOpenTickets([]));
   }, []);
+
+  const handleOpenTicketEdited = useCallback(
+    async (updated) => {
+      if (!updated?.id) return;
+      refreshOpenTickets();
+      setOpenTickets((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      if (selectedOpenTicket?.id === updated.id) {
+        setSelectedOpenTicket(updated);
+        setIdentifiedTruck(String(updated.truck_number || '').trim().toUpperCase());
+        applyOpenTicketFields(updated);
+        try {
+          const existing = await vehicleAPI.findByNumber(updated.truck_number);
+          setVehicle(existing || null);
+        } catch {
+          setVehicle(null);
+        }
+      }
+    },
+    [refreshOpenTickets, selectedOpenTicket?.id, applyOpenTicketFields],
+  );
 
   useEffect(() => {
     const routeOpenTicketId =
@@ -809,24 +832,35 @@ export default function WeighmentScreen() {
               const listWeight = openTicketFirstWeighKg(t, ticketVehicleType);
               return (
                 <li key={t.id}>
-                  <button
-                    type="button"
-                    onClick={() => handleSelectOpenTicket(t)}
-                    className={`w-full flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2 py-2 text-left transition-colors ${
+                  <div
+                    className={`w-full flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2 py-2 transition-colors ${
                       isSelected
                         ? 'border-brand-500 bg-brand-950/40 text-white'
-                        : 'border-slate-700/60 bg-slate-900/30 text-slate-300 hover:border-slate-500'
+                        : 'border-slate-700/60 bg-slate-900/30 text-slate-300'
                     }`}
                   >
-                    <span className="font-mono text-xs">{t.slip_number}</span>
-                    <span className="font-mono text-xs">{t.truck_number}</span>
-                    <span className="font-mono text-xs">{fmtKg(listWeight)}</span>
-                    <span className="w-full text-[10px] text-slate-500">
-                      {fmtTicketDate(t.timestamp_in || t.created_at)}
-                      {isPreviousDay ? ' · previous day' : ''}
-                      {isStuck ? ' · needs close (stuck)' : ''}
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectOpenTicket(t)}
+                      className="flex flex-1 flex-wrap items-center justify-between gap-2 text-left min-w-0"
+                    >
+                      <span className="font-mono text-xs">{t.slip_number}</span>
+                      <span className="font-mono text-xs">{t.truck_number}</span>
+                      <span className="font-mono text-xs">{fmtKg(listWeight)}</span>
+                      <span className="w-full text-[10px] text-slate-500">
+                        {fmtTicketDate(t.timestamp_in || t.created_at)}
+                        {isPreviousDay ? ' · previous day' : ''}
+                        {isStuck ? ' · needs close (stuck)' : ''}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="shrink-0 text-[10px] uppercase tracking-wide text-amber-300 hover:text-amber-200 px-1"
+                      onClick={() => setEditOpenTicket(t)}
+                    >
+                      Edit
+                    </button>
+                  </div>
                 </li>
               );
             })}
@@ -1047,7 +1081,16 @@ export default function WeighmentScreen() {
 
           {weighMode === 'CLOSE' && openTicket && (
             <div className="card p-4 space-y-3 text-sm">
-              <h2 className="text-xs uppercase tracking-widest text-slate-400 mb-2">Open ticket</h2>
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="text-xs uppercase tracking-widest text-slate-400 mb-2">Open ticket</h2>
+                <button
+                  type="button"
+                  className="text-xs text-amber-300 hover:text-amber-200 shrink-0"
+                  onClick={() => setEditOpenTicket(openTicket)}
+                >
+                  Edit slip / vehicle
+                </button>
+              </div>
               <Row label="Ticket" value={openTicket.slip_number} mono />
               <Row
                 label={openTicketFirstWeighLabel(vehicleType)}
@@ -1536,6 +1579,17 @@ export default function WeighmentScreen() {
             </form>
           </div>
         </div>
+      )}
+
+      {editOpenTicket && (
+        <EditSlipModal
+          ticket={editOpenTicket}
+          onClose={() => setEditOpenTicket(null)}
+          onSaved={(updated) => {
+            handleOpenTicketEdited(updated);
+            setEditOpenTicket(null);
+          }}
+        />
       )}
     </div>
   );

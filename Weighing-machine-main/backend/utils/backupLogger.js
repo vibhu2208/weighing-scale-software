@@ -3,13 +3,12 @@
 const fs = require('fs');
 const { getLogPath } = require('./fileStorage');
 
-const LOG_FILE = getLogPath('backup.log');
-
 function append(line) {
   const ts = new Date().toISOString();
   const row = `[${ts}] ${line}\n`;
   try {
-    fs.appendFileSync(LOG_FILE, row, 'utf8');
+    // Resolve at write time so packaged apps use userData after initPackagedStorage().
+    fs.appendFileSync(getLogPath('backup.log'), row, 'utf8');
   } catch {
     /* never block weighing on log failure */
   }

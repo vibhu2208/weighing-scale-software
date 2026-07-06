@@ -282,6 +282,7 @@ export default function Settings() {
   const [advanceError, setAdvanceError] = useState('');
   const [advanceMessage, setAdvanceMessage] = useState('');
   const timers = useRef({});
+  const backupLogPathRef = useRef('');
 
   const refreshBackup = useCallback(async () => {
     const [list, last, cloud] = await Promise.all([
@@ -292,6 +293,7 @@ export default function Settings() {
     setBackups(Array.isArray(list) ? list : []);
     setLastBackup(last);
     setCloudStatus(cloud);
+    backupLogPathRef.current = cloud?.backupLogPath || '';
   }, []);
 
   const refreshRemoteBackups = useCallback(async () => {
@@ -327,7 +329,10 @@ export default function Settings() {
       }),
       subscribe('cloudBackup:failed', (p) => {
         setCloudProgress(null);
-        setCloudMessage(p?.message || 'Cloud backup failed — see logs/backup.log');
+        const logHint =
+          backupLogPathRef.current ||
+          '%AppData%\\Weighbridge Manager\\weighbridge-data\\logs\\backup.log';
+        setCloudMessage(p?.message || `Cloud backup failed — see ${logHint}`);
       }),
     ];
     return () => off.forEach((fn) => fn && fn());
@@ -854,6 +859,15 @@ export default function Settings() {
                       · Last cloud backup:{' '}
                       <span className="text-slate-200">
                         {new Date(cloudStatus.lastCloudBackup).toLocaleString('en-IN')}
+                      </span>
+                    </>
+                  )}
+                  {cloudStatus.logUpload?.lastUpload && (
+                    <>
+                      {' '}
+                      · Last log upload:{' '}
+                      <span className="text-slate-200">
+                        {new Date(cloudStatus.logUpload.lastUpload).toLocaleString('en-IN')}
                       </span>
                     </>
                   )}

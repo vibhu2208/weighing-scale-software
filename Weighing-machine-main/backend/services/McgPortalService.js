@@ -246,6 +246,29 @@ const McgPortalService = {
     logger.info('MCG portal test POST', { crtno: TEST_STRING });
     return postPayload(payload, { label: 'MCG portal test' });
   },
+
+  async resendSkippedTicket(transactionId) {
+    const transaction = TransactionService.getById(transactionId);
+    if (!transaction) {
+      return { ok: false, error: 'transaction_not_found' };
+    }
+    if (transaction.ticket_status !== 'CLOSED') {
+      return { ok: false, error: 'ticket_not_closed' };
+    }
+    if ((transaction.mcg_status || '').toLowerCase() !== 'skipped') {
+      return { ok: false, error: 'not_skipped' };
+    }
+
+    logger.info('MCG portal resend for skipped ticket', {
+      transactionId,
+      slip: transaction.slip_number,
+    });
+    const result = await McgPortalService.postClosedTicket(transactionId);
+    return {
+      ...result,
+      transaction: TransactionService.getById(transactionId),
+    };
+  },
 };
 
 module.exports = McgPortalService;

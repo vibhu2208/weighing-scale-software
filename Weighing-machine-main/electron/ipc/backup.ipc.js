@@ -3,6 +3,7 @@
 const BackupService = require('../../backend/services/BackupService');
 const CloudBackupService = require('../../backend/services/CloudBackupService');
 const CloudLogUploadService = require('../../backend/services/CloudLogUploadService');
+const { getLogPath } = require('../../backend/utils/fileStorage');
 
 const NAMESPACE = 'backup';
 
@@ -19,7 +20,11 @@ function register(ipcMain) {
   /** Cloud S3 backup: DB gzip + reports + images. */
   ipcMain.handle(`${NAMESPACE}:manualBackup`, async () => CloudBackupService.runManual());
 
-  ipcMain.handle(`${NAMESPACE}:getCloudStatus`, async () => CloudBackupService.getStatus());
+  ipcMain.handle(`${NAMESPACE}:getCloudStatus`, async () => ({
+    ...CloudBackupService.getStatus(),
+    backupLogPath: getLogPath('backup.log'),
+    logUpload: CloudLogUploadService.getStatus(),
+  }));
 
   ipcMain.handle(`${NAMESPACE}:getLogUploadStatus`, async () =>
     CloudLogUploadService.getStatus(),

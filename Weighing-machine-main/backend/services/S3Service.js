@@ -9,8 +9,12 @@ const {
   DeleteObjectCommand,
   ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
+const { NodeHttpHandler } = require('@smithy/node-http-handler');
 
 const SettingsService = require('./SettingsService');
+
+const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const CONNECTION_TIMEOUT_MS = 30 * 1000;
 
 let client = null;
 
@@ -37,6 +41,10 @@ function getClient() {
     client = new S3Client({
       region,
       credentials: { accessKeyId, secretAccessKey },
+      requestHandler: new NodeHttpHandler({
+        requestTimeout: REQUEST_TIMEOUT_MS,
+        connectionTimeout: CONNECTION_TIMEOUT_MS,
+      }),
     });
   }
   return client;

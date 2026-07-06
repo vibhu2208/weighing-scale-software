@@ -2,6 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
+const { promisify } = require('util');
+
+const gzip = promisify(zlib.gzip);
 const S3Service = require('./S3Service');
 const CloudUploadTracker = require('./CloudUploadTracker');
 const SettingsService = require('./SettingsService');
@@ -64,7 +68,7 @@ function snapshotName(sourceName, stamp) {
   return `${base}-${stamp}.log`;
 }
 
-function createSnapshots(stamp) {
+async function createSnapshots(stamp) {
   ensureDir(stagingDir());
   const created = [];
 
@@ -81,13 +85,16 @@ function createSnapshots(stamp) {
     if (!stat.isFile() || stat.size === 0) continue;
 
     const stagedName = snapshotName(sourceName, stamp);
-    const stagedPath = normalizePath(path.join(stagingDir(), stagedName));
-    const s3Key = `${S3_FOLDER}/${stagedName}`;
+    const gzName = `${stagedName}.gz`;
+    const gzPath = normalizePath(path.join(stagingDir(), gzName));
+    const s3Key = `${S3_FOLDER}/${gzName}`;
 
     try {
-      fs.copyFileSync(sourcePath, stagedPath);
-      CloudUploadTracker.register(stagedPath, FILE_TYPE, s3Key);
-      created.push({ stagedPath, s3Key, sourceName });
+      const raw = await fs.promises.readFile(sourcePath);
+      const compressed = await gzip(raw);
+      await fs.promises.writeFile(gzPath, compressed);
+      CloudUploadTracker.register(gzPath, FILE_TYPE, s3Key);
+      created.push({ stagedPath: gzPath, s3Key, sourceName });
     } catch (err) {
       logger.warn('CloudLogUploadService: snapshot failed', {
         source: sourceName,
@@ -99,29 +106,70 @@ function createSnapshots(stamp) {
   return created;
 }
 
-async function uploadOne(row) {
+async function prepareLegacyLogUpload(row) {
+  if (!row.s3_key.endsWith('.log') || row.s3_key.endsWith('.log.gz')) {
+    return row;
+  }
   if (!fs.existsSync(row.file_path)) {
+    return row;
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(row.file_path);
+  } catch {
+    return row;
+  }
+  if (!stat.isFile() || stat.size < 512 * 1024) {
+    return row;
+  }
+
+  const gzPath = `${row.file_path}.gz`;
+  const gzKey = `${row.s3_key}.gz`;
+  try {
+    const raw = await fs.promises.readFile(row.file_path);
+    const compressed = await gzip(raw);
+    await fs.promises.writeFile(gzPath, compressed);
+    try {
+      await fs.promises.unlink(row.file_path);
+    } catch {
+      /* keep raw copy if delete fails */
+    }
+    return { ...row, file_path: gzPath, s3_key: gzKey };
+  } catch (err) {
+    logger.warn('CloudLogUploadService: legacy log gzip failed', {
+      path: row.file_path,
+      message: err.message,
+    });
+    return row;
+  }
+}
+
+async function uploadOne(row) {
+  const prepared = await prepareLegacyLogUpload(row);
+  if (!fs.existsSync(prepared.file_path)) {
     CloudUploadTracker.markFailed(row.file_path);
     return { ok: false, reason: 'missing' };
   }
 
   try {
-    await S3Service.uploadFile(row.file_path, row.s3_key, 'text/plain');
+    const contentType = prepared.s3_key.endsWith('.gz') ? 'application/gzip' : 'text/plain';
+    await S3Service.uploadFile(prepared.file_path, prepared.s3_key, contentType);
     CloudUploadTracker.markUploaded(row.file_path);
-    backupLogger.logUploaded(row.s3_key);
+    backupLogger.logUploaded(prepared.s3_key);
     SettingsService.set('last_cloud_log_upload_at', new Date().toISOString());
 
     try {
-      fs.unlinkSync(row.file_path);
+      fs.unlinkSync(prepared.file_path);
     } catch {
       /* keep for manual cleanup */
     }
     return { ok: true };
   } catch (err) {
     CloudUploadTracker.markFailed(row.file_path);
-    backupLogger.uploadFailed(row.s3_key, err.message);
+    backupLogger.uploadFailed(prepared.s3_key, err.message);
     if (row.retry_count + 1 <= CloudUploadTracker.MAX_RETRIES) {
-      backupLogger.retryAttempt(row.s3_key, row.retry_count + 1);
+      backupLogger.retryAttempt(prepared.s3_key, row.retry_count + 1);
     }
     return { ok: false, error: err.message };
   }
@@ -194,8 +242,8 @@ async function runCycle(options = {}) {
       return { ...summary, ok: true, skipped: true };
     }
 
-    progress('snapshot', 'Copying logs to staging…');
-    const snapshots = createSnapshots(stamp);
+    progress('snapshot', 'Compressing logs for upload…');
+    const snapshots = await createSnapshots(stamp);
     summary.snapshots = snapshots.length;
 
     progress('upload', 'Uploading logs to S3…');
@@ -222,6 +270,7 @@ async function runCycle(options = {}) {
 
 function start() {
   stop();
+  running = false;
 
   if (!S3Service.isConfigured()) {
     logger.info('CloudLogUploadService: AWS not configured — log upload idle');

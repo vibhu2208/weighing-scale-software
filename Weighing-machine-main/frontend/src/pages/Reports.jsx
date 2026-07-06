@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { reportAPI, transactionAPI } from '../api/ipc.js';
+import { mcgAPI, reportAPI, transactionAPI } from '../api/ipc.js';
 import Badge from '../components/shared/Badge.jsx';
 import ExportCenter from '../components/reports/ExportCenter.jsx';
 import ReportDownloadPanel from '../components/reports/ReportDownloadPanel.jsx';
@@ -12,7 +12,7 @@ import {
   ticketStatusLabel,
   ticketStatusVariant,
 } from '../lib/ticketStatus.js';
-import { mcgStatusLabel, mcgStatusTitle, mcgStatusVariant } from '../lib/mcgStatus.js';
+import { isMcgSkipped, mcgStatusLabel, mcgStatusTitle, mcgStatusVariant } from '../lib/mcgStatus.js';
 import { getPeriodRange, todayISO, toFilterTimestamps } from '../lib/reportDates.js';
 import { listTripCameraImages } from '../lib/tripPhotos.js';
 
@@ -95,6 +95,7 @@ export default function Reports() {
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [mcgResending, setMcgResending] = useState(() => new Set());
 
   const [exportOpen, setExportOpen] = useState(false);
   const [previewTicket, setPreviewTicket] = useState(null);
@@ -337,6 +338,33 @@ export default function Reports() {
       return { ...current, ...txn };
     });
   }, []);
+
+  const handleMcgResend = useCallback(async (ticket) => {
+    if (!ticket?.id || mcgResending.has(ticket.id)) return;
+    setMcgResending((prev) => new Set(prev).add(ticket.id));
+    try {
+      const result = await mcgAPI.resendSkipped(ticket.id);
+      if (result?.transaction) {
+        refreshTicketRow(result.transaction);
+      }
+      if (result?.ok && !result?.skipped) {
+        return;
+      }
+      if (result?.skipped && result?.reason === 'not_configured') {
+        alert('MCG portal is still not configured. Enable it in Settings first.');
+        return;
+      }
+      alert(result?.error || 'MCG resend failed');
+    } catch (e) {
+      alert(e.message || 'MCG resend failed');
+    } finally {
+      setMcgResending((prev) => {
+        const next = new Set(prev);
+        next.delete(ticket.id);
+        return next;
+      });
+    }
+  }, [mcgResending, refreshTicketRow]);
 
   const applySearch = () => {
     setSearch(searchInput);
@@ -627,9 +655,21 @@ export default function Reports() {
                           </td>
                           <td className="px-3 py-2">
                             {isClosedTicket(t) ? (
-                              <span title={mcgStatusTitle(t)}>
-                                <Badge label={mcgStatusLabel(t)} variant={mcgStatusVariant(t)} />
-                              </span>
+                              <div className="flex flex-col items-start gap-1">
+                                <span title={mcgStatusTitle(t)}>
+                                  <Badge label={mcgStatusLabel(t)} variant={mcgStatusVariant(t)} />
+                                </span>
+                                {isMcgSkipped(t) && (
+                                  <button
+                                    type="button"
+                                    className="text-xs text-amber-300 hover:text-amber-200 disabled:opacity-50"
+                                    disabled={mcgResending.has(t.id)}
+                                    onClick={() => handleMcgResend(t)}
+                                  >
+                                    {mcgResending.has(t.id) ? 'Sending…' : 'Resend'}
+                                  </button>
+                                )}
+                              </div>
                             ) : (
                               '—'
                             )}

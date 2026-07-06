@@ -273,6 +273,7 @@ async function runCycle(options = {}) {
 function start(config = {}) {
   if (config.getWindow) setWindowGetter(config.getWindow);
   stop();
+  running = false;
 
   if (!S3Service.isConfigured()) {
     logger.info('CloudBackupService: AWS not configured — cloud backup idle');

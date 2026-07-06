@@ -24,3 +24,8 @@ export function mcgStatusTitle(ticket) {
   if (!ticket?.mcg_error) return undefined;
   return String(ticket.mcg_error);
 }
+
+export function isMcgSkipped(ticket) {
+  if (!ticket || ticket.ticket_status !== 'CLOSED') return false;
+  return (ticket.mcg_status || '').toLowerCase() === 'skipped';
+}
