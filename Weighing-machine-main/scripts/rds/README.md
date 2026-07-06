@@ -80,3 +80,27 @@ The weighbridge app downloads these to local `uploads/` on sync so PDF/Excel rep
 | Slip collision | Ensure weighbridge app is online on startup for counter sync |
 | Photos missing in PDF | Check S3 key paths and AWS credentials on weighbridge PC |
 | MCG not sent | Check `MCG_PORTAL_*` settings; failed posts retry on next sync |
+
+---
+
+## Remote admin panel (`002_admin_panel.sql`)
+
+Run [`002_admin_panel.sql`](./002_admin_panel.sql) after `001_schema.sql` for the browser admin panel.
+
+Tables: `sites`, `admin_users`, `transactions_mirror`, `site_settings`, `admin_commands`.
+
+### Weighbridge PC — CloudAdminSync
+
+The Electron app pushes closed tickets to `transactions_mirror` and pulls web edits from `admin_commands`. Add to `.env`:
+
+```env
+WEIGHBRIDGE_ID=WB-03
+ADMIN_SYNC_INTERVAL_SECONDS=30
+PG_SYNC_URL=postgresql://weighbridge:YOUR_PASSWORD@database-1.cd66cqyiuaay.ap-south-1.rds.amazonaws.com:5432/postgres?sslmode=require
+```
+
+`CloudAdminSyncService` starts automatically with the app (see `electron/main.js`). Do not point a dev laptop at production `PG_SYNC_URL` — test data will sync to the admin panel.
+
+### Deploy
+
+See [`DEPLOY.md`](../../DEPLOY.md) for Render (admin-api) + Vercel (admin-web) setup.

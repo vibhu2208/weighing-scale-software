@@ -157,6 +157,14 @@ function resetClient() {
   client = null;
 }
 
+function mirrorPhotoKey(siteId, slip, slot, pass = 'departure') {
+  return `sites/${siteId}/mirror/${slip}/${pass}_cam-${slot}.jpg`;
+}
+
+function mirrorReportKey(siteId, slip) {
+  return `sites/${siteId}/mirror/${slip}/report.pdf`;
+}
+
 module.exports = {
   getConfig,
   isConfigured,
@@ -166,4 +174,6 @@ module.exports = {
   listKeys,
   listAllKeys,
   resetClient,
+  mirrorPhotoKey,
+  mirrorReportKey,
 };

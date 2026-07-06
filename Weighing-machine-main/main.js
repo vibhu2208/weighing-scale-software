@@ -129,6 +129,12 @@ async function bootstrapBackend() {
     remoteTripSync && remoteTripSync.start,
   );
 
+  const cloudAdminSync = safeRequire(
+    '../backend/services/CloudAdminSyncService',
+    'CloudAdminSyncService',
+  );
+  await tryInvoke('startCloudAdminSync', cloudAdminSync && cloudAdminSync.start);
+
   const workflow = safeRequire('../backend/engine/WorkflowEngine', 'WorkflowEngine');
   if (workflow) {
     await tryInvoke('initWorkflowEngine', async () => {

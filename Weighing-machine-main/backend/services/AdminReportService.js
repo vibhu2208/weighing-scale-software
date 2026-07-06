@@ -125,9 +125,7 @@ function removeReportPdfFiles(txn) {
   }
 }
 
-async function updateClosedReport(data = {}) {
-  OperatorAuthService.assertManualHywaSectionAccess();
-
+async function performClosedReportUpdate(data = {}) {
   const slip = String(data.slipNumber || data.slip_number || '').trim();
   const txn = requireClosedReport(
     data.transactionId
@@ -144,18 +142,14 @@ async function updateClosedReport(data = {}) {
 
   if (data.gross_weight != null && data.gross_weight !== '') {
     const gross = Math.round(Number(data.gross_weight));
-    if (!Number.isFinite(gross) || gross <= 0) {
-      throw new Error('Valid gross weight is required');
-    }
+    if (!Number.isFinite(gross) || gross <= 0) throw new Error('Valid gross weight is required');
     updates.gross_weight = gross;
     updates.raw_gross_weight = gross;
   }
 
   if (data.tare_weight != null && data.tare_weight !== '') {
     const tare = Math.round(Number(data.tare_weight));
-    if (!Number.isFinite(tare) || tare <= 0) {
-      throw new Error('Valid tare weight is required');
-    }
+    if (!Number.isFinite(tare) || tare <= 0) throw new Error('Valid tare weight is required');
     updates.tare_weight = tare;
     updates.raw_tare_weight = tare;
   }
@@ -206,18 +200,15 @@ async function updateClosedReport(data = {}) {
     for (const pass of ['arrival', 'departure']) {
       const newSnapshots = byPass[pass];
       if (!newSnapshots.length) continue;
-
       const workingRow = {
         ...txn,
         ...updates,
         camera_snapshots: updates.camera_snapshots ?? txn.camera_snapshots,
       };
-
       const merged = mergeSnapshotsBySlot(
         existingPassSnapshots(workingRow, vehicleType, pass),
         newSnapshots,
       );
-
       Object.assign(updates, photoColumnUpdates(merged, pass));
       updates.camera_snapshots = setPassSnapshots(
         updates.camera_snapshots ?? txn.camera_snapshots,
@@ -225,35 +216,83 @@ async function updateClosedReport(data = {}) {
         pass,
         merged,
       );
-
       for (const snap of newSnapshots) {
         const slot = cameraSlotFromId(snap.id);
         if (slot !== 1) continue;
-        if (pass === 'departure') {
-          updates.image_path = snap.path;
-        } else if (!isHywa(vehicleType)) {
-          updates.tare_image_path = snap.path;
-        }
+        if (pass === 'departure') updates.image_path = snap.path;
+        else if (!isHywa(vehicleType)) updates.tare_image_path = snap.path;
       }
     }
   }
 
-  if (!Object.keys(updates).length) {
-    throw new Error('No changes to save');
+  if (Array.isArray(data.photoS3Keys) && data.photoS3Keys.length) {
+    const S3Service = require('./S3Service');
+    const { getCameraImagePath } = require('../utils/fileStorage');
+    const byPass = { arrival: [], departure: [] };
+    for (const item of data.photoS3Keys) {
+      const slot = Number(item.slot);
+      const s3Key = item.key || item.s3Key;
+      if (!s3Key || !Number.isFinite(slot) || slot < 1 || slot > 3) continue;
+      if (!S3Service.isConfigured()) throw new Error('S3 not configured');
+      const date = txn.timestamp_out || txn.timestamp_in || new Date().toISOString();
+      const pass = item.pass === 'arrival' ? 'arrival' : 'departure';
+      const localPath = getCameraImagePath(txn.id, `cam-${slot}`, pass, date, {
+        vehicleNumber: txn.truck_number,
+      });
+      await S3Service.downloadFile(s3Key, localPath);
+      byPass[pass].push({ id: `cam-${slot}`, label: `Camera ${slot}`, path: localPath });
+    }
+    for (const pass of ['arrival', 'departure']) {
+      const newSnapshots = byPass[pass];
+      if (!newSnapshots.length) continue;
+      const workingRow = {
+        ...txn,
+        ...updates,
+        camera_snapshots: updates.camera_snapshots ?? txn.camera_snapshots,
+      };
+      const merged = mergeSnapshotsBySlot(
+        existingPassSnapshots(workingRow, vehicleType, pass),
+        newSnapshots,
+      );
+      Object.assign(updates, photoColumnUpdates(merged, pass));
+      updates.camera_snapshots = setPassSnapshots(
+        updates.camera_snapshots ?? txn.camera_snapshots,
+        vehicleType,
+        pass,
+        merged,
+      );
+      for (const snap of newSnapshots) {
+        const slot = cameraSlotFromId(snap.id);
+        if (slot !== 1) continue;
+        if (pass === 'departure') updates.image_path = snap.path;
+        else if (!isHywa(vehicleType)) updates.tare_image_path = snap.path;
+      }
+    }
   }
+
+  if (!Object.keys(updates).length) throw new Error('No changes to save');
 
   TransactionService.updateFields(txn.id, updates);
   const regen = await ReportService.regenerateTripPDF(txn.id);
-  if (!regen.ok) {
-    throw new Error(regen.error || 'Report regeneration failed');
-  }
+  if (!regen.ok) throw new Error(regen.error || 'Report regeneration failed');
 
   const updated = TransactionService.getById(txn.id);
   return {
     ok: true,
     transaction: toPublicTransaction(updated),
     reportPath: regen.path,
+    slip_number: updated.slip_number,
+    transactionId: updated.id,
   };
+}
+
+async function updateClosedReport(data = {}) {
+  OperatorAuthService.assertManualHywaSectionAccess();
+  const result = await performClosedReportUpdate(data);
+  try {
+    require('./CloudAdminSyncService').enqueuePush(result.transactionId);
+  } catch (_e) { /* optional */ }
+  return result;
 }
 
 async function updateSlipNumber(data = {}) {
@@ -348,9 +387,7 @@ async function updateSlipNumber(data = {}) {
   };
 }
 
-function deleteClosedReport(data = {}) {
-  OperatorAuthService.assertManualHywaSectionAccess();
-
+function performClosedReportDelete(data = {}) {
   const txn = requireClosedReport(
     data.transactionId
       ? TransactionService.getById(data.transactionId)
@@ -363,6 +400,7 @@ function deleteClosedReport(data = {}) {
   logger.info('Closed report deleted by admin', {
     transactionId: txn.id,
     slip: txn.slip_number,
+    remote: !!data.remote,
   });
 
   return {
@@ -372,10 +410,35 @@ function deleteClosedReport(data = {}) {
   };
 }
 
+function deleteClosedReport(data = {}) {
+  OperatorAuthService.assertManualHywaSectionAccess();
+  const result = performClosedReportDelete(data);
+  try {
+    require('./CloudAdminSyncService').deleteMirrorRow(result.slip_number).catch(() => {});
+  } catch (_e) { /* optional */ }
+  return result;
+}
+
+async function applyRemoteUpdate(data = {}) {
+  logger.info('Applying remote report update', { slip: data.slipNumber || data.slip_number });
+  const result = await performClosedReportUpdate({ ...data, remote: true });
+  try {
+    require('./CloudAdminSyncService').enqueuePush(result.transactionId);
+  } catch (_e) { /* optional */ }
+  return result;
+}
+
+function applyRemoteDelete(data = {}) {
+  logger.info('Applying remote report delete', { slip: data.slipNumber || data.slip_number });
+  return performClosedReportDelete({ ...data, remote: true });
+}
+
 module.exports = {
   listRecentClosedReports,
   getClosedReportBySlip,
   updateClosedReport,
   updateSlipNumber,
   deleteClosedReport,
+  applyRemoteUpdate,
+  applyRemoteDelete,
 };
