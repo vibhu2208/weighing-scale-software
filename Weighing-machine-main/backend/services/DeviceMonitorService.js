@@ -1337,6 +1337,48 @@ function getCurrentRawWeight() {
   return latestRawWeight;
 }
 
+/**
+ * Weight used when opening/closing a ticket.
+ * Prefers the stable full-frame reading so a split serial chunk ("60" from "011160")
+ * cannot be saved while the indicator is actually showing a truck weight.
+ */
+function getCaptureWeightKg(fallbackKg) {
+  const fallback = Math.round(Number(fallbackKg) || 0);
+  const snap = weighbridgeAdapter?.bridgeService?.getSnapshot?.() || null;
+  const stable = snap ? Math.round(Number(snap.stableWeight) || 0) : 0;
+  const latest = snap
+    ? Math.round(Number(snap.weight) || 0)
+    : Math.round(Number(latestRawWeight) || 0);
+
+  const isFragment = (small, full) => {
+    if (!(small > 0 && full > 0) || small >= full) return false;
+    const s = String(small);
+    const f = String(full);
+    return f.startsWith(s) || f.endsWith(s);
+  };
+
+  if (stable > 0) {
+    if (snap?.isStable) return stable;
+    if (latest > 0 && latest <= 120000) {
+      if (latest < 1000 && stable >= 2000) return stable;
+      if (stable >= 2000 && latest < stable * 0.2) return stable;
+      if (isFragment(latest, stable)) return stable;
+      return latest;
+    }
+    return stable;
+  }
+
+  if (latest > 0 && latest <= 120000) {
+    if (fallback >= 2000 && latest < 1000 && isFragment(latest, fallback)) {
+      return fallback;
+    }
+    return latest;
+  }
+
+  if (fallback > 0 && fallback <= 120000) return fallback;
+  return getCurrentRawWeight();
+}
+
 function syncExternalDisplay() {
   pushWeightToExternalDisplay(getExternalDisplayWeight(), 'manual-sync');
 }
@@ -1375,6 +1417,7 @@ module.exports = {
   startRfidScan,
   stopRfidScan,
   getCurrentRawWeight,
+  getCaptureWeightKg,
   setWeighmentContext,
   getWeighmentContext,
   clearWeighmentContext,

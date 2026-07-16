@@ -423,14 +423,9 @@ class WeightBridgeService {
       return;
     }
 
-    const compact = text.replace(/\0/g, '').trim();
-
-    // Short fixed frames without STX/ETX (e.g. "60" or "12345") — skip single-digit fragments.
-    if (compact.length >= 2 || /[\r\n]/.test(text) || /kg|kgs/i.test(compact)) {
-      this._consumeLine(text);
-    }
-
-    this.textBuffer += text;
+    // Never parse undelimited short chunks immediately — those are usually
+    // partial frames ("60" from "011160"). Only consume complete lines / frames.
+    this.textBuffer += text.replace(/\0/g, '');
     const lines = this.textBuffer.split(/\r\n|\n|\r/);
     this.textBuffer = lines.pop() || '';
 
@@ -438,10 +433,52 @@ class WeightBridgeService {
       this._consumeLine(line);
     }
 
-    // Fallback for streams with no delimiter at all.
-    if (this.textBuffer.length > 32) {
-      this._consumeLine(this.textBuffer);
-      this.textBuffer = '';
+    this._drainFixedWidthFrames();
+  }
+
+  /**
+   * Pull complete signed/6-digit indicator frames from an undelimited stream.
+   * Example: "011160011160-000100" → three frames.
+   */
+  _drainFixedWidthFrames() {
+    if (!this.textBuffer) return;
+
+    // Prefer signed 6-digit frames used by this site's indicator.
+    const signed = /^[+-]\d{6}/;
+    const plain6 = /^\d{6}/;
+
+    let guard = 0;
+    while (this.textBuffer.length >= 6 && guard < 20) {
+      guard += 1;
+      const buf = this.textBuffer.trimStart();
+      if (buf !== this.textBuffer) {
+        this.textBuffer = buf;
+      }
+
+      if (signed.test(this.textBuffer)) {
+        const frame = this.textBuffer.slice(0, 7);
+        this.textBuffer = this.textBuffer.slice(7);
+        this._consumeLine(frame);
+        continue;
+      }
+      if (plain6.test(this.textBuffer)) {
+        const frame = this.textBuffer.slice(0, 6);
+        this.textBuffer = this.textBuffer.slice(6);
+        this._consumeLine(frame);
+        continue;
+      }
+
+      // Leading junk / fragment — drop one char and keep scanning.
+      if (this.textBuffer.length > 24) {
+        this.textBuffer = this.textBuffer.slice(1);
+        continue;
+      }
+      break;
+    }
+
+    // Avoid unbounded growth if the stream never forms a frame.
+    if (this.textBuffer.length > 64) {
+      this.textBuffer = this.textBuffer.slice(-12);
     }
   }
 
@@ -569,18 +606,52 @@ class WeightBridgeService {
     return Math.round(value);
   }
 
+  _isFragmentOf(parsed, full) {
+    if (!Number.isFinite(parsed) || !Number.isFinite(full) || parsed <= 0 || full <= 0) {
+      return false;
+    }
+    const p = String(Math.round(parsed));
+    const f = String(Math.round(full));
+    if (p.length >= f.length) return false;
+    return f.startsWith(p) || f.endsWith(p);
+  }
+
   _looksLikePartialFrame(parsed, rawLine) {
     const text = String(rawLine || '').replace(/\0/g, ' ').trim();
-    if (!text) return false;
+    if (!text) return true;
     if (/kg|kgs/i.test(text)) return false;
 
+    // Concatenated / garbage frames seen in logs (e.g. 20000020).
+    if (parsed > 120000) return true;
+
+    const digits = text.replace(/[^\d]/g, '');
+    const ref = Math.max(
+      Number(this.latestStableWeight) || 0,
+      Number(this.latestWeight) || 0,
+    );
+
+    // This site's indicator normally emits 5–6 digit zero-padded frames
+    // such as "011160" or "-000100".
+    const looksComplete =
+      /^[+-]?\d{5,7}$/.test(text) ||
+      /^[SNEB]\s*[+-]?\d{4,}/i.test(text) ||
+      digits.length >= 5;
+
+    if (looksComplete) return false;
+
     // Common glitch: receive "6" between full "60" frames.
-    if (
-      Number.isFinite(this.latestWeight) &&
-      this.latestWeight >= 10 &&
-      parsed > 0 &&
-      parsed * 10 === this.latestWeight
-    ) {
+    if (ref >= 10 && parsed > 0 && parsed * 10 === ref) {
+      return true;
+    }
+
+    // While a real truck weight is on the bridge, reject short chunks that are
+    // clearly prefixes/suffixes of that weight ("60" from "011160", "12" from "012280").
+    if (ref >= 1000 && parsed > 0 && parsed < 1000) {
+      if (digits.length <= 3) return true;
+      if (this._isFragmentOf(parsed, ref)) return true;
+    }
+
+    if (ref >= 5000 && parsed > 0 && parsed < ref * 0.2 && this._isFragmentOf(parsed, ref)) {
       return true;
     }
 

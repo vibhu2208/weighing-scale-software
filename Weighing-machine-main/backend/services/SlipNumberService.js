@@ -2,7 +2,6 @@
 
 const { getDb } = require('../database/db');
 const pg = require('../database/pg');
-const { isOnline } = require('../utils/connectivity');
 const logger = require('../utils/logger');
 const ts = require('../utils/timestamp');
 
@@ -83,8 +82,7 @@ const SlipNumberService = {
   getMaxLocalSlipNumeric,
 
   async allocate() {
-    const online = await isOnline();
-    if (online && pg.isConfigured()) {
+    if (pg.isConfigured()) {
       try {
         const ok = await pg.ping();
         if (ok) {
@@ -103,8 +101,6 @@ const SlipNumberService = {
 
   async syncOnStartup() {
     if (!pg.isConfigured()) return { ok: false, reason: 'not_configured' };
-    const online = await isOnline();
-    if (!online) return { ok: false, reason: 'offline' };
 
     try {
       const ok = await pg.ping();

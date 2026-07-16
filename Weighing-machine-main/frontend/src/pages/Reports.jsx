@@ -12,7 +12,7 @@ import {
   ticketStatusLabel,
   ticketStatusVariant,
 } from '../lib/ticketStatus.js';
-import { isMcgSkipped, mcgStatusLabel, mcgStatusTitle, mcgStatusVariant } from '../lib/mcgStatus.js';
+import { mcgStatusLabel, mcgStatusTitle, mcgStatusVariant } from '../lib/mcgStatus.js';
 import { getPeriodRange, todayISO, toFilterTimestamps } from '../lib/reportDates.js';
 import { listTripCameraImages } from '../lib/tripPhotos.js';
 
@@ -343,7 +343,7 @@ export default function Reports() {
     if (!ticket?.id || mcgResending.has(ticket.id)) return;
     setMcgResending((prev) => new Set(prev).add(ticket.id));
     try {
-      const result = await mcgAPI.resendSkipped(ticket.id);
+      const result = await mcgAPI.resend(ticket.id);
       if (result?.transaction) {
         refreshTicketRow(result.transaction);
       }
@@ -659,16 +659,15 @@ export default function Reports() {
                                 <span title={mcgStatusTitle(t)}>
                                   <Badge label={mcgStatusLabel(t)} variant={mcgStatusVariant(t)} />
                                 </span>
-                                {isMcgSkipped(t) && (
-                                  <button
-                                    type="button"
-                                    className="text-xs text-amber-300 hover:text-amber-200 disabled:opacity-50"
-                                    disabled={mcgResending.has(t.id)}
-                                    onClick={() => handleMcgResend(t)}
-                                  >
-                                    {mcgResending.has(t.id) ? 'Sending…' : 'Resend'}
-                                  </button>
-                                )}
+                                <button
+                                  type="button"
+                                  title="Send this ticket to MCG again"
+                                  className="text-xs text-amber-300 hover:text-amber-200 disabled:opacity-50"
+                                  disabled={mcgResending.has(t.id)}
+                                  onClick={() => handleMcgResend(t)}
+                                >
+                                  {mcgResending.has(t.id) ? 'Sending…' : 'Resend'}
+                                </button>
                               </div>
                             ) : (
                               '—'

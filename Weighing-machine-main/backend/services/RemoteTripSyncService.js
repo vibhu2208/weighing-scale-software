@@ -6,7 +6,6 @@ const cron = require('node-cron');
 const pg = require('../database/pg');
 const logger = require('../utils/logger');
 const ts = require('../utils/timestamp');
-const { isOnline } = require('../utils/connectivity');
 const { getCameraImagePath } = require('../utils/fileStorage');
 const TransactionService = require('./TransactionService');
 const McgPortalService = require('./McgPortalService');
@@ -147,9 +146,20 @@ async function processRemoteRow(row) {
   }
 
   if (!importResult.imported && transaction.remote_pg_id !== remoteId) {
-    throw new Error(
-      `Slip ${row.slip_number} already exists locally with a different source`,
-    );
+    const conflictMsg = `Slip ${row.slip_number} already exists locally with a different source (local truck ${transaction.truck_number})`;
+    logger.error('Remote trip import skipped — slip conflict', {
+      remoteId,
+      slip: row.slip_number,
+      remoteTruck: row.truck_number,
+      localId: transaction.id,
+      localTruck: transaction.truck_number,
+    });
+    // Mark synced so the queue does not retry forever; data stays on RDS for manual fix.
+    await markRemoteTripSynced(remoteId, transaction.id, {
+      ok: false,
+      error: conflictMsg,
+    });
+    return { ok: false, reason: 'slip_conflict', transactionId: transaction.id };
   }
 
   let mcgResult = { ok: true, skipped: true, reason: 'already_sent' };
@@ -208,9 +218,7 @@ async function processNow() {
   if (processing) return { ok: true, skipped: true, reason: 'busy' };
   if (!pg.isConfigured()) return { ok: false, reason: 'not_configured' };
 
-  const online = await isOnline();
-  if (!online) return { ok: false, reason: 'offline' };
-
+  // Gate on Postgres itself — generic amazonaws.com DNS can fail while RDS still works.
   const pingOk = await pg.ping();
   if (!pingOk) {
     logger.warn(

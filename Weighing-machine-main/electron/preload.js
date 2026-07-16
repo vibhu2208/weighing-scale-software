@@ -66,7 +66,7 @@ const electronAPI = {
     'getSyncHistory',
   ]),
 
-  mcg: buildNamespace('mcg', ['testPost', 'resendSkipped']),
+  mcg: buildNamespace('mcg', ['testPost', 'resend', 'resendSkipped']),
 
   workflow: buildNamespace('workflow', [
     'getState',

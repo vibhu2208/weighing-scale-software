@@ -317,7 +317,7 @@ async function saveTripCapture(data = {}) {
   const vehicleType = resolveVehicleType(vehicle, openTicket);
   const isClose = !!openTicket;
   const pass = resolveAdjustmentPass({ vehicleType, isClose });
-  let rawKg = DeviceMonitorService.getCurrentRawWeight();
+  let rawKg = DeviceMonitorService.getCaptureWeightKg(data.weightKg);
   if (!Number.isFinite(rawKg) || rawKg <= 0) {
     rawKg = Math.round(Number(data.weightKg));
   }

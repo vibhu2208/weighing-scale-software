@@ -103,7 +103,7 @@ export const syncAPI = makeProxy('sync', [
   'getSyncHistory',
 ]);
 
-export const mcgAPI = makeProxy('mcg', ['testPost', 'resendSkipped']);
+export const mcgAPI = makeProxy('mcg', ['testPost', 'resend', 'resendSkipped']);
 
 export const reportAPI = makeProxy('reports', [
   'getDailyReport',

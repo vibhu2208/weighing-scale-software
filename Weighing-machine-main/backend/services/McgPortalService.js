@@ -247,6 +247,27 @@ const McgPortalService = {
     return postPayload(payload, { label: 'MCG portal test' });
   },
 
+  async resendTicket(transactionId) {
+    const transaction = TransactionService.getById(transactionId);
+    if (!transaction) {
+      return { ok: false, error: 'transaction_not_found' };
+    }
+    if (transaction.ticket_status !== 'CLOSED') {
+      return { ok: false, error: 'ticket_not_closed' };
+    }
+
+    logger.info('MCG portal manual resend', {
+      transactionId,
+      slip: transaction.slip_number,
+      previousStatus: transaction.mcg_status || null,
+    });
+    const result = await McgPortalService.postClosedTicket(transactionId);
+    return {
+      ...result,
+      transaction: TransactionService.getById(transactionId),
+    };
+  },
+
   async resendSkippedTicket(transactionId) {
     const transaction = TransactionService.getById(transactionId);
     if (!transaction) {
@@ -263,11 +284,7 @@ const McgPortalService = {
       transactionId,
       slip: transaction.slip_number,
     });
-    const result = await McgPortalService.postClosedTicket(transactionId);
-    return {
-      ...result,
-      transaction: TransactionService.getById(transactionId),
-    };
+    return McgPortalService.resendTicket(transactionId);
   },
 };
 
