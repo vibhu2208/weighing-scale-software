@@ -31,7 +31,7 @@ function getPool() {
       ssl: { rejectUnauthorized: false },
       max: 5,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 15000,
+      connectionTimeoutMillis: 120000,
     });
     pool.on('error', (err) => {
       logger.warn('PostgreSQL pool error', { message: err.message });

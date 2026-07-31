@@ -346,4 +346,5 @@ module.exports = {
   start,
   stop,
   processNow,
+  processRemoteRow,
 };

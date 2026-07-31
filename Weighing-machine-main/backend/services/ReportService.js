@@ -624,11 +624,21 @@ const ReportService = {
 
   resolveClosedReportPath(txn) {
     if (!txn || !isClosedTrip(txn)) return null;
-    const candidates = [
-      txn.report_path,
-      txn.slip_number ? path.join(PATHS.REPORTS, `${txn.slip_number}_report.pdf`) : null,
-    ].filter(Boolean);
-    return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+    const slip = txn.slip_number ? String(txn.slip_number).trim() : '';
+    const slipNamed = slip
+      ? path.join(PATHS.REPORTS, `${slip}_report.pdf`)
+      : null;
+    // Prefer slip-unique copy — date_truck report_path is shared across same-day revisits.
+    if (slipNamed && fs.existsSync(slipNamed)) return slipNamed;
+
+    if (txn.report_path && fs.existsSync(txn.report_path) && slip) {
+      const base = path.basename(txn.report_path, path.extname(txn.report_path));
+      const slipToken = sanitizeExportBasename(slip).toUpperCase();
+      if (slipToken && base.toUpperCase().includes(slipToken)) {
+        return txn.report_path;
+      }
+    }
+    return null;
   },
 
   async exportTripPDF(transactionId) {
@@ -673,21 +683,34 @@ const ReportService = {
 
     const day = reportDateIso(row);
     const vehicle = sanitizeExportBasename(row.truck_number || 'vehicle');
+    const slipToken = sanitizeExportBasename(row.slip_number || 'trip');
     const result = await buildAndSavePdf([row], {
-      filenamePrefix: day ? `${day}_${vehicle}` : vehicle,
+      // Include slip so same-day same-truck trips never overwrite each other.
+      filenamePrefix: day ? `${slipToken}_${day}_${vehicle}` : `${slipToken}_${vehicle}`,
     });
     if (!result.ok) return result;
 
+    let finalPath = result.path;
     if (row.slip_number) {
       const reportCopy = path.join(PATHS.REPORTS, `${row.slip_number}_report.pdf`);
       ensureDir(PATHS.REPORTS);
       fs.copyFileSync(result.path, reportCopy);
+      finalPath = reportCopy;
     }
 
-    logger.info('Trip PDF export complete', { path: result.path, transactionId });
+    try {
+      TransactionService.updateFields(transactionId, { report_path: finalPath });
+    } catch (err) {
+      logger.warn('Could not update report_path after export', {
+        transactionId,
+        message: err.message,
+      });
+    }
+
+    logger.info('Trip PDF export complete', { path: finalPath, transactionId });
     return {
       ok: true,
-      path: result.path,
+      path: finalPath,
       transactionId,
       slip_number: row.slip_number,
       suggestedName,
@@ -707,22 +730,25 @@ const ReportService = {
     const row = enrichReportRow(txn);
     const day = reportDateIso(row);
     const vehicle = sanitizeExportBasename(row.truck_number || 'vehicle');
+    const slipToken = sanitizeExportBasename(row.slip_number || 'trip');
     const result = await buildAndSavePdf([row], {
-      filenamePrefix: day ? `${day}_${vehicle}` : vehicle,
+      filenamePrefix: day ? `${slipToken}_${day}_${vehicle}` : `${slipToken}_${vehicle}`,
     });
     if (!result.ok) return result;
 
+    let finalPath = result.path;
     if (row.slip_number) {
       const reportCopy = path.join(PATHS.REPORTS, `${row.slip_number}_report.pdf`);
       ensureDir(PATHS.REPORTS);
       fs.copyFileSync(result.path, reportCopy);
+      finalPath = reportCopy;
     }
 
-    TransactionService.updateFields(transactionId, { report_path: result.path });
-    logger.info('Trip PDF regenerated', { path: result.path, transactionId });
+    TransactionService.updateFields(transactionId, { report_path: finalPath });
+    logger.info('Trip PDF regenerated', { path: finalPath, transactionId });
     return {
       ok: true,
-      path: result.path,
+      path: finalPath,
       transactionId,
       slip_number: row.slip_number,
     };
