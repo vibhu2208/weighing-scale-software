@@ -11,6 +11,13 @@ const {
   photoPathForSlot,
 } = require('./tripPhotos');
 const { isHywa, grossWeightTimestamp, tareWeightTimestamp, netWeightTimestamp } = require('./vehicleTypes');
+const {
+  compressImageForPdf,
+  compressImageForPdfAsync,
+  DEFAULT_PHOTO_MAX_WIDTH,
+  DEFAULT_PHOTO_JPEG_QUALITY,
+  DEFAULT_LOGO_MAX_WIDTH,
+} = require('./pdfImageCompress');
 
 const MIME_BY_EXT = {
   '.jpg': 'image/jpeg',
@@ -37,9 +44,14 @@ function resolveReportLogoPath(customPath) {
   return null;
 }
 
-function buildReportLogoHtml(company = {}) {
+async function buildReportLogoHtml(company = {}) {
   const logoPath = resolveReportLogoPath(company.logoPath);
-  const src = logoPath ? imageToDataUrl(logoPath) : null;
+  const src = logoPath
+    ? await imageToDataUrlAsync(logoPath, {
+        maxWidth: DEFAULT_LOGO_MAX_WIDTH,
+        asJpeg: false,
+      })
+    : null;
   if (!src) return '<div class="header-logo"></div>';
   return `<div class="header-logo"><img src="${src}" alt=""/></div>`;
 }
@@ -75,12 +87,18 @@ function weightLine(label, kg, timestampIso) {
   </div>`;
 }
 
-function buildWeighmentPhotoRow(row, passLabel, sectionTitle) {
+async function buildWeighmentPhotoRow(row, passLabel, sectionTitle) {
   const cells = [];
 
   for (let slot = 1; slot <= 3; slot += 1) {
     const filePath = photoPathForSlot(row, passLabel, slot);
-    const src = filePath ? imageToDataUrl(filePath) : null;
+    const src = filePath
+      ? await imageToDataUrlAsync(filePath, {
+          maxWidth: DEFAULT_PHOTO_MAX_WIDTH,
+          quality: DEFAULT_PHOTO_JPEG_QUALITY,
+          asJpeg: true,
+        })
+      : null;
     if (src) {
       cells.push(`<div class="photo-cell"><img src="${src}" alt=""/></div>`);
     } else {
@@ -94,7 +112,7 @@ function buildWeighmentPhotoRow(row, passLabel, sectionTitle) {
   </div>`;
 }
 
-function buildVehicleReportPage(row, company = {}) {
+async function buildVehicleReportPage(row, company = {}) {
   const orgName = company.name || 'MUNICIPAL CORPORATION GURUGRAM';
   const siteName = company.siteName || company.address || 'BANDHWARI SLF SITE GURURAM (HARYANA) DCC';
   const weighbridgeId = company.weighbridgeId || 'WB - 03';
@@ -102,10 +120,13 @@ function buildVehicleReportPage(row, company = {}) {
   const destination = row.destination || '—';
   const companyName = company.reportCompanyName || 'DAYA CHARAN & COMPANY';
   const operatorName = row.operator_name || '—';
+  const logoHtml = await buildReportLogoHtml(company);
+  const arrivalPhotos = await buildWeighmentPhotoRow(row, 'arrival', '1ST WEIGHMENTS');
+  const departurePhotos = await buildWeighmentPhotoRow(row, 'departure', '2ND WEIGHMENTS');
 
   return `<div class="vehicle-report">
     <div class="report-header">
-      ${buildReportLogoHtml(company)}
+      ${logoHtml}
       <div class="header-center">
         <div class="org-name">${escapeHtml(orgName)}</div>
         <div class="site-name">${escapeHtml(siteName)}</div>
@@ -134,8 +155,8 @@ function buildVehicleReportPage(row, company = {}) {
       ${weightLine('Net Wt', row.net_weight, netWeightTimestamp(row) || row.timestamp_in)}
     </div>
 
-    ${buildWeighmentPhotoRow(row, 'arrival', '1ST WEIGHMENTS')}
-    ${buildWeighmentPhotoRow(row, 'departure', '2ND WEIGHMENTS')}
+    ${arrivalPhotos}
+    ${departurePhotos}
 
     <div class="signature-block">
       <div class="signature-label">OPERATOR'S SIGNATURE</div>
@@ -288,24 +309,61 @@ function buildCombinedCoverStyles() {
   `;
 }
 
-function buildVehicleReportHtml(rows, options = {}) {
+async function buildVehicleReportHtml(rows, options = {}) {
   const { company = {}, coverMeta = null } = options;
   const list = Array.isArray(rows) ? rows : [rows];
-  const ticketPages = list.map((row) => buildVehicleReportPage(row, company)).join('');
+  const ticketPages = [];
+  // Compress a few tickets at a time so ffmpeg does not flood the machine.
+  const PAGE_CONCURRENCY = 3;
+  for (let i = 0; i < list.length; i += PAGE_CONCURRENCY) {
+    const batch = list.slice(i, i + PAGE_CONCURRENCY);
+    const pages = await Promise.all(batch.map((row) => buildVehicleReportPage(row, company)));
+    ticketPages.push(...pages);
+  }
   const cover = coverMeta
     ? buildCombinedCoverPage(company, coverMeta)
     : '';
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>${buildVehicleReportStyles()}<style>${buildCombinedCoverStyles()}</style></head>
-<body>${cover}${ticketPages}</body></html>`;
+<body>${cover}${ticketPages.join('')}</body></html>`;
 }
 
-function imageToDataUrl(filePath) {
+/**
+ * Embed an image as a data URL for PDF HTML.
+ * Prefer compressed JPEG/PNG so ticket packs stay small enough to generate and download.
+ * @param {string} filePath
+ * @param {{ maxWidth?: number, quality?: number, asJpeg?: boolean }} [options]
+ */
+function imageToDataUrl(filePath, options = {}) {
   const resolved = normalizePath(filePath);
   if (!resolved || !fs.existsSync(resolved)) return null;
 
   try {
+    const compressed = compressImageForPdf(resolved, options);
+    if (compressed?.buffer?.length) {
+      return `data:${compressed.mime};base64,${compressed.buffer.toString('base64')}`;
+    }
+
+    const ext = path.extname(resolved).toLowerCase();
+    const mime = MIME_BY_EXT[ext] || 'image/jpeg';
+    const data = fs.readFileSync(resolved).toString('base64');
+    return `data:${mime};base64,${data}`;
+  } catch {
+    return null;
+  }
+}
+
+async function imageToDataUrlAsync(filePath, options = {}) {
+  const resolved = normalizePath(filePath);
+  if (!resolved || !fs.existsSync(resolved)) return null;
+
+  try {
+    const compressed = await compressImageForPdfAsync(resolved, options);
+    if (compressed?.buffer?.length) {
+      return `data:${compressed.mime};base64,${compressed.buffer.toString('base64')}`;
+    }
+
     const ext = path.extname(resolved).toLowerCase();
     const mime = MIME_BY_EXT[ext] || 'image/jpeg';
     const data = fs.readFileSync(resolved).toString('base64');

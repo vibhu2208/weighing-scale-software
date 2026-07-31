@@ -16,7 +16,8 @@ const { renderHtmlToPdf, printHtml } = require('../utils/htmlToPdf');
 const { isClosedTrip } = require('../utils/tripPhotos');
 const { grossWeightTimestamp, tareWeightTimestamp, reportListingTimestamp } = require('../utils/vehicleTypes');
 
-const MAX_TRIPS_PER_PDF = 500;
+/** Cached single-ticket PDFs built before image compression are often 15–30 MB. */
+const MAX_CACHED_REPORT_BYTES = 1.5 * 1024 * 1024;
 
 // Closed tickets belong on the net-weight (close) date; open tickets use arrival date.
 const REPORT_DATE_SQL = `CASE
@@ -367,10 +368,9 @@ async function buildAndSavePdf(rows, options = {}) {
     || buildExportBasename(filters, periodLabel, rows);
   const company = getCompanySettings();
   const summary = summarise(rows);
-  const truncated = rows.length > MAX_TRIPS_PER_PDF;
-  const exportRows = (truncated ? rows.slice(0, MAX_TRIPS_PER_PDF) : rows).map(enrichReportRow);
+  const exportRows = rows.map(enrichReportRow);
 
-  const html = buildVehicleReportHtml(exportRows, {
+  const html = await buildVehicleReportHtml(exportRows, {
     company,
     coverMeta: (exportRows.length > 1 || options.forceCover) ? {
       periodLabel: describePeriod(filters, periodLabel),
@@ -391,7 +391,7 @@ async function buildAndSavePdf(rows, options = {}) {
     path: filePath,
     count: exportRows.length,
     total: rows.length,
-    truncated,
+    truncated: false,
   };
 }
 
@@ -506,14 +506,14 @@ const ReportService = {
     return { operators, materials };
   },
 
-  getReportPreviewHtml(transactionId) {
+  async getReportPreviewHtml(transactionId) {
     const TransactionService = require('./TransactionService');
     const txn = TransactionService.getById(transactionId);
     if (!txn) {
       return { ok: false, error: 'Transaction not found' };
     }
     const row = enrichReportRow(txn);
-    const html = buildVehicleReportHtml([row], { company: getCompanySettings() });
+    const html = await buildVehicleReportHtml([row], { company: getCompanySettings() });
     return { ok: true, html, transactionId, slip_number: row.slip_number };
   },
 
@@ -628,14 +628,28 @@ const ReportService = {
     const slipNamed = slip
       ? path.join(PATHS.REPORTS, `${slip}_report.pdf`)
       : null;
-    // Prefer slip-unique copy — date_truck report_path is shared across same-day revisits.
-    if (slipNamed && fs.existsSync(slipNamed)) return slipNamed;
 
-    if (txn.report_path && fs.existsSync(txn.report_path) && slip) {
+    const usable = (filePath) => {
+      if (!filePath || !fs.existsSync(filePath)) return null;
+      try {
+        const { size } = fs.statSync(filePath);
+        // Old packs embedded full camera JPEGs (~20–30 MB). Force rebuild compressed.
+        if (size > MAX_CACHED_REPORT_BYTES) return null;
+      } catch {
+        return null;
+      }
+      return filePath;
+    };
+
+    // Prefer slip-unique copy — date_truck report_path is shared across same-day revisits.
+    const slipHit = usable(slipNamed);
+    if (slipHit) return slipHit;
+
+    if (txn.report_path && slip) {
       const base = path.basename(txn.report_path, path.extname(txn.report_path));
       const slipToken = sanitizeExportBasename(slip).toUpperCase();
       if (slipToken && base.toUpperCase().includes(slipToken)) {
-        return txn.report_path;
+        return usable(txn.report_path);
       }
     }
     return null;
@@ -760,7 +774,7 @@ const ReportService = {
 
     const company = getCompanySettings();
     const summary = summarise(rows);
-    const html = buildVehicleReportHtml(rows.map(enrichReportRow), {
+    const html = await buildVehicleReportHtml(rows.map(enrichReportRow), {
       company,
       coverMeta: rows.length > 1 ? {
         periodLabel: options.periodLabel || 'Selected tickets',
@@ -778,7 +792,7 @@ const ReportService = {
   async printFilteredReports(filters = {}, options = {}) {
     const rows = queryTransactions(filters);
     if (!rows.length) return { ok: false, error: 'No tickets match the selected filters' };
-    const ids = rows.slice(0, MAX_TRIPS_PER_PDF).map((r) => r.id);
+    const ids = rows.map((r) => r.id);
     return this.printReports(ids, {
       periodLabel: describePeriod(filters, options.periodLabel),
     });

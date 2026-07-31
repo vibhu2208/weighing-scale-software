@@ -44,9 +44,7 @@ function showExportResult(result, label = 'Export complete') {
     dialog.showMessageBox({
       type: 'info',
       title: label,
-      message: result.truncated
-        ? `${label} (${result.count} of ${result.total} trips):\n${result.path}`
-        : `${label} (${result.count || 0} record(s)):\n${result.path}`,
+      message: `${label} (${result.count || 0} record(s)):\n${result.path}`,
     });
   } else if (result.error) {
     dialog.showMessageBox({

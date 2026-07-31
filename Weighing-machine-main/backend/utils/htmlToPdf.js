@@ -51,7 +51,7 @@ async function renderHtmlToPdf(html, options = {}) {
           pending -= 1;
           if (pending <= 0) resolve(true);
         };
-        const timeout = setTimeout(() => resolve(true), 20000);
+        const timeout = setTimeout(() => resolve(true), 60000);
         imgs.forEach((img) => {
           const finish = () => {
             if (img.naturalWidth === 0) {
