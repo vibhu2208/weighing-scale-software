@@ -576,13 +576,19 @@ const TransactionService = {
     if (existing.ticket_status !== TICKET_STATUS.OPEN) {
       throw new Error('Only OPEN tickets can be cancelled');
     }
-    return this.updateFields(id, {
+    const updated = this.updateFields(id, {
       ticket_status: TICKET_STATUS.CANCELLED,
       status: TRANSACTION_STATUS.CANCELLED,
       notes: existing.notes
         ? `${existing.notes}; Cancelled by operator`
         : 'Cancelled by operator',
     });
+    try {
+      require('./CloudAdminSyncService').enqueuePush(id);
+    } catch (_e) {
+      /* optional */
+    }
+    return updated;
   },
 
   getAll(filters = {}) {

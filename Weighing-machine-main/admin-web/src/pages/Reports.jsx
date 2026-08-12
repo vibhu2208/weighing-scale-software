@@ -15,7 +15,7 @@ function SummaryCard({ label, value }) {
 
 export default function Reports() {
   const [period, setPeriod] = useState('last_7_days');
-  const [ticketStatus, setTicketStatus] = useState('CLOSED');
+  const [ticketStatus, setTicketStatus] = useState('all');
   const [operator, setOperator] = useState('all');
   const [material, setMaterial] = useState('all');
   const [search, setSearch] = useState('');
@@ -191,7 +191,7 @@ export default function Reports() {
               <th className="p-3">Gross</th>
               <th className="p-3">Tare</th>
               <th className="p-3">Net</th>
-              <th className="p-3">Closed</th>
+              <th className="p-3">In / Out</th>
               <th className="p-3">Status</th>
               <th className="p-3">Actions</th>
             </tr>
@@ -206,9 +206,21 @@ export default function Reports() {
                 <td className="p-3">{fmtKg(row.gross_weight)}</td>
                 <td className="p-3">{fmtKg(row.tare_weight)}</td>
                 <td className="p-3">{fmtKg(row.net_weight)}</td>
-                <td className="p-3 text-xs">{fmtDate(row.timestamp_out)}</td>
+                <td className="p-3 text-xs">
+                  {row.ticket_status === 'OPEN'
+                    ? fmtDate(row.timestamp_in)
+                    : fmtDate(row.timestamp_out || row.timestamp_in)}
+                </td>
                 <td className="p-3">
-                  <Badge tone={row.ticket_status === 'CLOSED' ? 'success' : 'default'}>
+                  <Badge
+                    tone={
+                      row.ticket_status === 'CLOSED'
+                        ? 'success'
+                        : row.ticket_status === 'OPEN'
+                          ? 'warning'
+                          : 'default'
+                    }
+                  >
                     {row.ticket_status}
                   </Badge>
                 </td>

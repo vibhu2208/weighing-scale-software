@@ -179,6 +179,13 @@ async function processRemoteRow(row, attempt = 0) {
       skipped: true,
       reason: 'already_sent',
     });
+    // Re-push in case the trip never landed in transactions_mirror (admin Reports).
+    try {
+      const CloudAdminSyncService = require('./CloudAdminSyncService');
+      CloudAdminSyncService.enqueuePush(alreadyImported.id);
+    } catch (_e) {
+      /* optional */
+    }
     return { ok: true, reason: 'already_imported', transactionId: alreadyImported.id };
   }
 
@@ -268,6 +275,24 @@ async function processRemoteRow(row, attempt = 0) {
   }
 
   await markRemoteTripSynced(remoteId, transaction.id, mcgResult);
+
+  // Push into transactions_mirror so the admin Reports panel sees this trip.
+  // Remote imports skip TripCaptureService, which normally calls enqueuePush.
+  try {
+    const CloudAdminSyncService = require('./CloudAdminSyncService');
+    CloudAdminSyncService.enqueuePush(transaction.id);
+    CloudAdminSyncService.processNow().catch((err) => {
+      logger.warn('CloudAdminSync push after remote import failed', {
+        transactionId: transaction.id,
+        message: err.message,
+      });
+    });
+  } catch (err) {
+    logger.warn('CloudAdminSync enqueue after remote import failed', {
+      transactionId: transaction.id,
+      message: err.message,
+    });
+  }
 
   logger.info('Remote trip synced to local', {
     remoteId,

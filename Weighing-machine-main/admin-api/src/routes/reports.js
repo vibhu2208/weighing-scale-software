@@ -137,22 +137,55 @@ router.get('/:slip', async (req, res) => {
 
 router.post('/:slip/edit', async (req, res) => {
   try {
+    const siteId = getSiteId();
     const slip = String(req.params.slip || '').trim();
     const body = req.body || {};
+    const payload = {
+      slipNumber: slip,
+      gross_weight: body.gross_weight,
+      tare_weight: body.tare_weight,
+      timestamp_in: body.timestamp_in,
+      timestamp_out: body.timestamp_out,
+      material: body.material,
+      customer_name: body.customer_name,
+      destination: body.destination,
+      operator_name: body.operator_name,
+      photoS3Keys: body.photoS3Keys || [],
+    };
+
+    // Optimistic mirror update so admin Reports show the new tare/gross immediately.
+    // The weighbridge PC still applies the command to local SQLite + regenerates PDF.
+    const sets = [];
+    const params = [];
+    let idx = 1;
+    const fields = [
+      ['gross_weight', body.gross_weight],
+      ['tare_weight', body.tare_weight],
+      ['timestamp_in', body.timestamp_in],
+      ['timestamp_out', body.timestamp_out],
+      ['material', body.material],
+      ['customer_name', body.customer_name],
+      ['destination', body.destination],
+      ['operator_name', body.operator_name],
+    ];
+    for (const [col, value] of fields) {
+      if (value === undefined || value === null || value === '') continue;
+      sets.push(`${col} = $${idx++}`);
+      params.push(col.includes('weight') ? Number(value) : value);
+    }
+    if (sets.length) {
+      sets.push('updated_at = now()');
+      params.push(siteId, slip);
+      await query(
+        `UPDATE transactions_mirror SET ${sets.join(', ')}
+         WHERE site_id = $${idx++} AND slip_number = $${idx}`,
+        params,
+      );
+    }
+
     const cmd = await createCommand({
       type: 'edit_report',
-      payload: {
-        slipNumber: slip,
-        gross_weight: body.gross_weight,
-        tare_weight: body.tare_weight,
-        timestamp_in: body.timestamp_in,
-        timestamp_out: body.timestamp_out,
-        material: body.material,
-        customer_name: body.customer_name,
-        destination: body.destination,
-        operator_name: body.operator_name,
-        photoS3Keys: body.photoS3Keys || [],
-      },
+      payload,
       createdBy: req.user?.email,
     });
     return res.json({ ok: true, command: cmd });

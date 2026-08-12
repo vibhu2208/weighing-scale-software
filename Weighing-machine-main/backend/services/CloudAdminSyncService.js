@@ -49,11 +49,20 @@ function intervalSeconds() {
 }
 
 function getSiteId() {
-  return (process.env.WEIGHBRIDGE_ID || SettingsService.get('WEIGHBRIDGE_ID') || 'WB-03').trim();
+  return (
+    process.env.WEIGHBRIDGE_ID ||
+    SettingsService.get('WEIGHBRIDGE_ID') ||
+    'WB - 03'
+  ).trim();
 }
 
 function enqueuePush(transactionId) {
-  if (transactionId) pushQueue.add(transactionId);
+  if (!transactionId) return;
+  pushQueue.add(transactionId);
+  // Flush soon so OPEN tickets appear in admin without waiting for the cron tick.
+  processNow().catch((err) => {
+    logger.warn('CloudAdminSync flush after enqueue failed', { message: err.message });
+  });
 }
 
 async function uploadLocalFileIfExists(localPath, s3Key) {
@@ -90,20 +99,34 @@ async function buildMirrorPhotoKeys(txn) {
   return keys;
 }
 
+const MIRROR_STATUSES = new Set([
+  TICKET_STATUS.OPEN,
+  TICKET_STATUS.CLOSED,
+  TICKET_STATUS.CANCELLED,
+]);
+
 async function pushTransaction(txn) {
-  if (!txn?.id || txn.ticket_status !== TICKET_STATUS.CLOSED) {
+  if (!txn?.id || !MIRROR_STATUSES.has(txn.ticket_status)) {
     return { ok: false, skipped: true };
   }
 
   const siteId = getSiteId();
   const photoKeys = await buildMirrorPhotoKeys(txn);
   let reportS3Key = null;
-  if (txn.report_path) {
+  // PDF only exists after close — skip upload work for open tickets.
+  if (txn.ticket_status === TICKET_STATUS.CLOSED && txn.report_path) {
     reportS3Key = await uploadLocalFileIfExists(
       txn.report_path,
       S3Service.mirrorReportKey(siteId, txn.slip_number),
     );
   }
+
+  // Upsert by slip so edits refresh the same admin row even if local_id differs.
+  // Clear any other mirror row that owns this local_id to avoid unique conflicts.
+  await pg.query(
+    'DELETE FROM transactions_mirror WHERE site_id = $1 AND local_id = $2 AND slip_number <> $3',
+    [siteId, txn.id, txn.slip_number],
+  );
 
   await pg.query(
     `INSERT INTO transactions_mirror (
@@ -118,8 +141,8 @@ async function pushTransaction(txn) {
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
       $20,$21,$22,$23,$24,$25,$26, now()
     )
-    ON CONFLICT (site_id, local_id) DO UPDATE SET
-      slip_number = EXCLUDED.slip_number,
+    ON CONFLICT (site_id, slip_number) DO UPDATE SET
+      local_id = EXCLUDED.local_id,
       truck_number = EXCLUDED.truck_number,
       rfid_tag = EXCLUDED.rfid_tag,
       customer_name = EXCLUDED.customer_name,
@@ -182,14 +205,15 @@ async function processPushQueue() {
   }
 }
 
-async function pushRecentClosed() {
+async function pushRecentTickets() {
   const { getDb } = require('../database/db');
   const rows = getDb()
     .prepare(
-      `SELECT id FROM transactions WHERE ticket_status = ?
-       ORDER BY COALESCE(timestamp_out, updated_at) DESC LIMIT 100`,
+      `SELECT id FROM transactions
+       WHERE ticket_status IN (?, ?, ?)
+       ORDER BY COALESCE(timestamp_out, updated_at) DESC LIMIT 150`,
     )
-    .all(TICKET_STATUS.CLOSED);
+    .all(TICKET_STATUS.OPEN, TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
   for (const row of rows) {
     const txn = TransactionService.getById(row.id);
     if (txn) {
@@ -200,6 +224,11 @@ async function pushRecentClosed() {
       }
     }
   }
+}
+
+/** @deprecated use pushRecentTickets */
+async function pushRecentClosed() {
+  return pushRecentTickets();
 }
 
 async function heartbeat() {
@@ -223,10 +252,21 @@ async function markCommand(id, status, error) {
 async function applyCommand(row) {
   const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload || {};
   if (row.type === 'edit_report') {
+    // Apply locally first, then refresh mirror. Never delete-before-push:
+    // a failed S3/mirror push used to leave admin Reports empty while the
+    // command stayed pending / blocked later syncs.
     await AdminReportService.applyRemoteUpdate(payload);
-    await deleteMirrorRow(payload.slipNumber);
     const txn = TransactionService.getBySlipNumber(payload.slipNumber);
-    if (txn) await pushTransaction(txn);
+    if (txn) {
+      try {
+        await pushTransaction(txn);
+      } catch (err) {
+        logger.warn('CloudAdminSync mirror push after edit failed', {
+          slip: payload.slipNumber,
+          message: err.message,
+        });
+      }
+    }
     return;
   }
   if (row.type === 'delete_report') {
@@ -238,16 +278,22 @@ async function applyCommand(row) {
 }
 
 async function pullCommands() {
+  const siteId = getSiteId();
   const res = await pg.query(
     `SELECT id, type, payload FROM admin_commands
      WHERE site_id = $1 AND status = 'pending'
      ORDER BY created_at ASC LIMIT 20`,
-    [getSiteId()],
+    [siteId],
   );
-  for (const row of res.rows || []) {
+  const rows = res.rows || [];
+  if (rows.length) {
+    logger.info('CloudAdminSync pulling commands', { siteId, count: rows.length });
+  }
+  for (const row of rows) {
     try {
       await applyCommand(row);
       await markCommand(row.id, 'applied', null);
+      logger.info('CloudAdminSync command applied', { id: row.id, type: row.type });
     } catch (err) {
       await markCommand(row.id, 'failed', err.message);
       logger.error('CloudAdminSync command failed', { id: row.id, message: err.message });
@@ -372,11 +418,11 @@ function start() {
   const sec = intervalSeconds();
   const cronExpr = sec >= 60 ? `0 */${Math.max(1, Math.floor(sec / 60))} * * * *` : `*/${sec} * * * * *`;
   cronJob = cron.schedule(cronExpr, () => processNow().catch(() => {}));
-  catchUpJob = cron.schedule('0 * * * * *', () => pushRecentClosed().catch(() => {}));
+  catchUpJob = cron.schedule('0 * * * * *', () => pushRecentTickets().catch(() => {}));
   logger.info('CloudAdminSync started', { siteId: getSiteId(), intervalSec: sec });
   startListen().catch(() => {});
   processNow().catch(() => {});
-  pushRecentClosed().catch(() => {});
+  pushRecentTickets().catch(() => {});
 }
 
 function stop() {

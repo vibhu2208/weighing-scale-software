@@ -543,6 +543,15 @@ async function openTicketSave({
     cameras: snapshots.length,
   });
 
+  try {
+    require('./CloudAdminSyncService').enqueuePush(txnId);
+  } catch (err) {
+    logger.warn('Cloud admin sync enqueue failed on open', {
+      transactionId: txnId,
+      message: err.message,
+    });
+  }
+
   return {
     transaction,
     imagePath: primaryPath,
