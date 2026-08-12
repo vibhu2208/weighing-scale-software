@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client.js';
 
 const ADVANCE_FIELDS = [
-  { key: 'WEIGHT_ADJUSTMENT_ENABLED', label: 'Enable weight increase', type: 'toggle' },
-  { key: 'WEIGHT_OFFSET_KG', label: 'Increase loaded truck weight by (kg)', type: 'number' },
+  { key: 'WEIGHT_ADJUSTMENT_ENABLED', label: 'Enable weight increase', type: 'toggle', weightOnly: true },
+  { key: 'WEIGHT_OFFSET_KG', label: 'Increase loaded truck weight by (kg)', type: 'number', weightOnly: true },
   { key: 'COMPANY_NAME', label: 'Company name', type: 'text' },
   { key: 'COMPANY_ADDRESS', label: 'Company address', type: 'text' },
   { key: 'COMPANY_PHONE', label: 'Company phone', type: 'text' },
@@ -18,6 +18,7 @@ const LIST_SECTIONS = [
   { name: 'customers', label: 'Customers' },
   { name: 'destinations', label: 'Destinations' },
   { name: 'operators', label: 'Operators' },
+  { name: 'companies', label: 'Companies' },
 ];
 
 export default function AdvanceSettings() {
@@ -73,6 +74,11 @@ export default function AdvanceSettings() {
     }
   }
 
+  const weightFeatureAvailable = settings.WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE !== 'false';
+  const visibleFields = ADVANCE_FIELDS.filter(
+    (field) => !field.weightOnly || weightFeatureAvailable,
+  );
+
   return (
     <div className="space-y-6 max-w-3xl">
       <div>
@@ -84,7 +90,12 @@ export default function AdvanceSettings() {
 
       <div className="card p-5 space-y-3">
         <h3 className="font-medium text-brand-300">Business & report settings</h3>
-        {ADVANCE_FIELDS.map((field) => (
+        {!weightFeatureAvailable && (
+          <p className="text-xs text-red-400 font-mono">
+            Technical error: WEIGHT_ADJUSTMENT-error
+          </p>
+        )}
+        {visibleFields.map((field) => (
           <div key={field.key} className="flex items-center justify-between gap-4">
             <label className="text-sm text-slate-300 shrink-0">{field.label}</label>
             {field.type === 'toggle' ? (

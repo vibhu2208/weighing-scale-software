@@ -1,6 +1,6 @@
 {
   "name": "weighbridge-app",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Professional industrial Weighbridge Management System (Electron + React + SQLite)",
   "main": "electron/main.js",
   "author": "Your Company",
@@ -31,7 +31,9 @@
     "electron-store": "^8.2.0",
     "exceljs": "^4.4.0",
     "ffmpeg-static": "^5.3.0",
+    "jszip": "^3.10.1",
     "node-cron": "^3.0.3",
+    "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

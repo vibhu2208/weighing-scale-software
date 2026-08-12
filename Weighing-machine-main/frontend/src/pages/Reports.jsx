@@ -23,6 +23,7 @@ const EMPTY_SUMMARY = {
   open: 0,
   closed: 0,
   cancelled: 0,
+  deleted: 0,
   gross: 0,
   tare: 0,
   net: 0,
@@ -31,7 +32,7 @@ const EMPTY_SUMMARY = {
 };
 
 function netWeightAt(ticket) {
-  if (ticket?.ticket_status === 'CLOSED') {
+  if (ticket?.ticket_status === 'CLOSED' || ticket?.ticket_status === 'DELETED') {
     return ticket.timestamp_out || ticket.updated_at || null;
   }
   return null;
@@ -82,6 +83,7 @@ export default function Reports() {
   const [status, setStatus] = useState('all');
   const [operator, setOperator] = useState('all');
   const [material, setMaterial] = useState('all');
+  const [company, setCompany] = useState('all');
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
 
@@ -89,7 +91,7 @@ export default function Reports() {
   const [summary, setSummary] = useState(EMPTY_SUMMARY);
   const [todayNetWeight, setTodayNetWeight] = useState(0);
   const [pagination, setPagination] = useState({ page: 0, pageSize: PAGE_SIZE, total: 0, totalPages: 1 });
-  const [filterOptions, setFilterOptions] = useState({ operators: [], materials: [] });
+  const [filterOptions, setFilterOptions] = useState({ operators: [], materials: [], companies: [] });
 
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState(new Set());
@@ -121,13 +123,14 @@ export default function Reports() {
       search: search.trim() || undefined,
       operator_name: operator === 'all' ? undefined : operator,
       material: material === 'all' ? undefined : material,
+      company: company === 'all' ? undefined : company,
     };
     if (status === 'all') return base;
-    if (['OPEN', 'CLOSED', 'CANCELLED'].includes(status)) {
+    if (['OPEN', 'CLOSED', 'CANCELLED', 'DELETED'].includes(status)) {
       return { ...base, ticket_status: status };
     }
     return { ...base, status };
-  }, [from, to, period, status, operator, material, search, page]);
+  }, [from, to, period, status, operator, material, company, search, page]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -153,7 +156,13 @@ export default function Reports() {
   }, [load]);
 
   useEffect(() => {
-    reportAPI.getFilterOptions().then(setFilterOptions).catch(() => {});
+    reportAPI.getFilterOptions().then((opts) => {
+      setFilterOptions({
+        operators: opts?.operators || [],
+        materials: opts?.materials || [],
+        companies: opts?.companies || [],
+      });
+    }).catch(() => {});
   }, []);
 
   const allPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
@@ -392,6 +401,9 @@ export default function Reports() {
         <SummaryCard label="Total Tickets" value={summary.total} />
         <SummaryCard label="Open Tickets" value={summary.open} />
         <SummaryCard label="Closed Tickets" value={summary.closed} />
+        {status === 'DELETED' || summary.deleted > 0 ? (
+          <SummaryCard label="Deleted Tickets" value={summary.deleted || 0} />
+        ) : null}
         <SummaryCard label="Total Gross" value={`${summary.gross?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.gross)} t`} />
         <SummaryCard label="Total Tare" value={`${summary.tare?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.tare)} t`} />
         <SummaryCard label="Total Net" value={`${summary.net?.toLocaleString('en-IN')} kg`} sub={`${tons(summary.net)} t`} />
@@ -476,6 +488,7 @@ export default function Reports() {
               <option value="OPEN">Open</option>
               <option value="CLOSED">Closed</option>
               <option value="CANCELLED">Cancelled</option>
+              <option value="DELETED">Deleted</option>
             </select>
           </label>
           <label className="text-sm min-w-[140px]">
@@ -492,6 +505,15 @@ export default function Reports() {
             <select className="field-input" value={material} onChange={(e) => { setMaterial(e.target.value); setPage(0); }}>
               <option value="all">All Materials</option>
               {filterOptions.materials.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm min-w-[140px]">
+            <span className="text-slate-400 block mb-1">Company</span>
+            <select className="field-input" value={company} onChange={(e) => { setCompany(e.target.value); setPage(0); }}>
+              <option value="all">All Companies</option>
+              {filterOptions.companies.map((name) => (
                 <option key={name} value={name}>{name}</option>
               ))}
             </select>
@@ -533,7 +555,7 @@ export default function Reports() {
             <input
               type="search"
               className="field-input"
-              placeholder="Slip, vehicle, RFID, transporter, operator, material, destination…"
+              placeholder="Slip, vehicle, RFID, transporter, operator, material, destination, company…"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && applySearch()}
@@ -589,6 +611,7 @@ export default function Reports() {
                     </th>
                     <th className="px-3 py-3">Slip No</th>
                     <th className="px-3 py-3">Vehicle No</th>
+                    <th className="px-3 py-3">Company</th>
                     <th className="px-3 py-3">Destination</th>
                     <th className="px-3 py-3">Material</th>
                     <th className="px-3 py-3">Operator</th>
@@ -607,7 +630,7 @@ export default function Reports() {
                 <tbody>
                   {rows.length === 0 ? (
                     <tr>
-                      <td colSpan={17} className="px-4 py-8 text-center text-slate-500">
+                      <td colSpan={18} className="px-4 py-8 text-center text-slate-500">
                         No tickets match the current filters.
                       </td>
                     </tr>
@@ -626,6 +649,7 @@ export default function Reports() {
                           </td>
                           <td className="px-3 py-2 font-mono">{t.slip_number}</td>
                           <td className="px-3 py-2">{t.truck_number}</td>
+                          <td className="px-3 py-2">{t.company || '—'}</td>
                           <td className="px-3 py-2">{t.destination || '—'}</td>
                           <td className="px-3 py-2">{t.material || '—'}</td>
                           <td className="px-3 py-2">{t.operator_name || '—'}</td>
@@ -713,14 +737,16 @@ export default function Reports() {
                               <button type="button" className="text-brand-300" onClick={() => setPreviewTicket(t)}>
                                 Preview
                               </button>
-                              <button
-                                type="button"
-                                className="text-amber-300 hover:text-amber-200"
-                                onClick={() => setEditSlipTicket(t)}
-                              >
-                                Edit Slip
-                              </button>
-                              {isClosedTicket(t) && (
+                              {t.ticket_status !== 'DELETED' && (
+                                <button
+                                  type="button"
+                                  className="text-amber-300 hover:text-amber-200"
+                                  onClick={() => setEditSlipTicket(t)}
+                                >
+                                  Edit Slip
+                                </button>
+                              )}
+                              {(isClosedTicket(t) || t.ticket_status === 'DELETED') && (
                                 <button
                                   type="button"
                                   className="rounded-md border border-emerald-700/50 bg-emerald-950/30 px-2 py-1 font-medium text-emerald-200 hover:bg-emerald-900/40"

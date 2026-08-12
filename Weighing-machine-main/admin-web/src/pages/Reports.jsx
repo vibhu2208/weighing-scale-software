@@ -136,6 +136,7 @@ export default function Reports() {
           <option value="CLOSED">Closed</option>
           <option value="OPEN">Open</option>
           <option value="CANCELLED">Cancelled</option>
+          <option value="DELETED">Deleted</option>
         </select>
         <select
           className="field-input"

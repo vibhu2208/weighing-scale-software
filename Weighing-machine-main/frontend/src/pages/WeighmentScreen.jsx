@@ -68,10 +68,12 @@ export default function WeighmentScreen() {
   const [customerName, setCustomerName] = useState('');
   const [destination, setDestination] = useState('');
   const [operatorName, setOperatorName] = useState('');
+  const [company, setCompany] = useState('DCC');
   const [materialsList, setMaterialsList] = useState([]);
   const [customersList, setCustomersList] = useState([]);
   const [destinationsList, setDestinationsList] = useState([]);
   const [operatorsList, setOperatorsList] = useState([]);
+  const [companiesList, setCompaniesList] = useState(['DCC', 'MKG']);
   const [openTickets, setOpenTickets] = useState([]);
   const [selectedOpenTicket, setSelectedOpenTicket] = useState(null);
   const [editOpenTicket, setEditOpenTicket] = useState(null);
@@ -131,7 +133,7 @@ export default function WeighmentScreen() {
     (manualPhotosForPass?.snapshots?.length ?? 0) >= minPhotosToSave;
 
   const ticketDetailsComplete =
-    !!material && !!customerName && !!destination && !!operatorName.trim();
+    !!material && !!customerName && !!destination && !!operatorName.trim() && !!company;
 
   const canSaveTrip =
     effectiveWeight > 0 &&
@@ -151,13 +153,15 @@ export default function WeighmentScreen() {
           ? 'Select customer before closing'
           : weighMode === 'CLOSE' && !destination
             ? 'Select destination before closing'
-            : weighMode === 'CLOSE' && !operatorName.trim()
-              ? 'Enter operator name before closing'
-              : effectiveWeight <= 0
-                ? 'Waiting for live weight from scale'
-                : testConfig?.useWebcamCamera && !webcamReady
-                  ? 'Allow webcam access first'
-                  : null;
+            : weighMode === 'CLOSE' && !company
+              ? 'Select company before closing'
+              : weighMode === 'CLOSE' && !operatorName.trim()
+                ? 'Enter operator name before closing'
+                : effectiveWeight <= 0
+                  ? 'Waiting for live weight from scale'
+                  : testConfig?.useWebcamCamera && !webcamReady
+                    ? 'Allow webcam access first'
+                    : null;
 
   const canAbort =
     rfidLocked ||
@@ -174,6 +178,7 @@ export default function WeighmentScreen() {
     setCustomerName(ticket.customer_name || '');
     setDestination(ticket.destination || '');
     setOperatorName(ticket.operator_name || '');
+    setCompany(ticket.company || 'DCC');
   }, []);
 
   const handleSelectOpenTicket = useCallback(
@@ -203,6 +208,7 @@ export default function WeighmentScreen() {
     setCustomerName('');
     setDestination('');
     setOperatorName('');
+    setCompany('DCC');
     if (!rfidLocked && !displayTag) {
       setIdentifiedTruck(null);
       setVehicle(null);
@@ -281,6 +287,7 @@ export default function WeighmentScreen() {
     setCustomerName('');
     setDestination('');
     setOperatorName('');
+    setCompany('DCC');
     setManualPhotos(null);
     setCapturingPhotos(false);
     setRetryingCameraId(null);
@@ -299,6 +306,11 @@ export default function WeighmentScreen() {
     settingsAPI.getCustomers().then(setCustomersList).catch(() => setCustomersList([]));
     settingsAPI.getDestinations().then(setDestinationsList).catch(() => setDestinationsList([]));
     settingsAPI.getOperators().then(setOperatorsList).catch(() => setOperatorsList([]));
+    settingsAPI.getCompanies().then((list) => {
+      const companies = Array.isArray(list) && list.length ? list : ['DCC', 'MKG'];
+      setCompaniesList(companies);
+      setCompany((prev) => (prev && companies.includes(prev) ? prev : companies[0] || 'DCC'));
+    }).catch(() => setCompaniesList(['DCC', 'MKG']));
     refreshOpenTickets();
 
     (async () => {
@@ -323,6 +335,7 @@ export default function WeighmentScreen() {
           setCustomerName('');
           setDestination('');
           setOperatorName('');
+          setCompany('DCC');
           dev.clearRfidScan();
           useTransactionStore.getState().resetActive();
           return;
@@ -670,6 +683,7 @@ export default function WeighmentScreen() {
       setCustomerName('');
       setDestination('');
       setOperatorName('');
+      setCompany('DCC');
       await deviceAPI.startRfidScan();
     } catch (err) {
       alert(err.message || 'Failed to start RFID scan');
@@ -691,6 +705,10 @@ export default function WeighmentScreen() {
     }
     if (weighMode === 'CLOSE' && !destination) {
       alert('Select a destination before closing.');
+      return;
+    }
+    if (weighMode === 'CLOSE' && !company) {
+      alert('Select a company before closing.');
       return;
     }
     if (weighMode === 'CLOSE' && !operatorName.trim()) {
@@ -716,6 +734,7 @@ export default function WeighmentScreen() {
         customer_name: customerName || null,
         destination: destination || null,
         operator_name: operatorName.trim() || null,
+        company: company || 'DCC',
       };
 
       if (testConfig?.useWebcamCamera) {
@@ -1051,6 +1070,20 @@ export default function WeighmentScreen() {
                 </select>
               </label>
               <label className="block text-sm">
+                <span className="text-slate-400">Company</span>
+                <select
+                  className="field-input mt-1 w-full"
+                  value={company}
+                  onChange={(e) => setCompany(e.target.value)}
+                >
+                  {companiesList.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
                 <span className="text-slate-400">Operator (optional)</span>
                 <input
                   type="text"
@@ -1140,6 +1173,20 @@ export default function WeighmentScreen() {
                   >
                     <option value="">Select destination…</option>
                     {destinationsList.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm">
+                  <span className="text-slate-400">Company *</span>
+                  <select
+                    className="field-input mt-1 w-full"
+                    value={company}
+                    onChange={(e) => setCompany(e.target.value)}
+                  >
+                    {companiesList.map((m) => (
                       <option key={m} value={m}>
                         {m}
                       </option>

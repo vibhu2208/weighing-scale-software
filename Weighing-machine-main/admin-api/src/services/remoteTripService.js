@@ -1,5 +1,7 @@
 'use strict';
 
+const { markReservationUsed } = require('./slipReservationService');
+
 function normalizeText(value, fieldName) {
   const text = String(value || '').trim();
   if (!text) throw new Error(`${fieldName} is required`);
@@ -53,6 +55,27 @@ function buildCreatePayload(body = {}) {
 
 async function createRemoteTrip(queryFn, body = {}) {
   const data = buildCreatePayload(body);
+
+  // If filling a planned gap, lock in that reserved slip before insert.
+  const reservationId = body.reservation_id ? String(body.reservation_id).trim() : '';
+  if (reservationId) {
+    const held = await queryFn(
+      `SELECT * FROM slip_reservations WHERE id = $1 LIMIT 1`,
+      [reservationId],
+    );
+    const row = held.rows[0];
+    if (!row) throw new Error('Reserved slip not found');
+    if (row.status === 'scheduled' || row.status === 'missed') {
+      throw new Error(
+        'Gap is not blocked yet — wait for auto-block (5 min before planned time) or use Block now on Plan Gaps',
+      );
+    }
+    if (row.status !== 'held' || !row.slip_number) {
+      throw new Error('Reserved slip not found or already used/released');
+    }
+    data.slip_number = String(row.slip_number).toUpperCase();
+  }
+
   const cols = Object.keys(data);
   const placeholders = cols.map((_, i) => `$${i + 1}`);
   const values = cols.map((c) => data[c]);
@@ -63,7 +86,17 @@ async function createRemoteTrip(queryFn, body = {}) {
      RETURNING *`,
     values,
   );
-  return res.rows[0];
+  const trip = res.rows[0];
+
+  if (trip?.slip_number) {
+    try {
+      await markReservationUsed(trip.slip_number, trip.id, queryFn);
+    } catch (err) {
+      console.warn('[remoteTrip] mark reservation used failed', err.message);
+    }
+  }
+
+  return trip;
 }
 
 async function listRemoteTrips(queryFn, filters = {}) {

@@ -298,11 +298,11 @@ const TransactionService = {
           id, truck_number, rfid_tag, gross_weight, tare_weight,
           timestamp_in, timestamp_out, image_path, operator_id,
           slip_number, sync_status, status, notes, created_at, updated_at,
-          ticket_status, material, driver, customer_name, destination, operator_name,
+          ticket_status, material, driver, customer_name, destination, operator_name, company,
           arrival_photo_1, arrival_photo_2, arrival_photo_3,
           departure_photo_1, departure_photo_2, departure_photo_3,
           report_path
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         truckNumber,
@@ -325,6 +325,7 @@ const TransactionService = {
         data.customer_name || null,
         data.destination || null,
         data.operator_name || null,
+        data.company || null,
         data.arrival_photo_1 || null,
         data.arrival_photo_2 || null,
         data.arrival_photo_3 || null,
@@ -421,11 +422,11 @@ const TransactionService = {
           id, truck_number, rfid_tag, gross_weight, tare_weight,
           timestamp_in, timestamp_out, image_path, operator_id,
           slip_number, sync_status, status, notes, created_at, updated_at,
-          ticket_status, material, driver, customer_name, destination, operator_name,
+          ticket_status, material, driver, customer_name, destination, operator_name, company,
           arrival_photo_1, arrival_photo_2, arrival_photo_3,
           departure_photo_1, departure_photo_2, departure_photo_3,
           report_path, remote_pg_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         truckNumber,
@@ -448,6 +449,7 @@ const TransactionService = {
         data.customer_name || null,
         data.destination || null,
         data.operator_name || null,
+        data.company || 'DCC',
         data.arrival_photo_1 || null,
         data.arrival_photo_2 || null,
         data.arrival_photo_3 || null,
@@ -512,6 +514,7 @@ const TransactionService = {
       'customer_name',
       'destination',
       'operator_name',
+      'company',
       'arrival_photo_1',
       'arrival_photo_2',
       'arrival_photo_3',
@@ -522,6 +525,7 @@ const TransactionService = {
       'mcg_status',
       'mcg_error',
       'mcg_sent_at',
+      'deleted_at',
     ];
     const sets = [];
     const params = [];
@@ -549,10 +553,21 @@ const TransactionService = {
   deleteById(id) {
     const existing = this.getById(id);
     if (!existing) throw new Error(`Transaction not found: ${id}`);
+    if (existing.ticket_status === TICKET_STATUS.DELETED) {
+      return existing;
+    }
     const db = getDb();
+    const now = ts.now();
     db.prepare('DELETE FROM sync_queue WHERE transaction_id = ?').run(id);
-    db.prepare('DELETE FROM transactions WHERE id = ?').run(id);
-    return existing;
+    const notes = existing.notes
+      ? `${existing.notes}; Deleted by admin`
+      : 'Deleted by admin';
+    db.prepare(
+      `UPDATE transactions
+       SET ticket_status = ?, deleted_at = ?, updated_at = ?, notes = ?
+       WHERE id = ?`,
+    ).run(TICKET_STATUS.DELETED, now, now, notes, id);
+    return this.getById(id);
   },
 
   cancelTicket(id) {
@@ -586,6 +601,9 @@ const TransactionService = {
     if (filters.ticket_status) {
       clauses.push('t.ticket_status = ?');
       params.push(filters.ticket_status);
+    } else if (!filters.include_deleted) {
+      clauses.push('t.ticket_status != ?');
+      params.push(TICKET_STATUS.DELETED);
     }
     if (filters.truck_number) {
       clauses.push('UPPER(t.truck_number) = ?');
@@ -642,9 +660,10 @@ const TransactionService = {
     const total = db
       .prepare(
         `SELECT COUNT(*) AS count FROM transactions
-         WHERE ${reportDateSql} >= ? AND ${reportDateSql} <= ?`,
+         WHERE ${reportDateSql} >= ? AND ${reportDateSql} <= ?
+           AND ticket_status != ?`,
       )
-      .get(start, end).count;
+      .get(start, end, TICKET_STATUS.DELETED).count;
 
     const pending = db
       .prepare(
@@ -683,9 +702,10 @@ const TransactionService = {
       .prepare(
         `${SELECT_WITH_VEHICLE}
          WHERE t.sync_status IN ('pending', 'retry')
+           AND t.ticket_status != ?
          ORDER BY t.timestamp_in ASC`,
       )
-      .all()
+      .all(TICKET_STATUS.DELETED)
       .map(rowToTransaction);
   },
 

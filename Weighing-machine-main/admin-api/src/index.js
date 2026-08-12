@@ -13,6 +13,11 @@ const settingsRoutes = require('./routes/settings');
 const syncRoutes = require('./routes/sync');
 const mediaRoutes = require('./routes/media');
 const remoteTripsRoutes = require('./routes/remoteTrips');
+const slipReservationsRoutes = require('./routes/slipReservations');
+const {
+  ensureSchema: ensureSlipReservationsSchema,
+  startFireWorker,
+} = require('./services/slipReservationService');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -40,6 +45,7 @@ app.use('/settings', settingsRoutes);
 app.use('/sync', syncRoutes);
 app.use('/media', mediaRoutes);
 app.use('/remote-trips', remoteTripsRoutes);
+app.use('/slip-reservations', slipReservationsRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error('[api] error', err);
@@ -53,6 +59,16 @@ async function start() {
     } catch (err) {
       console.error(
         '[auth] Bootstrap failed — run scripts/rds/002_admin_panel.sql on RDS:',
+        err.message,
+      );
+    }
+    try {
+      await ensureSlipReservationsSchema();
+      console.log('[api] slip_reservations schema ready');
+      startFireWorker();
+    } catch (err) {
+      console.error(
+        '[api] slip_reservations setup failed — run scripts/rds/003_slip_reservations.sql:',
         err.message,
       );
     }

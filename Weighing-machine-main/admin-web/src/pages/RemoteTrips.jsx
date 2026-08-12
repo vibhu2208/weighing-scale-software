@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
-import { fmtDate, fmtKg } from '../lib/format.js';
+import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 
 const PHOTO_SLOTS = [1, 2, 3];
 const PHOTO_PASSES = [
@@ -21,6 +22,7 @@ function defaultDatetimeLocal(offsetMs = 0) {
 
 function emptyForm() {
   return {
+    reservation_id: '',
     slip_number: '',
     truck_number: '',
     rfid_tag: '',
@@ -38,6 +40,7 @@ function emptyForm() {
 }
 
 export default function RemoteTrips() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [form, setForm] = useState(emptyForm);
   const [photos, setPhotos] = useState({});
   const [lists, setLists] = useState({
@@ -46,6 +49,8 @@ export default function RemoteTrips() {
     destinations: [],
     operators: [],
   });
+  const [reservations, setReservations] = useState([]);
+  const [pendingGaps, setPendingGaps] = useState(0);
   const [rows, setRows] = useState([]);
   const [showPendingOnly, setShowPendingOnly] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -66,6 +71,22 @@ export default function RemoteTrips() {
       setLoading(false);
     }
   }, [showPendingOnly]);
+
+  const loadReservations = useCallback(async () => {
+    try {
+      const [heldRes, activeRes] = await Promise.all([
+        api.getSlipReservations({ status: 'held', limit: '100' }),
+        api.getSlipReservations({ status: 'active', limit: '100' }),
+      ]);
+      setReservations(heldRes.rows || []);
+      const pending = (activeRes.rows || []).filter(
+        (r) => r.status === 'scheduled' || r.status === 'missed',
+      ).length;
+      setPendingGaps(pending);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -89,8 +110,50 @@ export default function RemoteTrips() {
     loadTrips();
   }, [loadTrips]);
 
+  useEffect(() => {
+    loadReservations();
+  }, [loadReservations]);
+
+  function applyReservation(row) {
+    if (!row) {
+      setForm((f) => ({
+        ...f,
+        reservation_id: '',
+        slip_number: '',
+      }));
+      return;
+    }
+    const planned = new Date(row.planned_at);
+    const arrival = new Date(planned.getTime() - 60 * 60 * 1000);
+    setForm((f) => ({
+      ...f,
+      reservation_id: row.id,
+      slip_number: row.slip_number,
+      timestamp_in: toDatetimeLocalValue(arrival.toISOString()),
+      timestamp_out: toDatetimeLocalValue(row.planned_at),
+    }));
+  }
+
+  useEffect(() => {
+    const reservationId = searchParams.get('reservation');
+    if (!reservationId || !reservations.length) return;
+    const row = reservations.find((r) => r.id === reservationId);
+    if (!row) return;
+    applyReservation(row);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, reservations, setSearchParams]);
+
   function updateField(key, value) {
     setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  function onReservationChange(id) {
+    if (!id) {
+      applyReservation(null);
+      return;
+    }
+    const row = reservations.find((r) => r.id === id);
+    applyReservation(row || null);
   }
 
   async function uploadPhoto(slip, pass, slot, file) {
@@ -118,6 +181,7 @@ export default function RemoteTrips() {
       const payload = {
         ...form,
         slip_number: form.slip_number.trim() || undefined,
+        reservation_id: form.reservation_id || undefined,
         timestamp_in: new Date(form.timestamp_in).toISOString(),
         timestamp_out: new Date(form.timestamp_out).toISOString(),
       };
@@ -145,6 +209,7 @@ export default function RemoteTrips() {
       setForm(emptyForm());
       setPhotos({});
       loadTrips();
+      loadReservations();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -159,11 +224,62 @@ export default function RemoteTrips() {
         <p className="text-sm text-slate-400 mt-1">
           Create a closed ticket in the cloud — the weighbridge PC pulls it into local Reports
           automatically (same as inserting into RDS <code className="text-xs">remote_trips</code>).
+          Remote trips are for <span className="text-slate-200 font-medium">DCC only</span> (not MKG
+          or other companies).{' '}
+          <Link to="/plan-gaps" className="text-brand-300 hover:underline">
+            Plan slip gaps
+          </Link>{' '}
+          to schedule times; slips block automatically 5 minutes before each planned time.
         </p>
       </div>
 
       <form onSubmit={onSubmit} className="card p-5 space-y-4">
         <h3 className="text-sm font-medium text-slate-200">New remote trip</h3>
+
+        <div className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm">
+          <span className="text-slate-400">Company</span>
+          <span className="ml-2 font-medium text-white">DCC</span>
+          <span className="ml-2 text-xs text-slate-500">(fixed — remote push is DCC only)</span>
+        </div>
+
+        <div>
+          <label className="text-xs text-slate-400">Use planned gap (recommended)</label>
+          <select
+            className="field-input mt-1"
+            value={form.reservation_id}
+            onChange={(e) => onReservationChange(e.target.value)}
+          >
+            <option value="">None — allocate new slip at end of series</option>
+            {reservations.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.slip_number} · planned {fmtDate(r.planned_at)}
+                {r.note ? ` · ${r.note}` : ''}
+              </option>
+            ))}
+          </select>
+          {reservations.length === 0 && (
+            <p className="text-xs text-slate-500 mt-1">
+              No blocked gaps ready to fill.{' '}
+              {pendingGaps > 0 ? (
+                <>
+                  {pendingGaps} gap(s) are still scheduled or missed — wait for auto-block (5 min
+                  before planned time) or use{' '}
+                  <Link to="/plan-gaps" className="text-brand-300 hover:underline">
+                    Block now
+                  </Link>{' '}
+                  on Plan Gaps.
+                </>
+              ) : (
+                <>
+                  <Link to="/plan-gaps" className="text-brand-300 hover:underline">
+                    Schedule gaps
+                  </Link>{' '}
+                  first if you need times to match the sequence.
+                </>
+              )}
+            </p>
+          )}
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
@@ -173,6 +289,7 @@ export default function RemoteTrips() {
               placeholder="Auto WB#### if blank"
               value={form.slip_number}
               onChange={(e) => updateField('slip_number', e.target.value.toUpperCase())}
+              readOnly={!!form.reservation_id}
             />
           </div>
           <div>

@@ -19,6 +19,7 @@ const TICKET_STATUS = deepFreeze({
   OPEN: 'OPEN',
   CLOSED: 'CLOSED',
   CANCELLED: 'CANCELLED',
+  DELETED: 'DELETED',
 });
 
 const TRANSACTION_STATUS = deepFreeze({

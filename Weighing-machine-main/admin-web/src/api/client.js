@@ -163,6 +163,36 @@ export const api = {
       body: JSON.stringify({ photoS3Keys }),
     });
   },
+
+  getSlipReservations(params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/slip-reservations?${qs}`);
+  },
+
+  getSlipReservationHint() {
+    return request('/slip-reservations/hint');
+  },
+
+  planSlipReservations(body) {
+    return request('/slip-reservations/plan', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  releaseSlipReservation(id) {
+    return request(`/slip-reservations/${encodeURIComponent(id)}/release`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  fireSlipReservation(id) {
+    return request(`/slip-reservations/${encodeURIComponent(id)}/fire`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
 };
 
 export { API_URL };

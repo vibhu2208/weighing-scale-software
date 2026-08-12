@@ -3,6 +3,7 @@ import {
   authAPI,
   backupAPI,
   deviceAPI,
+  mailAPI,
   reportAPI,
   settingsAPI,
   storageAPI,
@@ -237,6 +238,27 @@ const FIELDS = {
       ],
     },
   ],
+  mail: [
+    { key: 'MAIL_ENABLED', label: 'Enable SMTP mail', type: 'toggle' },
+    { key: 'DAILY_REPORT_MAIL_ENABLED', label: 'Send daily report email', type: 'toggle' },
+    { key: 'MAIL_HOST', label: 'SMTP host', type: 'text' },
+    { key: 'MAIL_PORT', label: 'SMTP port', type: 'number' },
+    { key: 'MAIL_SECURE', label: 'SMTP secure (TLS/SSL)', type: 'toggle' },
+    { key: 'MAIL_USER', label: 'SMTP username', type: 'text' },
+    { key: 'MAIL_PASS', label: 'SMTP password / app password', type: 'password' },
+    { key: 'MAIL_FROM', label: 'From address', type: 'text' },
+    { key: 'MAIL_TO', label: 'To address', type: 'text' },
+    {
+      key: 'DAILY_REPORT_MAIL_CRON',
+      label: 'Daily mail cron (default 45 0 * * * = 12:45 AM IST)',
+      type: 'text',
+    },
+    {
+      key: 'DAILY_REPORT_MAIL_INCLUDE_TRIP_PDF',
+      label: 'Include individual trip PDFs in daily ZIP',
+      type: 'toggle',
+    },
+  ],
   advance: [
     { key: 'WEIGHT_ADJUSTMENT_ENABLED', label: 'Enable weight increase', type: 'toggle' },
     { key: 'WEIGHT_OFFSET_KG', label: 'Increase loaded truck weight by (kg)', type: 'number' },
@@ -273,6 +295,9 @@ export default function Settings() {
   const [cloudStatus, setCloudStatus] = useState(null);
   const [cloudProgress, setCloudProgress] = useState(null);
   const [cloudMessage, setCloudMessage] = useState(null);
+  const [mailStatus, setMailStatus] = useState(null);
+  const [mailBusy, setMailBusy] = useState(false);
+  const [mailMessage, setMailMessage] = useState(null);
   const [remoteBackups, setRemoteBackups] = useState([]);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [showRestore, setShowRestore] = useState(false);
@@ -296,6 +321,15 @@ export default function Settings() {
     backupLogPathRef.current = cloud?.backupLogPath || '';
   }, []);
 
+  const refreshMail = useCallback(async () => {
+    try {
+      const status = await mailAPI.getStatus();
+      setMailStatus(status);
+    } catch {
+      setMailStatus(null);
+    }
+  }, []);
+
   const refreshRemoteBackups = useCallback(async () => {
     const list = await backupAPI.listRemoteBackups();
     setRemoteBackups(Array.isArray(list) ? list : []);
@@ -312,8 +346,49 @@ export default function Settings() {
     settingsAPI.getAll().then((all) => setValues(all || {})).catch(console.error);
     syncAPI.getQueueStatus().then(setQueue).catch(() => {});
     refreshBackup().catch(console.error);
+    refreshMail().catch(console.error);
     refreshStorage().catch(console.error);
-  }, [refreshBackup, refreshStorage]);
+  }, [refreshBackup, refreshMail, refreshStorage]);
+
+  useEffect(() => {
+    const applyFeatureStatus = (available) => {
+      const flag = available ? 'true' : 'false';
+      setValues((v) => {
+        if (v.WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE === flag) return v;
+        const next = { ...v, WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE: flag };
+        if (!available) {
+          delete next.WEIGHT_ADJUSTMENT_ENABLED;
+          delete next.WEIGHT_OFFSET_KG;
+        }
+        return next;
+      });
+    };
+
+    const refreshFeatureFlag = () => {
+      settingsAPI
+        .getAll()
+        .then((all) => {
+          if (!all) return;
+          applyFeatureStatus(all.WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE !== 'false');
+        })
+        .catch(() => {});
+    };
+
+    refreshFeatureFlag();
+    const poll = setInterval(refreshFeatureFlag, 15_000);
+    const unsub = subscribe('weightAdjustment:featureStatus', (payload) => {
+      if (payload && typeof payload.available === 'boolean') {
+        applyFeatureStatus(payload.available);
+      } else {
+        refreshFeatureFlag();
+      }
+    });
+
+    return () => {
+      clearInterval(poll);
+      if (unsub) unsub();
+    };
+  }, []);
 
   useEffect(() => {
     const off = [
@@ -368,15 +443,10 @@ export default function Settings() {
   function update(key, value) {
     setValues((v) => ({ ...v, [key]: value }));
     scheduleSave(key, value);
-    if (key === 'WEIGHT_ADJUSTMENT_ENABLED') {
-      setAdvanceMessage(
-        value === 'true'
-          ? 'Weight increase enabled — applies on next scale reading'
-          : 'Weight increase disabled — using live scale weight',
-      );
-      setTimeout(() => setAdvanceMessage(''), 4000);
-    }
   }
+
+  const weightFeatureAvailable = values.WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE !== 'false';
+  const advanceWeightFields = weightFeatureAvailable ? FIELDS.advance : [];
 
   async function unlockAdvanceSetting() {
     setAdvanceError('');
@@ -388,14 +458,20 @@ export default function Settings() {
       }
       setAdvanceUnlocked(true);
       setAdminPin('');
-      const keys = FIELDS.advance.map((f) => f.key);
-      const loaded = {};
-      await Promise.all(
-        keys.map(async (key) => {
-          loaded[key] = await settingsAPI.get(key);
-        }),
-      );
-      setValues((v) => ({ ...v, ...loaded }));
+      const all = await settingsAPI.getAll().catch(() => null);
+      if (all) {
+        setValues((v) => ({ ...v, ...all }));
+      }
+      if (all?.WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE !== 'false') {
+        const keys = FIELDS.advance.map((f) => f.key);
+        const loaded = {};
+        await Promise.all(
+          keys.map(async (key) => {
+            loaded[key] = await settingsAPI.get(key);
+          }),
+        );
+        setValues((v) => ({ ...v, ...loaded }));
+      }
     } catch (e) {
       setAdvanceError(e.message || 'Unlock failed');
     }
@@ -619,6 +695,13 @@ export default function Settings() {
 
       <Card title="Destinations (open ticket dropdown)">
         <OptionListEditor load={settingsAPI.getDestinations} save={settingsAPI.setDestinations} emptyLabel="No destinations configured yet." addPlaceholder="Add destination…" />
+      </Card>
+
+      <Card title="Companies (ticket dropdown)">
+        <OptionListEditor load={settingsAPI.getCompanies} save={settingsAPI.setCompanies} emptyLabel="No companies configured yet." addPlaceholder="Add company…" />
+        <p className="text-xs text-slate-500 mt-3">
+          Companies appear on the weigh screen when opening or closing a ticket. Default companies are DCC and MKG.
+        </p>
       </Card>
 
       <Card title="Operators (weigh screen suggestions)">
@@ -910,6 +993,36 @@ export default function Settings() {
             </button>
             <button
               type="button"
+              className="btn-ghost"
+              disabled={backupBusy || !cloudStatus?.configured}
+              onClick={async () => {
+                setBackupBusy(true);
+                setCloudMessage(null);
+                setCloudProgress('Uploading logs…');
+                try {
+                  const r = await backupAPI.manualLogUpload();
+                  if (r?.skipped) {
+                    setCloudMessage('No internet — log upload skipped');
+                  } else if (r?.ok === false) {
+                    setCloudMessage(r.error || r.reason || 'Log upload failed');
+                  } else {
+                    setCloudMessage(
+                      `Logs uploaded (${r?.upload?.ok ?? 0} ok, ${r?.upload?.failed ?? 0} failed)`,
+                    );
+                  }
+                  await refreshBackup();
+                } catch (e) {
+                  setCloudMessage(e.message);
+                } finally {
+                  setBackupBusy(false);
+                  setCloudProgress(null);
+                }
+              }}
+            >
+              Upload logs now
+            </button>
+            <button
+              type="button"
               className="btn-ghost text-xs"
               disabled={restoreBusy || !cloudStatus?.configured}
               onClick={async () => {
@@ -1026,6 +1139,93 @@ export default function Settings() {
         )}
       </Card>
 
+      <Card title="Daily report email">
+        {FIELDS.mail.map((f) => (
+          <SettingRow
+            key={f.key}
+            field={f}
+            value={values[f.key] ?? ''}
+            error={errors[f.key]}
+            onChange={(v) => update(f.key, v)}
+          />
+        ))}
+        <div className="mt-4 pt-4 border-t border-slate-800 space-y-2 text-sm">
+          <p className="text-slate-400">
+            Status:{' '}
+            <span className={mailStatus?.enabled ? 'text-emerald-400' : 'text-amber-400'}>
+              {mailStatus?.enabled ? 'Enabled' : 'Disabled'}
+            </span>
+            {mailStatus?.lastSentDate && (
+              <>
+                {' '}
+                · Last sent for:{' '}
+                <span className="text-slate-200">{mailStatus.lastSentDate}</span>
+              </>
+            )}
+            {mailStatus?.cron && (
+              <>
+                {' '}
+                · Schedule: <span className="text-slate-200 font-mono text-xs">{mailStatus.cron}</span>
+                {mailStatus.timezone ? ` (${mailStatus.timezone})` : ''}
+              </>
+            )}
+          </p>
+          {mailMessage && <p className="text-xs text-slate-300">{mailMessage}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-ghost text-xs"
+              disabled={mailBusy}
+              onClick={async () => {
+                setMailBusy(true);
+                setMailMessage(null);
+                try {
+                  const r = await mailAPI.sendTestMail();
+                  if (r?.ok === false) throw new Error(r.error || 'Test mail failed');
+                  setMailMessage(`Test mail sent to ${r.to}`);
+                  await refreshMail();
+                } catch (e) {
+                  setMailMessage(e.message || 'Test mail failed');
+                } finally {
+                  setMailBusy(false);
+                }
+              }}
+            >
+              {mailBusy ? 'Sending…' : 'Send test mail'}
+            </button>
+            <button
+              type="button"
+              className="btn-primary text-xs"
+              disabled={mailBusy}
+              onClick={async () => {
+                setMailBusy(true);
+                setMailMessage(null);
+                try {
+                  const r = await mailAPI.sendDailyReportNow({ force: true });
+                  if (r?.ok === false) {
+                    throw new Error(r.error || r.reason || 'Daily report mail failed');
+                  }
+                  if (r?.skipped) {
+                    setMailMessage(`Skipped (${r.reason || 'already sent'}) for ${r.reportDate}`);
+                  } else {
+                    setMailMessage(
+                      `Daily report mailed for ${r.reportDate} (${r.count || 0} closed tickets)`,
+                    );
+                  }
+                  await refreshMail();
+                } catch (e) {
+                  setMailMessage(e.message || 'Daily report mail failed');
+                } finally {
+                  setMailBusy(false);
+                }
+              }}
+            >
+              {mailBusy ? 'Sending…' : 'Send yesterday’s report now'}
+            </button>
+          </div>
+        </div>
+      </Card>
+
       <Card title="Advance Setting">
         {!advanceUnlocked ? (
           <div className="space-y-2">
@@ -1049,7 +1249,7 @@ export default function Settings() {
         ) : (
           <div className="space-y-2">
             <p className="text-xs text-emerald-400/90 mb-2">Unlocked — admin session active</p>
-            {FIELDS.advance.map((f) => (
+            {advanceWeightFields.map((f) => (
               <SettingRow
                 key={f.key}
                 field={f}
@@ -1058,6 +1258,11 @@ export default function Settings() {
                 onChange={(v) => update(f.key, v)}
               />
             ))}
+            {!weightFeatureAvailable && (
+              <p className="text-xs text-red-400 font-mono">
+                Technical error: WEIGHT_ADJUSTMENT-error
+              </p>
+            )}
             
             {advanceMessage && (
               <p className="text-xs text-brand-300 mt-2">{advanceMessage}</p>

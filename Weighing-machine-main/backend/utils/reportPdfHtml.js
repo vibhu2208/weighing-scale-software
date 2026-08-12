@@ -112,15 +112,52 @@ async function buildWeighmentPhotoRow(row, passLabel, sectionTitle) {
   </div>`;
 }
 
+/**
+ * MKG tickets must not show "DCC" / Daya Charan branding on the slip report.
+ * DCC (and unknown) tickets keep the site defaults unchanged.
+ */
+function brandCompanyForTicket(company = {}, ticketCompany) {
+  const code = String(ticketCompany || '').trim().toUpperCase();
+  if (code !== 'MKG') return company;
+
+  const baseSite =
+    company.siteName ||
+    company.address ||
+    'BANDHWARI SLF SITE GURURAM (HARYANA) DCC';
+
+  let siteName = String(baseSite);
+  if (/\bDCC\b/i.test(siteName)) {
+    siteName = siteName.replace(/\bDCC\b/gi, 'MKG');
+  } else if (!/\bMKG\b/i.test(siteName)) {
+    siteName = `${siteName.replace(/\s+$/, '')} MKG`;
+  }
+
+  return {
+    ...company,
+    siteName,
+    reportCompanyName: 'MKG',
+  };
+}
+
+function uniqueTicketCompanies(rows = []) {
+  const codes = new Set();
+  for (const row of rows) {
+    const code = String(row?.company || '').trim().toUpperCase();
+    if (code) codes.add(code);
+  }
+  return [...codes];
+}
+
 async function buildVehicleReportPage(row, company = {}) {
-  const orgName = company.name || 'MUNICIPAL CORPORATION GURUGRAM';
-  const siteName = company.siteName || company.address || 'BANDHWARI SLF SITE GURURAM (HARYANA) DCC';
-  const weighbridgeId = company.weighbridgeId || 'WB - 03';
+  const branded = brandCompanyForTicket(company, row.company);
+  const orgName = branded.name || 'MUNICIPAL CORPORATION GURUGRAM';
+  const siteName = branded.siteName || branded.address || 'BANDHWARI SLF SITE GURURAM (HARYANA) DCC';
+  const weighbridgeId = branded.weighbridgeId || 'WB - 03';
   const customerName = row.customer_name || '—';
   const destination = row.destination || '—';
-  const companyName = company.reportCompanyName || 'DAYA CHARAN & COMPANY';
+  const companyName = branded.reportCompanyName || 'DAYA CHARAN & COMPANY';
   const operatorName = row.operator_name || '—';
-  const logoHtml = await buildReportLogoHtml(company);
+  const logoHtml = await buildReportLogoHtml(branded);
   const arrivalPhotos = await buildWeighmentPhotoRow(row, 'arrival', '1ST WEIGHMENTS');
   const departurePhotos = await buildWeighmentPhotoRow(row, 'departure', '2ND WEIGHMENTS');
 
@@ -320,8 +357,14 @@ async function buildVehicleReportHtml(rows, options = {}) {
     const pages = await Promise.all(batch.map((row) => buildVehicleReportPage(row, company)));
     ticketPages.push(...pages);
   }
+  // Cover uses MKG branding only when every ticket in the pack is MKG.
+  const ticketCompanies = uniqueTicketCompanies(list);
+  const coverCompany =
+    ticketCompanies.length === 1 && ticketCompanies[0] === 'MKG'
+      ? brandCompanyForTicket(company, 'MKG')
+      : company;
   const cover = coverMeta
-    ? buildCombinedCoverPage(company, coverMeta)
+    ? buildCombinedCoverPage(coverCompany, coverMeta)
     : '';
 
   return `<!DOCTYPE html>
@@ -571,6 +614,7 @@ module.exports = {
   photoPathForSlot,
   imageToDataUrl,
   imageSrcForPdf,
+  brandCompanyForTicket,
   buildCombinedCoverPage,
   buildDetailedReportHtml,
   buildVehicleReportHtml,

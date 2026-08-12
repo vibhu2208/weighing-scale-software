@@ -25,6 +25,7 @@ const MODULE_PATHS = [
   './report.ipc',
   './settings.ipc',
   './backup.ipc',
+  './mail.ipc',
   './storage.ipc',
 ];
 

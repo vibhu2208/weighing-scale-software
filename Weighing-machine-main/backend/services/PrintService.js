@@ -36,8 +36,8 @@ function writeJsonSafe(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-function getCompanySettings() {
-  return {
+function getCompanySettings(ticketCompany) {
+  const base = {
     name: SettingsService.get('COMPANY_NAME') || process.env.COMPANY_NAME || 'MUNICIPAL CORPORATION GURUGRAM',
     address: SettingsService.get('COMPANY_ADDRESS') || '',
     phone: SettingsService.get('COMPANY_PHONE') || '',
@@ -45,6 +45,16 @@ function getCompanySettings() {
     weighbridgeId: SettingsService.get('WEIGHBRIDGE_ID') || process.env.WEIGHBRIDGE_ID || 'WB - 03',
     operator: SettingsService.get('DEFAULT_OPERATOR') || 'Operator',
   };
+  const code = String(ticketCompany || '').trim().toUpperCase();
+  if (code !== 'MKG') return base;
+
+  let siteName = String(base.siteName || '');
+  if (/\bDCC\b/i.test(siteName)) {
+    siteName = siteName.replace(/\bDCC\b/gi, 'MKG');
+  } else if (!/\bMKG\b/i.test(siteName)) {
+    siteName = `${siteName.replace(/\s+$/, '')} MKG`;
+  }
+  return { ...base, siteName };
 }
 
 function formatKg(n) {
@@ -62,7 +72,7 @@ function slipPaths(transactionId, date) {
 }
 
 function buildSlipData(transaction) {
-  const company = getCompanySettings();
+  const company = getCompanySettings(transaction?.company);
   return {
     company,
     slip_number: transaction.slip_number,

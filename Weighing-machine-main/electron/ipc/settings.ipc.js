@@ -19,6 +19,22 @@ const CLOUD_BACKUP_KEYS = new Set([
   'CLOUD_LOG_UPLOAD_INTERVAL_MINUTES',
 ]);
 
+const MAIL_KEYS = new Set([
+  'MAIL_ENABLED',
+  'DAILY_REPORT_MAIL_ENABLED',
+  'MAIL_HOST',
+  'MAIL_PORT',
+  'MAIL_SECURE',
+  'MAIL_USER',
+  'MAIL_PASS',
+  'MAIL_FROM',
+  'MAIL_TO',
+  'DAILY_REPORT_MAIL_CRON',
+  'DAILY_REPORT_MAIL_TIMEZONE',
+  'DAILY_REPORT_MAIL_INCLUDE_TRIP_PDF',
+  'DAILY_REPORT_MAIL_RETRY_MS',
+]);
+
 function restartCloudBackup() {
   try {
     const CloudBackupService = require('../../backend/services/CloudBackupService');
@@ -40,8 +56,28 @@ function restartCloudBackup() {
   }
 }
 
+function restartDailyReportMail() {
+  try {
+    const DailyReportMailService = require('../../backend/services/DailyReportMailService');
+    DailyReportMailService.start();
+  } catch {
+    /* optional */
+  }
+}
+
 function filterAdminKeys(map) {
   const out = { ...map };
+  const WeightAdjustmentService = require('../../backend/services/WeightAdjustmentService');
+  const featureAvailable = WeightAdjustmentService.isFeatureAvailable();
+  out.WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE = featureAvailable ? 'true' : 'false';
+
+  if (!featureAvailable) {
+    for (const key of ADMIN_WEIGHT_KEYS) {
+      delete out[key];
+    }
+    return out;
+  }
+
   if (OperatorAuthService.isAdminSessionActive()) {
     OperatorAuthService.touchSession();
     return out;
@@ -83,25 +119,42 @@ function registerListHandlers(ipcMain, listKey, getName, setName) {
 
 function register(ipcMain) {
   ipcMain.handle(`${NAMESPACE}:get`, async (_e, key) => {
-    if (ADMIN_ONLY_SET.has(key) && !OperatorAuthService.isAdminSessionActive()) {
-      if (key === 'WEIGHT_ADJUSTMENT_ENABLED') return 'false';
-      if (key === 'WEIGHT_OFFSET_KG') return '0';
-    }
     if (ADMIN_ONLY_SET.has(key)) {
-      OperatorAuthService.touchSession();
+      const WeightAdjustmentService = require('../../backend/services/WeightAdjustmentService');
+      if (!WeightAdjustmentService.isFeatureAvailable()) {
+        if (key === 'WEIGHT_ADJUSTMENT_ENABLED') return 'false';
+        if (key === 'WEIGHT_OFFSET_KG') return '0';
+        if (key === 'WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE') return 'false';
+      }
+      if (!OperatorAuthService.isAdminSessionActive()) {
+        if (key === 'WEIGHT_ADJUSTMENT_ENABLED') return 'false';
+        if (key === 'WEIGHT_OFFSET_KG') return '0';
+      } else {
+        OperatorAuthService.touchSession();
+      }
     }
     return SettingsService.get(key);
   });
 
   ipcMain.handle(`${NAMESPACE}:set`, async (_e, key, value) => {
-    if (ADMIN_ONLY_SET.has(key) && !OperatorAuthService.isAdminSessionActive()) {
-      throw new Error('Admin PIN required — unlock Advance Setting first');
-    }
     if (ADMIN_ONLY_SET.has(key)) {
+      const WeightAdjustmentService = require('../../backend/services/WeightAdjustmentService');
+      WeightAdjustmentService.assertFeatureAllowsChanges();
+      if (!OperatorAuthService.isAdminSessionActive()) {
+        throw new Error('Admin PIN required — unlock Advance Setting first');
+      }
       OperatorAuthService.touchSession();
     }
 
     const result = SettingsService.set(key, value);
+    if (key === 'WEIGHT_ADJUSTMENT_ENABLED') {
+      try {
+        const WeightAdjustmentService = require('../../backend/services/WeightAdjustmentService');
+        WeightAdjustmentService.onEnabledSettingChanged(value);
+      } catch (_e) {
+        /* optional */
+      }
+    }
     if (key === 'RFID_BLOCKED_TAGS' || key === 'RFID_EPC_PREFIX') {
       try {
         const RfidBlocklistService = require('../../backend/services/RfidBlocklistService');
@@ -124,6 +177,9 @@ function register(ipcMain) {
     }
     if (CLOUD_BACKUP_KEYS.has(key)) {
       restartCloudBackup();
+    }
+    if (MAIL_KEYS.has(key)) {
+      restartDailyReportMail();
     }
     const DeviceMonitorService = require('../../backend/services/DeviceMonitorService');
     if (DeviceMonitorService.shouldRestartDevicesForSetting(key)) {
@@ -154,6 +210,7 @@ function register(ipcMain) {
   registerListHandlers(ipcMain, 'customers_list', 'getCustomers', 'setCustomers');
   registerListHandlers(ipcMain, 'destinations_list', 'getDestinations', 'setDestinations');
   registerListHandlers(ipcMain, 'operators_list', 'getOperators', 'setOperators');
+  registerListHandlers(ipcMain, 'companies_list', 'getCompanies', 'setCompanies');
 }
 
 module.exports = { register, NAMESPACE };

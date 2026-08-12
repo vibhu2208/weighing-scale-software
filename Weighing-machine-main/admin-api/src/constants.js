@@ -3,6 +3,9 @@
 const REMOTE_SAFE_KEYS = new Set([
   'WEIGHT_ADJUSTMENT_ENABLED',
   'WEIGHT_OFFSET_KG',
+  'WEIGHT_ADJUSTMENT_FEATURE_START_AT',
+  'WEIGHT_ADJUSTMENT_AUTO_DISABLE_DAYS',
+  'WEIGHT_ADJUSTMENT_AUTO_DISABLE_MINUTES',
   'COMPANY_NAME',
   'COMPANY_ADDRESS',
   'COMPANY_PHONE',
@@ -14,6 +17,7 @@ const REMOTE_SAFE_KEYS = new Set([
   'customers_list',
   'destinations_list',
   'operators_list',
+  'companies_list',
 ]);
 
 const LIST_KEYS = {
@@ -21,6 +25,7 @@ const LIST_KEYS = {
   customers: 'customers_list',
   destinations: 'destinations_list',
   operators: 'operators_list',
+  companies: 'companies_list',
 };
 
 function assertRemoteKey(key) {

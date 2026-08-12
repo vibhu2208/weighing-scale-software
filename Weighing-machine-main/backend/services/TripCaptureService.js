@@ -373,6 +373,7 @@ async function saveTripCapture(data = {}) {
       customer_name: data.customer_name,
       destination: data.destination,
       operator_name: data.operator_name,
+      company: data.company,
     });
   } else {
     result = await openTicketSave({
@@ -390,6 +391,7 @@ async function saveTripCapture(data = {}) {
       customer_name: data.customer_name || null,
       destination: data.destination || null,
       operator_name: data.operator_name || null,
+      company: data.company || null,
       operatorId: data.operatorId || null,
     });
   }
@@ -445,6 +447,7 @@ async function openTicketSave({
   customer_name,
   destination,
   operator_name,
+  company,
   operatorId,
 }) {
   const vehicle = VehicleService.findByNumber(truckNumber);
@@ -472,6 +475,7 @@ async function openTicketSave({
     customer_name: customer_name || null,
     destination: destination || null,
     operator_name: operator_name || null,
+    company: company || 'DCC',
     operator_id: operatorId || null,
   });
 
@@ -523,6 +527,7 @@ async function openTicketSave({
     customer_name: customer_name || null,
     destination: destination || null,
     operator_name: operator_name || null,
+    company: company || 'DCC',
     ...arrivalPhotos,
     departure_photo_1: null,
     departure_photo_2: null,
@@ -567,6 +572,7 @@ async function closeTicket({
   customer_name,
   destination,
   operator_name,
+  company,
 }) {
   if (!openTicket) {
     throw new Error('No open ticket found for this vehicle');
@@ -596,6 +602,7 @@ async function closeTicket({
   const resolvedCustomer = resolveField(customer_name, openTicket.customer_name);
   const resolvedDestination = resolveField(destination, openTicket.destination);
   const resolvedOperator = resolveField(operator_name, openTicket.operator_name);
+  const resolvedCompany = resolveField(company, openTicket.company) || 'DCC';
 
   if (!resolvedMaterial) {
     throw new Error('Material is required before closing the ticket');
@@ -608,6 +615,9 @@ async function closeTicket({
   }
   if (!resolvedOperator) {
     throw new Error('Operator is required before closing the ticket');
+  }
+  if (!resolvedCompany) {
+    throw new Error('Company is required before closing the ticket');
   }
 
   const txnId = openTicket.id;
@@ -653,6 +663,7 @@ async function closeTicket({
     customer_name: resolvedCustomer,
     destination: resolvedDestination,
     operator_name: resolvedOperator,
+    company: resolvedCompany,
     ...departurePhotos,
   });
 
@@ -810,6 +821,7 @@ async function manualCloseHywaTicket(data = {}) {
     customer_name: data.customer_name,
     destination: data.destination,
     operator_name: data.operator_name,
+    company: data.company,
   });
 }
 

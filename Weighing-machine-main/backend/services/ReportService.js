@@ -10,7 +10,7 @@ const { PATHS, ensureDir } = require('../utils/fileStorage');
 const PrintService = require('./PrintService');
 const SettingsService = require('./SettingsService');
 const logger = require('../utils/logger');
-const { buildVehicleReportHtml } = require('../utils/reportPdfHtml');
+const { buildVehicleReportHtml, brandCompanyForTicket } = require('../utils/reportPdfHtml');
 const { buildExcelTablePdfHtml } = require('../utils/reportTablePdfHtml');
 const { renderHtmlToPdf, printHtml } = require('../utils/htmlToPdf');
 const { isClosedTrip } = require('../utils/tripPhotos');
@@ -20,8 +20,9 @@ const { grossWeightTimestamp, tareWeightTimestamp, reportListingTimestamp } = re
 const MAX_CACHED_REPORT_BYTES = 1.5 * 1024 * 1024;
 
 // Closed tickets belong on the net-weight (close) date; open tickets use arrival date.
+// Soft-deleted closed tickets keep the close date so month filters still find them.
 const REPORT_DATE_SQL = `CASE
-  WHEN t.ticket_status = 'CLOSED' THEN COALESCE(t.timestamp_out, t.updated_at)
+  WHEN t.ticket_status IN ('CLOSED', 'DELETED') THEN COALESCE(t.timestamp_out, t.deleted_at, t.updated_at)
   ELSE t.timestamp_in
 END`;
 
@@ -111,6 +112,9 @@ function buildWhere(filters = {}) {
   if (filters.ticket_status && filters.ticket_status !== 'all') {
     clauses.push('t.ticket_status = ?');
     params.push(filters.ticket_status);
+  } else {
+    // Hide soft-deleted tickets from All / other default views
+    clauses.push(`t.ticket_status != 'DELETED'`);
   }
   if (filters.sync_status && filters.sync_status !== 'all') {
     clauses.push('t.sync_status = ?');
@@ -124,6 +128,10 @@ function buildWhere(filters = {}) {
     clauses.push('t.material = ?');
     params.push(filters.material);
   }
+  if (filters.company && filters.company !== 'all') {
+    clauses.push('t.company = ?');
+    params.push(filters.company);
+  }
   if (filters.search && String(filters.search).trim()) {
     const term = `%${String(filters.search).trim()}%`;
     const upperTerm = `%${String(filters.search).trim().toUpperCase()}%`;
@@ -134,9 +142,10 @@ function buildWhere(filters = {}) {
       UPPER(v.transporter) LIKE ? OR
       UPPER(t.operator_name) LIKE ? OR
       UPPER(t.material) LIKE ? OR
-      UPPER(t.destination) LIKE ?
+      UPPER(t.destination) LIKE ? OR
+      UPPER(t.company) LIKE ?
     )`);
-    params.push(term, upperTerm, upperTerm, upperTerm, upperTerm, upperTerm, upperTerm);
+    params.push(term, upperTerm, upperTerm, upperTerm, upperTerm, upperTerm, upperTerm, upperTerm);
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -209,6 +218,7 @@ function summariseFromDb(filters = {}) {
         SUM(CASE WHEN t.ticket_status = 'OPEN' THEN 1 ELSE 0 END) AS open_count,
         SUM(CASE WHEN t.ticket_status = 'CLOSED' THEN 1 ELSE 0 END) AS closed_count,
         SUM(CASE WHEN t.ticket_status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled_count,
+        SUM(CASE WHEN t.ticket_status = 'DELETED' THEN 1 ELSE 0 END) AS deleted_count,
         COALESCE(SUM(t.gross_weight), 0) AS gross,
         COALESCE(SUM(t.tare_weight), 0) AS tare,
         COALESCE(SUM(t.net_weight), 0) AS net,
@@ -225,6 +235,7 @@ function summariseFromDb(filters = {}) {
     open: row?.open_count || 0,
     closed: row?.closed_count || 0,
     cancelled: row?.cancelled_count || 0,
+    deleted: row?.deleted_count || 0,
     gross: row?.gross || 0,
     tare: row?.tare || 0,
     net: row?.net || 0,
@@ -242,8 +253,8 @@ function summarise(rows) {
   };
 }
 
-function getCompanySettings() {
-  return {
+function getCompanySettings(ticketCompany) {
+  const base = {
     name: SettingsService.get('COMPANY_NAME') || process.env.COMPANY_NAME || 'MUNICIPAL CORPORATION GURUGRAM',
     address: SettingsService.get('COMPANY_ADDRESS') || '',
     phone: SettingsService.get('COMPANY_PHONE') || '',
@@ -252,6 +263,23 @@ function getCompanySettings() {
     reportCompanyName: SettingsService.get('REPORT_COMPANY_NAME') || process.env.REPORT_COMPANY_NAME || 'DAYA CHARAN & COMPANY',
     logoPath: SettingsService.get('REPORT_LOGO_PATH') || process.env.REPORT_LOGO_PATH || '',
   };
+  return brandCompanyForTicket(base, ticketCompany);
+}
+
+/** Header branding for multi-row exports: MKG only when filter/all rows are MKG. */
+function getCompanySettingsForRows(rows = [], filterCompany) {
+  if (filterCompany && filterCompany !== 'all') {
+    return getCompanySettings(filterCompany);
+  }
+  const codes = [
+    ...new Set(
+      rows
+        .map((r) => String(r.company || '').trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  ];
+  if (codes.length === 1) return getCompanySettings(codes[0]);
+  return getCompanySettings();
 }
 
 function getSourceLocation() {
@@ -279,7 +307,12 @@ function closedRowsForExport(rows = []) {
 }
 
 function rowToExportValues(row, company) {
-  const settings = company || getCompanySettings();
+  const settings = getCompanySettings(row.company);
+  // Prefer ticket branding; fall back to caller company only when ticket has none.
+  const reportCompanyName =
+    settings.reportCompanyName ||
+    company?.reportCompanyName ||
+    'DAYA CHARAN & COMPANY';
   const gross = splitDateTime(grossWeightTimestamp(row));
   const tare = splitDateTime(tareWeightTimestamp(row));
   const net = splitDateTime(reportListingTimestamp(row));
@@ -289,7 +322,7 @@ function rowToExportValues(row, company) {
     row.customer_name,
     row.truck_number,
     row.material,
-    settings.reportCompanyName,
+    reportCompanyName,
     row.operator_name,
     row.destination,
     row.gross_weight,
@@ -366,7 +399,7 @@ async function buildAndSavePdf(rows, options = {}) {
   const { filters = {}, periodLabel } = options;
   const filenameBase = options.filenamePrefix
     || buildExportBasename(filters, periodLabel, rows);
-  const company = getCompanySettings();
+  const company = getCompanySettingsForRows(rows, filters.company);
   const summary = summarise(rows);
   const exportRows = rows.map(enrichReportRow);
 
@@ -503,7 +536,15 @@ const ReportService = {
       )
       .all()
       .map((r) => r.name);
-    return { operators, materials };
+    const companies = db
+      .prepare(
+        `SELECT DISTINCT company AS name FROM transactions
+         WHERE company IS NOT NULL AND company != ''
+         ORDER BY company`,
+      )
+      .all()
+      .map((r) => r.name);
+    return { operators, materials, companies };
   },
 
   async getReportPreviewHtml(transactionId) {
@@ -513,7 +554,9 @@ const ReportService = {
       return { ok: false, error: 'Transaction not found' };
     }
     const row = enrichReportRow(txn);
-    const html = await buildVehicleReportHtml([row], { company: getCompanySettings() });
+    const html = await buildVehicleReportHtml([row], {
+      company: getCompanySettings(row.company),
+    });
     return { ok: true, html, transactionId, slip_number: row.slip_number };
   },
 
@@ -564,7 +607,7 @@ const ReportService = {
     if (!rows.length) {
       return { ok: false, error: 'No closed tickets match the selected filters' };
     }
-    const company = getCompanySettings();
+    const company = getCompanySettingsForRows(rows, exportFilters.company);
     const dataRows = rows.map((row) => rowToExportValues(row, company));
     const summary = summarise(rows);
     const periodLabel = describePeriod(exportFilters, options.periodLabel);
@@ -588,7 +631,7 @@ const ReportService = {
     const rows = closedRowsForExport(rowsByIds(transactionIds));
     if (!rows.length) return { ok: false, error: 'No closed tickets selected' };
 
-    const company = getCompanySettings();
+    const company = getCompanySettingsForRows(rows);
     const dataRows = rows.map((row) => rowToExportValues(row, company));
     const summary = summarise(rows);
     const html = buildExcelTablePdfHtml({

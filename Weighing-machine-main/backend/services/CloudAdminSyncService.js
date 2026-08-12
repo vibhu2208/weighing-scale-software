@@ -22,6 +22,9 @@ const pushQueue = new Set();
 const REMOTE_SAFE_KEYS = new Set([
   'WEIGHT_ADJUSTMENT_ENABLED',
   'WEIGHT_OFFSET_KG',
+  'WEIGHT_ADJUSTMENT_FEATURE_START_AT',
+  'WEIGHT_ADJUSTMENT_AUTO_DISABLE_DAYS',
+  'WEIGHT_ADJUSTMENT_AUTO_DISABLE_MINUTES',
   'COMPANY_NAME',
   'COMPANY_ADDRESS',
   'COMPANY_PHONE',
@@ -33,6 +36,12 @@ const REMOTE_SAFE_KEYS = new Set([
   'customers_list',
   'destinations_list',
   'operators_list',
+  'companies_list',
+]);
+
+/** Local-owned keys — pulled from cloud must not overwrite the site clock. */
+const LOCAL_AUTHORITATIVE_KEYS = new Set([
+  'WEIGHT_ADJUSTMENT_FEATURE_START_AT',
 ]);
 
 function intervalSeconds() {
@@ -252,10 +261,63 @@ async function pullSettings() {
   ]);
   for (const row of res.rows || []) {
     if (!REMOTE_SAFE_KEYS.has(row.key)) continue;
+    if (LOCAL_AUTHORITATIVE_KEYS.has(row.key)) continue;
     if (SettingsService.get(row.key) !== row.value) {
+      if (row.key === 'WEIGHT_ADJUSTMENT_ENABLED' || row.key === 'WEIGHT_OFFSET_KG') {
+        try {
+          const WeightAdjustmentService = require('./WeightAdjustmentService');
+          if (!WeightAdjustmentService.isFeatureAvailable()) {
+            if (row.key === 'WEIGHT_ADJUSTMENT_ENABLED' && row.value === 'true') {
+              SettingsService.set('WEIGHT_ADJUSTMENT_ENABLED', 'false');
+              WeightAdjustmentService.onEnabledSettingChanged('false');
+              logger.info('CloudAdminSync ignored weight enable — feature window expired');
+            }
+            continue;
+          }
+        } catch (_e) {
+          /* optional */
+        }
+      }
       SettingsService.set(row.key, row.value);
+      if (row.key === 'WEIGHT_ADJUSTMENT_ENABLED') {
+        try {
+          const WeightAdjustmentService = require('./WeightAdjustmentService');
+          WeightAdjustmentService.onEnabledSettingChanged(row.value);
+        } catch (_e) {
+          /* optional */
+        }
+      }
       logger.info('CloudAdminSync applied setting', { key: row.key });
     }
+  }
+}
+
+async function pushWeightFeatureMeta() {
+  try {
+    const WeightAdjustmentService = require('./WeightAdjustmentService');
+    const start = WeightAdjustmentService.getFeatureStartAt().toISOString();
+    const days = String(WeightAdjustmentService.getAutoDisableDays());
+    const minutes = WeightAdjustmentService.getAutoDisableMinutes();
+    const siteId = getSiteId();
+    const rows = [
+      ['WEIGHT_ADJUSTMENT_FEATURE_START_AT', start],
+      ['WEIGHT_ADJUSTMENT_AUTO_DISABLE_DAYS', days],
+      ['WEIGHT_ADJUSTMENT_AUTO_DISABLE_MINUTES', minutes > 0 ? String(minutes) : ''],
+    ];
+    for (const [key, value] of rows) {
+      // eslint-disable-next-line no-await-in-loop
+      await pg.query(
+        `INSERT INTO site_settings (site_id, key, value, updated_at, updated_by)
+         VALUES ($1, $2, $3, now(), $4)
+         ON CONFLICT (site_id, key) DO UPDATE SET
+           value = EXCLUDED.value,
+           updated_at = now(),
+           updated_by = EXCLUDED.updated_by`,
+        [siteId, key, value, 'weighbridge'],
+      );
+    }
+  } catch (err) {
+    logger.warn('CloudAdminSync push weight feature meta failed', { message: err.message });
   }
 }
 
@@ -270,6 +332,7 @@ async function processNow() {
     await heartbeat();
     await processPushQueue();
     await pullCommands();
+    await pushWeightFeatureMeta();
     await pullSettings();
     await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
     return { ok: true };

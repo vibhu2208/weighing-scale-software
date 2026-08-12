@@ -113,6 +113,13 @@ const electronAPI = {
     'getCloudStatus',
     'listRemoteBackups',
     'restoreBackup',
+    'manualLogUpload',
+  ]),
+
+  mail: buildNamespace('mail', [
+    'getStatus',
+    'sendDailyReportNow',
+    'sendTestMail',
   ]),
 
   storage: buildNamespace('storage', [
@@ -135,6 +142,8 @@ const electronAPI = {
     'setDestinations',
     'getOperators',
     'setOperators',
+    'getCompanies',
+    'setCompanies',
   ]),
 
   auth: buildNamespace('auth', [

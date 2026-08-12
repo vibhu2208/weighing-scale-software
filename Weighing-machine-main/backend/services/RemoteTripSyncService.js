@@ -8,6 +8,7 @@ const logger = require('../utils/logger');
 const ts = require('../utils/timestamp');
 const { getCameraImagePath } = require('../utils/fileStorage');
 const TransactionService = require('./TransactionService');
+const SlipNumberService = require('./SlipNumberService');
 const McgPortalService = require('./McgPortalService');
 const S3Service = require('./S3Service');
 
@@ -86,6 +87,62 @@ async function downloadRemotePhotos(row, localTxnId) {
   return { ...paths, report_path: reportPath };
 }
 
+function formatSlip(num) {
+  return `WB${String(num).padStart(4, '0')}`;
+}
+
+async function allocateUniqueSlip() {
+  const localMax = SlipNumberService.getMaxLocalSlipNumeric();
+  const rdsCounter = await pg.getSlipCounterValue();
+  const remoteMaxRes = await pg.query(
+    `SELECT MAX(CAST(substring(slip_number from 3) AS BIGINT)) AS m
+     FROM remote_trips WHERE slip_number ~ '^WB[0-9]+$'`,
+  );
+  const remoteMax = Number(remoteMaxRes.rows[0]?.m || 0);
+  let nextNum = Math.max(localMax, Number(rdsCounter || 0), remoteMax) + 1;
+
+  for (let i = 0; i < 100; i += 1) {
+    const candidate = formatSlip(nextNum);
+    const localHit = TransactionService.getBySlipNumber(candidate);
+    const remoteHit = await pg.query(
+      'SELECT id FROM remote_trips WHERE slip_number = $1 LIMIT 1',
+      [candidate],
+    );
+    if (!localHit && !remoteHit.rows.length) {
+      await pg.syncSlipCounterToMax(nextNum);
+      return candidate;
+    }
+    nextNum += 1;
+  }
+  throw new Error('Could not allocate a free slip number for remote trip remapping');
+}
+
+async function remappingRemoteSlip(row, localConflict) {
+  const oldSlip = row.slip_number;
+  const newSlip = await allocateUniqueSlip();
+  await pg.query(
+    `UPDATE remote_trips
+     SET slip_number = $2,
+         synced_to_local = false,
+         synced_at = NULL,
+         local_id = NULL,
+         mcg_status = CASE WHEN mcg_status = 'sent' THEN mcg_status ELSE 'pending' END,
+         mcg_error = NULL
+     WHERE id = $1`,
+    [row.id, newSlip],
+  );
+  logger.warn('Remote trip slip remapped due to local conflict', {
+    remoteId: row.id,
+    oldSlip,
+    newSlip,
+    remoteTruck: row.truck_number,
+    localTruck: localConflict?.truck_number || null,
+    localId: localConflict?.id || null,
+  });
+  row.slip_number = newSlip;
+  return newSlip;
+}
+
 async function markRemoteTripSynced(remoteId, localId, mcgResult) {
   const mcgStatus =
     mcgResult?.skipped && mcgResult?.reason === 'not_configured'
@@ -112,8 +169,24 @@ async function markRemoteTripSynced(remoteId, localId, mcgResult) {
   );
 }
 
-async function processRemoteRow(row) {
+async function processRemoteRow(row, attempt = 0) {
   const remoteId = row.id;
+
+  const alreadyImported = TransactionService.getByRemotePgId(remoteId);
+  if (alreadyImported) {
+    await markRemoteTripSynced(remoteId, alreadyImported.id, {
+      ok: true,
+      skipped: true,
+      reason: 'already_sent',
+    });
+    return { ok: true, reason: 'already_imported', transactionId: alreadyImported.id };
+  }
+
+  const slipOwner = TransactionService.getBySlipNumber(row.slip_number);
+  if (slipOwner && slipOwner.remote_pg_id !== remoteId) {
+    await remappingRemoteSlip(row, slipOwner);
+  }
+
   const localTxnId = uuidv4();
   const photoPaths = await downloadRemotePhotos(row, localTxnId);
 
@@ -127,6 +200,8 @@ async function processRemoteRow(row) {
     destination: row.destination,
     material: row.material,
     operator_name: row.operator_name,
+    // Remote trips are DCC-only — never import as another company
+    company: 'DCC',
     gross_weight: row.gross_weight,
     tare_weight: row.tare_weight,
     timestamp_in: toIso(row.timestamp_in),
@@ -146,20 +221,20 @@ async function processRemoteRow(row) {
   }
 
   if (!importResult.imported && transaction.remote_pg_id !== remoteId) {
-    const conflictMsg = `Slip ${row.slip_number} already exists locally with a different source (local truck ${transaction.truck_number})`;
-    logger.error('Remote trip import skipped — slip conflict', {
+    logger.warn('Remote trip import hit slip conflict after remapping check — retrying', {
       remoteId,
       slip: row.slip_number,
       remoteTruck: row.truck_number,
       localId: transaction.id,
       localTruck: transaction.truck_number,
     });
-    // Mark synced so the queue does not retry forever; data stays on RDS for manual fix.
-    await markRemoteTripSynced(remoteId, transaction.id, {
-      ok: false,
-      error: conflictMsg,
-    });
-    return { ok: false, reason: 'slip_conflict', transactionId: transaction.id };
+    if (attempt >= 3) {
+      throw new Error(
+        `Slip ${row.slip_number} still conflicts locally after remapping (truck ${transaction.truck_number})`,
+      );
+    }
+    await remappingRemoteSlip(row, transaction);
+    return processRemoteRow(row, attempt + 1);
   }
 
   let mcgResult = { ok: true, skipped: true, reason: 'already_sent' };
@@ -208,6 +283,13 @@ async function loadPendingRows() {
   const res = await pg.query(
     `SELECT * FROM remote_trips
      WHERE synced_to_local = false
+        OR (
+          mcg_error IS NOT NULL
+          AND (
+            mcg_error ILIKE '%already exists%'
+            OR mcg_error ILIKE '%slip%conflict%'
+          )
+        )
      ORDER BY created_at ASC
      LIMIT 50`,
   );

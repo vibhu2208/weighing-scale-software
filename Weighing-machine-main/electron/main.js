@@ -192,6 +192,22 @@ async function bootstrapBackend() {
     await tryInvoke('startCloudLogUploadService', () => cloudLogs.start());
   }
 
+  const dailyReportMail = safeRequire(
+    '../backend/services/DailyReportMailService',
+    'DailyReportMailService',
+  );
+  if (dailyReportMail && typeof dailyReportMail.start === 'function') {
+    await tryInvoke('startDailyReportMailService', () => dailyReportMail.start());
+  }
+
+  const weightAdjustment = safeRequire(
+    '../backend/services/WeightAdjustmentService',
+    'WeightAdjustmentService',
+  );
+  if (weightAdjustment && typeof weightAdjustment.start === 'function') {
+    await tryInvoke('startWeightAdjustmentAutoDisable', () => weightAdjustment.start());
+  }
+
   const print = safeRequire('../backend/services/PrintService', 'PrintService');
   if (print && typeof print.processReprintQueue === 'function') {
     await tryInvoke('processReprintQueue', () => print.processReprintQueue());

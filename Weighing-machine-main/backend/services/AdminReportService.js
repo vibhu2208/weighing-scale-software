@@ -79,6 +79,9 @@ function requireClosedReport(txn) {
   if (!txn) {
     throw new Error('Report not found for that slip number');
   }
+  if (txn.ticket_status === TICKET_STATUS.DELETED) {
+    throw new Error('This report has already been deleted');
+  }
   if (txn.ticket_status !== TICKET_STATUS.CLOSED && !isClosedTrip(txn)) {
     throw new Error('Only closed ticket reports can be edited or deleted');
   }
@@ -107,22 +110,6 @@ function getClosedReportBySlip(slipNumber) {
   OperatorAuthService.assertManualHywaSectionAccess();
   const txn = requireClosedReport(findClosedBySlip(slipNumber));
   return toPublicTransaction(txn);
-}
-
-function removeReportPdfFiles(txn) {
-  const paths = new Set();
-  if (txn.report_path) paths.add(normalizePath(txn.report_path));
-  if (txn.slip_number) {
-    paths.add(path.join(PATHS.REPORTS, `${txn.slip_number}_report.pdf`));
-  }
-  for (const filePath of paths) {
-    if (!filePath) continue;
-    try {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch (err) {
-      logger.warn('Failed to delete report PDF', { path: filePath, message: err.message });
-    }
-  }
 }
 
 async function performClosedReportUpdate(data = {}) {
@@ -171,7 +158,7 @@ async function performClosedReportUpdate(data = {}) {
     updates.timestamp_out = parsed.toISOString();
   }
 
-  const textFields = ['material', 'customer_name', 'destination', 'operator_name'];
+  const textFields = ['material', 'customer_name', 'destination', 'operator_name', 'company'];
   for (const key of textFields) {
     if (data[key] != null) {
       const value = String(data[key]).trim();
@@ -394,10 +381,10 @@ function performClosedReportDelete(data = {}) {
       : findClosedBySlip(data.slipNumber || data.slip_number),
   );
 
-  removeReportPdfFiles(txn);
+  // Soft-delete: keep row + PDF so Reports can list/preview Deleted tickets.
   const deleted = TransactionService.deleteById(txn.id);
 
-  logger.info('Closed report deleted by admin', {
+  logger.info('Closed report soft-deleted by admin', {
     transactionId: txn.id,
     slip: txn.slip_number,
     remote: !!data.remote,

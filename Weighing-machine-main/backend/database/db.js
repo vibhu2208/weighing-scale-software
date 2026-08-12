@@ -30,6 +30,8 @@ const migration014 = require('./migrations/014_repair_hywa_departure_photos');
 const migration015 = require('./migrations/015_restore_hywa_departure_photos');
 const migration016 = require('./migrations/016_fix_hywa_swapped_photos');
 const migration017 = require('./migrations/017_backfill_hywa_photo_columns');
+const migration018 = require('./migrations/018_soft_delete_tickets');
+const migration019 = require('./migrations/019_ticket_company');
 
 let db = null;
 
@@ -68,6 +70,8 @@ function runMigrations(handle = db) {
     migration015,
     migration016,
     migration017,
+    migration018,
+    migration019,
   ];
 
   const apply = handle.transaction(() => {
@@ -137,6 +141,7 @@ function initDatabase() {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.pragma('synchronous = NORMAL');
+    db.pragma('busy_timeout = 15000');
     logger.info('SQLite connected', { path: dbPath, mode: 'WAL' });
 
     runMigrations(db);

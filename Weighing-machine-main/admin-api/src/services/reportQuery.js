@@ -25,6 +25,8 @@ function buildWhere(siteId, filters = {}) {
   if (filters.ticket_status && filters.ticket_status !== 'all') {
     clauses.push(`ticket_status = $${idx++}`);
     params.push(filters.ticket_status);
+  } else {
+    clauses.push(`ticket_status != 'DELETED'`);
   }
   if (filters.sync_status && filters.sync_status !== 'all') {
     clauses.push(`sync_status = $${idx++}`);

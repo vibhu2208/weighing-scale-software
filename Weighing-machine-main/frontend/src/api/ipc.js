@@ -141,6 +141,13 @@ export const backupAPI = makeProxy('backup', [
   'getCloudStatus',
   'listRemoteBackups',
   'restoreBackup',
+  'manualLogUpload',
+]);
+
+export const mailAPI = makeProxy('mail', [
+  'getStatus',
+  'sendDailyReportNow',
+  'sendTestMail',
 ]);
 
 export const storageAPI = makeProxy('storage', [
@@ -163,6 +170,8 @@ export const settingsAPI = makeProxy('settings', [
   'setDestinations',
   'getOperators',
   'setOperators',
+  'getCompanies',
+  'setCompanies',
 ]);
 
 export const authAPI = makeProxy('auth', [
@@ -226,6 +235,7 @@ export default {
   syncAPI,
   reportAPI,
   backupAPI,
+  mailAPI,
   storageAPI,
   settingsAPI,
   authAPI,

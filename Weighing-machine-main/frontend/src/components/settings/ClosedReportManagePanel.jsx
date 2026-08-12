@@ -29,6 +29,7 @@ function buildEditForm(report) {
     customer_name: report?.customer_name || '',
     destination: report?.destination || '',
     operator_name: report?.operator_name || '',
+    company: report?.company || 'DCC',
   };
 }
 
@@ -41,6 +42,7 @@ export default function ClosedReportManagePanel() {
   const [customers, setCustomers] = useState([]);
   const [destinations, setDestinations] = useState([]);
   const [operators, setOperators] = useState([]);
+  const [companies, setCompanies] = useState(['DCC', 'MKG']);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -62,12 +64,14 @@ export default function ClosedReportManagePanel() {
       settingsAPI.getCustomers(),
       settingsAPI.getDestinations(),
       settingsAPI.getOperators(),
+      settingsAPI.getCompanies(),
     ])
-      .then(([m, c, d, o]) => {
+      .then(([m, c, d, o, companiesList]) => {
         setMaterials(m || []);
         setCustomers(c || []);
         setDestinations(d || []);
         setOperators(o || []);
+        setCompanies(Array.isArray(companiesList) && companiesList.length ? companiesList : ['DCC', 'MKG']);
       })
       .catch(() => {});
   }, [refreshRecent]);
@@ -127,6 +131,7 @@ export default function ClosedReportManagePanel() {
         customer_name: form.customer_name.trim(),
         destination: form.destination.trim(),
         operator_name: form.operator_name.trim(),
+        company: form.company.trim() || 'DCC',
       });
 
       if (result?.ok === false) {
@@ -151,7 +156,7 @@ export default function ClosedReportManagePanel() {
       return;
     }
     const ok = window.confirm(
-      `Delete report ${loaded.slip_number} (${loaded.truck_number}) permanently?\n\nThis removes the ticket record and PDF from this system.`,
+      `Delete report ${loaded.slip_number} (${loaded.truck_number})?\n\nThe ticket will be marked Deleted and hidden from normal reports. You can still view it under Reports → Status → Deleted.`,
     );
     if (!ok) return;
 
@@ -280,6 +285,7 @@ export default function ClosedReportManagePanel() {
           <EditField label="Material" list={materials} value={form.material} onChange={(v) => updateField('material', v)} />
           <EditField label="Customer" list={customers} value={form.customer_name} onChange={(v) => updateField('customer_name', v)} />
           <EditField label="Destination" list={destinations} value={form.destination} onChange={(v) => updateField('destination', v)} />
+          <EditField label="Company" list={companies} value={form.company} onChange={(v) => updateField('company', v)} />
           <EditField label="Operator" list={operators} value={form.operator_name} onChange={(v) => updateField('operator_name', v)} />
 
           <div className="space-y-2">

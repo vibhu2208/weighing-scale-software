@@ -7,6 +7,7 @@ export function ticketStatusLabel(transaction) {
   if (ticket === 'OPEN') return 'Open';
   if (ticket === 'CLOSED') return 'Closed';
   if (ticket === 'CANCELLED') return 'Cancelled';
+  if (ticket === 'DELETED') return 'Deleted';
 
   const legacy = transaction.status;
   if (legacy === 'error' || legacy === 'cancelled') return 'Cancelled';
@@ -20,6 +21,7 @@ export function ticketStatusLabel(transaction) {
 /** True when ticket has both weighs captured (matches backend isClosedTrip). */
 export function isClosedTicket(transaction) {
   if (!transaction) return false;
+  if (transaction.ticket_status === 'DELETED') return false;
   if (transaction.ticket_status === 'CLOSED') return true;
   if (transaction.ticket_status === 'OPEN' || transaction.ticket_status === 'CANCELLED') {
     return false;
@@ -51,6 +53,7 @@ export function ticketStatusVariant(transaction) {
   if (label === 'Open') return 'warning';
   if (label === 'Closed') return 'success';
   if (label === 'Cancelled') return 'danger';
+  if (label === 'Deleted') return 'danger';
   if (transaction?.status === 'synced' || transaction?.status === 'printed') {
     return 'success';
   }

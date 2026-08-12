@@ -8,6 +8,7 @@ import ReportEdit from './pages/ReportEdit.jsx';
 import AdvanceSettings from './pages/AdvanceSettings.jsx';
 import SyncStatus from './pages/SyncStatus.jsx';
 import RemoteTrips from './pages/RemoteTrips.jsx';
+import PlanGaps from './pages/PlanGaps.jsx';
 
 function PrivateRoute({ children }) {
   if (!isLoggedIn()) return <Navigate to="/login" replace />;
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="reports" element={<Reports />} />
           <Route path="reports/:slip/edit" element={<ReportEdit />} />
           <Route path="remote-trips" element={<RemoteTrips />} />
+          <Route path="plan-gaps" element={<PlanGaps />} />
           <Route path="settings/advance" element={<AdvanceSettings />} />
           <Route path="sync" element={<SyncStatus />} />
         </Route>

@@ -83,6 +83,31 @@ The weighbridge app downloads these to local `uploads/` on sync so PDF/Excel rep
 
 ---
 
+## Slip gap reservations (`003_slip_reservations.sql`)
+
+Optional but recommended for late remote entries. Run [`003_slip_reservations.sql`](./003_slip_reservations.sql) after `001_schema.sql` (admin-api also migrates the table on startup).
+
+**Workflow (deferred block)**
+
+1. Anytime before the window: Admin → **Plan Gaps** → set trip count + planned times → **Schedule gaps** (no slip assigned yet; status `scheduled`)
+2. **5 minutes before** each planned time, admin-api takes the **next live** `WB####` from `slip_counter` and marks the row `held` (blocked)
+3. Local weighments after that skip the blocked number
+4. Later: **Remote Trips** → **Use planned gap** (held only) → fill weights/photos → create → status `used`
+
+**Statuses**
+
+| Status | Meaning |
+|--------|---------|
+| scheduled | Waiting for auto-block |
+| held | Slip blocked; not filled yet |
+| used | Remote trip created |
+| missed | Auto-block window expired (API/DB may have been offline) — use **Block now** |
+| released | Cancelled |
+
+Unused held slips can stay as holes, or use **Release** on Plan Gaps.
+
+---
+
 ## Remote admin panel (`002_admin_panel.sql`)
 
 Run [`002_admin_panel.sql`](./002_admin_panel.sql) after `001_schema.sql` for the browser admin panel.

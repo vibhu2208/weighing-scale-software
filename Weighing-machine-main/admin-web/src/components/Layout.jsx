@@ -4,6 +4,7 @@ import { setToken } from '../api/client.js';
 
 const nav = [
   { to: '/reports', label: 'Reports' },
+  { to: '/plan-gaps', label: 'Plan Gaps' },
   { to: '/remote-trips', label: 'Remote Trips' },
   { to: '/settings/advance', label: 'Advance Settings' },
   { to: '/sync', label: 'Sync Status' },
