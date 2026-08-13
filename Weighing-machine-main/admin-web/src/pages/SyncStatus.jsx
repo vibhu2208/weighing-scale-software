@@ -6,7 +6,10 @@ import { fmtDate } from '../lib/format.js';
 export default function SyncStatus() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [retryingId, setRetryingId] = useState('');
+  const [retryingAll, setRetryingAll] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -29,6 +32,7 @@ export default function SyncStatus() {
 
   const site = data?.site || {};
   const commands = data?.commands || {};
+  const failedCount = Number(commands.failed || 0);
 
   function commandTone(status) {
     if (status === 'applied') return 'success';
@@ -37,16 +41,63 @@ export default function SyncStatus() {
     return 'default';
   }
 
+  async function onRetry(cmd) {
+    setRetryingId(cmd.id);
+    setError('');
+    setMessage('');
+    try {
+      await api.retrySyncCommand(cmd.id);
+      setMessage(`Re-queued ${cmd.type} — weighbridge PC will retry within ~30 seconds.`);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRetryingId('');
+    }
+  }
+
+  async function onRetryAllFailed() {
+    setRetryingAll(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api.retryFailedSyncCommands();
+      setMessage(
+        result.count
+          ? `Re-queued ${result.count} failed command(s) for the weighbridge PC.`
+          : 'No failed commands to retry.',
+      );
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRetryingAll(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-semibold">Sync Status</h2>
-        <button type="button" className="btn-ghost text-xs" onClick={load} disabled={loading}>
-          Refresh
-        </button>
+        <div className="flex flex-wrap gap-2">
+          {failedCount > 0 && (
+            <button
+              type="button"
+              className="btn-primary text-xs"
+              onClick={onRetryAllFailed}
+              disabled={retryingAll || loading}
+            >
+              {retryingAll ? 'Retrying…' : `Retry all failed (${failedCount})`}
+            </button>
+          )}
+          <button type="button" className="btn-ghost text-xs" onClick={load} disabled={loading}>
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {message && <p className="text-sm text-emerald-400">{message}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div className="card p-4">
@@ -79,6 +130,7 @@ export default function SyncStatus() {
               <th className="p-3">Created</th>
               <th className="p-3">Applied</th>
               <th className="p-3">Error</th>
+              <th className="p-3">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -90,12 +142,26 @@ export default function SyncStatus() {
                 </td>
                 <td className="p-3 text-xs">{fmtDate(cmd.created_at)}</td>
                 <td className="p-3 text-xs">{fmtDate(cmd.applied_at)}</td>
-                <td className="p-3 text-xs text-red-400">{cmd.error || '—'}</td>
+                <td className="p-3 text-xs text-red-400 max-w-md break-words">{cmd.error || '—'}</td>
+                <td className="p-3">
+                  {cmd.status === 'failed' ? (
+                    <button
+                      type="button"
+                      className="btn-ghost text-xs"
+                      disabled={retryingId === cmd.id || retryingAll}
+                      onClick={() => onRetry(cmd)}
+                    >
+                      {retryingId === cmd.id ? 'Retrying…' : 'Retry'}
+                    </button>
+                  ) : (
+                    <span className="text-xs text-slate-600">—</span>
+                  )}
+                </td>
               </tr>
             ))}
             {!loading && !(data?.recentCommands || []).length && (
               <tr>
-                <td colSpan={5} className="p-6 text-center text-slate-500">
+                <td colSpan={6} className="p-6 text-center text-slate-500">
                   No commands yet
                 </td>
               </tr>

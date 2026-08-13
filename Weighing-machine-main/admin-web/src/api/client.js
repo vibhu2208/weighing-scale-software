@@ -50,6 +50,15 @@ async function request(path, options = {}) {
   return json;
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read image file'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export const api = {
   login(email, password) {
     return request('/auth/login', {
@@ -131,6 +140,18 @@ export const api = {
     return request('/sync/status');
   },
 
+  retrySyncCommand(id) {
+    return request(`/sync/commands/${encodeURIComponent(id)}/retry`, {
+      method: 'POST',
+    });
+  },
+
+  retryFailedSyncCommands() {
+    return request('/sync/commands/retry-failed', {
+      method: 'POST',
+    });
+  },
+
   getUploadUrl(slip, slot, contentType, pass = 'departure') {
     return request('/media/upload-url', {
       method: 'POST',
@@ -142,6 +163,34 @@ export const api = {
     return request('/media/remote-trip-upload-url', {
       method: 'POST',
       body: JSON.stringify({ slip, slot, contentType, pass }),
+    });
+  },
+
+  async uploadRemoteTripPhoto(slip, slot, file, pass = 'departure') {
+    const imageBase64 = await fileToDataUrl(file);
+    return request('/media/remote-trip-upload', {
+      method: 'POST',
+      body: JSON.stringify({
+        slip,
+        slot,
+        pass,
+        contentType: file.type || 'image/jpeg',
+        imageBase64,
+      }),
+    });
+  },
+
+  async uploadMirrorPhoto(slip, slot, file, pass = 'departure') {
+    const imageBase64 = await fileToDataUrl(file);
+    return request('/media/upload', {
+      method: 'POST',
+      body: JSON.stringify({
+        slip,
+        slot,
+        pass,
+        contentType: file.type || 'image/jpeg',
+        imageBase64,
+      }),
     });
   },
 

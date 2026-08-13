@@ -33,13 +33,196 @@ function photoKey(pass, slot) {
 function defaultDatetimeLocal(offsetMs = 0) {
   const d = new Date(Date.now() + offsetMs);
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function splitDatetimeLocal(value) {
+  const raw = String(value || '');
+  const [datePart = '', timePart = ''] = raw.split('T');
+  let time = timePart;
+  if (/^\d{2}:\d{2}$/.test(time)) time = `${time}:00`;
+  else if (time.length > 8) time = time.slice(0, 8);
+  return { date: datePart, time };
+}
+
+function joinDatetimeLocal(date, time) {
+  if (!date) return '';
+  return `${date}T${String(time || '').trim()}`;
+}
+
+function isCompleteDatetimeLocal(value) {
+  return /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(String(value || ''));
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function parseHms(time) {
+  const m = String(time || '').match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+  if (!m) return { h: 0, m: 0, s: 0 };
+  return {
+    h: Math.min(23, Math.max(0, Number(m[1]) || 0)),
+    m: Math.min(59, Math.max(0, Number(m[2]) || 0)),
+    s: Math.min(59, Math.max(0, Number(m[3]) || 0)),
+  };
+}
+
+function formatHms(h, m, s) {
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+}
+
+function ClockColumn({ label, value, max, onChange }) {
+  const items = Array.from({ length: max + 1 }, (_, i) => i);
+  const listRef = React.useRef(null);
+
+  React.useEffect(() => {
+    const el = listRef.current?.querySelector(`[data-val="${value}"]`);
+    if (el) el.scrollIntoView({ block: 'center' });
+  }, [value]);
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
+      <div
+        ref={listRef}
+        className="h-40 w-14 overflow-y-auto rounded-lg border border-slate-700 bg-slate-950/80 snap-y snap-mandatory"
+      >
+        {items.map((n) => {
+          const active = n === value;
+          return (
+            <button
+              key={n}
+              type="button"
+              data-val={n}
+              className={`flex h-8 w-full snap-center items-center justify-center font-mono text-sm ${
+                active
+                  ? 'bg-sky-600/30 text-sky-200 font-semibold'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+              }`}
+              onClick={() => onChange(n)}
+            >
+              {pad2(n)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TimeClockPicker({ value, onChange, required }) {
+  const [open, setOpen] = React.useState(false);
+  const rootRef = React.useRef(null);
+  const { h, m, s } = parseHms(value);
+  const display = value && /^\d{2}:\d{2}:\d{2}$/.test(value) ? value : formatHms(h, m, s);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    function onDoc(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  function setPart(next) {
+    onChange(formatHms(next.h ?? h, next.m ?? m, next.s ?? s));
+  }
+
+  return (
+    <div ref={rootRef} className="relative min-w-[9rem] flex-1">
+      <button
+        type="button"
+        className="field-input flex w-full items-center justify-between gap-2 text-left font-mono"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+      >
+        <span>{display || 'HH:mm:ss'}</span>
+        <svg
+          className="h-4 w-4 shrink-0 text-slate-400"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          aria-hidden
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {/* Hidden required input so form validation still works */}
+      <input type="hidden" required={required} value={display} readOnly />
+      {open && (
+        <div className="absolute left-0 top-full z-40 mt-2 w-[17.5rem] rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-xl">
+          <div className="mb-2 text-center font-mono text-lg text-slate-100 tabular-nums">
+            {display}
+            <span className="ml-2 text-xs text-slate-500">24h</span>
+          </div>
+          <div className="flex justify-center gap-2">
+            <ClockColumn label="Hour" value={h} max={23} onChange={(v) => setPart({ h: v })} />
+            <ClockColumn label="Min" value={m} max={59} onChange={(v) => setPart({ m: v })} />
+            <ClockColumn label="Sec" value={s} max={59} onChange={(v) => setPart({ s: v })} />
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              className="btn-ghost flex-1 text-xs"
+              onClick={() => {
+                const now = new Date();
+                onChange(formatHms(now.getHours(), now.getMinutes(), now.getSeconds()));
+              }}
+            >
+              Now
+            </button>
+            <button
+              type="button"
+              className="btn-primary flex-1 text-xs"
+              onClick={() => setOpen(false)}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Datetime24Field({ id, value, onChange, required }) {
+  const { date, time } = splitDatetimeLocal(value);
+  return (
+    <div className="mt-1 flex flex-wrap gap-2">
+      <input
+        id={id}
+        type="date"
+        className="field-input min-w-[10.5rem] flex-1"
+        required={required}
+        value={date}
+        onChange={(e) => onChange(joinDatetimeLocal(e.target.value, time || '00:00:00'))}
+      />
+      <TimeClockPicker
+        required={required}
+        value={time}
+        onChange={(nextTime) => onChange(joinDatetimeLocal(date, nextTime))}
+      />
+    </div>
+  );
 }
 
 function emptyForm() {
   return {
     reservation_id: '',
     slip_number: '',
+    replace_existing: false,
     truck_number: '',
     rfid_tag: '',
     transporter: '',
@@ -210,19 +393,8 @@ export default function RemoteTrips() {
   }
 
   async function uploadPhoto(slip, pass, slot, file) {
-    const { uploadUrl, key } = await api.getRemoteTripUploadUrl(
-      slip,
-      slot,
-      file.type || 'image/jpeg',
-      pass,
-    );
-    const res = await fetch(uploadUrl, {
-      method: 'PUT',
-      body: file,
-      headers: { 'Content-Type': file.type || 'image/jpeg' },
-    });
-    if (!res.ok) throw new Error(`Photo upload failed (${pass} camera ${slot})`);
-    return { slot, key, pass };
+    const uploaded = await api.uploadRemoteTripPhoto(slip, slot, file, pass);
+    return { slot, key: uploaded.key, pass };
   }
 
   async function onSubmit(e) {
@@ -231,34 +403,67 @@ export default function RemoteTrips() {
     setError('');
     setMessage('');
     try {
+      if (!isCompleteDatetimeLocal(form.timestamp_in) || !isCompleteDatetimeLocal(form.timestamp_out)) {
+        throw new Error('Enter arrival and close times as 24-hour HH:mm:ss (e.g. 14:35:08)');
+      }
+      if (Number.isNaN(new Date(form.timestamp_in).getTime()) || Number.isNaN(new Date(form.timestamp_out).getTime())) {
+        throw new Error('Invalid arrival or close time');
+      }
+
+      const chosenSlip = form.slip_number.trim().toUpperCase() || undefined;
+      const photoS3Keys = [];
+
+      // When slip is known up front, upload photos BEFORE create so the PC
+      // import (triggered on INSERT) already has S3 keys.
+      if (chosenSlip) {
+        for (const { pass } of photoPassesFor(form.vehicle_type)) {
+          for (const slot of PHOTO_SLOTS) {
+            const file = photos[photoKey(pass, slot)];
+            if (!file) continue;
+            // eslint-disable-next-line no-await-in-loop
+            const uploaded = await uploadPhoto(chosenSlip, pass, slot, file);
+            photoS3Keys.push(uploaded);
+          }
+        }
+      }
+
       const payload = {
         ...form,
-        slip_number: form.slip_number.trim() || undefined,
+        slip_number: chosenSlip,
         reservation_id: form.reservation_id || undefined,
+        replace_existing: Boolean(form.replace_existing),
+        photoS3Keys: chosenSlip ? photoS3Keys : undefined,
         timestamp_in: new Date(form.timestamp_in).toISOString(),
         timestamp_out: new Date(form.timestamp_out).toISOString(),
       };
 
       const { trip } = await api.createRemoteTrip(payload);
-      const photoS3Keys = [];
 
-      for (const { pass } of photoPassesFor(form.vehicle_type)) {
-        for (const slot of PHOTO_SLOTS) {
-          const file = photos[photoKey(pass, slot)];
-          if (!file) continue;
-          // eslint-disable-next-line no-await-in-loop
-          const uploaded = await uploadPhoto(trip.slip_number, pass, slot, file);
-          photoS3Keys.push(uploaded);
+      // Auto-assigned slip: upload+attach after create (re-queues PC if it synced early).
+      if (!chosenSlip) {
+        for (const { pass } of photoPassesFor(form.vehicle_type)) {
+          for (const slot of PHOTO_SLOTS) {
+            const file = photos[photoKey(pass, slot)];
+            if (!file) continue;
+            // eslint-disable-next-line no-await-in-loop
+            const uploaded = await uploadPhoto(trip.slip_number, pass, slot, file);
+            photoS3Keys.push(uploaded);
+          }
+        }
+        if (photoS3Keys.length) {
+          await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
         }
       }
 
       if (photoS3Keys.length) {
-        await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+        setMessage(
+          `Remote trip ${trip.slip_number} created with ${photoS3Keys.length} photo(s). PC will import/update within ~30 seconds when online.`,
+        );
+      } else {
+        setMessage(
+          `Remote trip ${trip.slip_number} created (no photos attached). The weighbridge PC will import it within ~30 seconds when online.`,
+        );
       }
-
-      setMessage(
-        `Remote trip ${trip.slip_number} created. The weighbridge PC will import it within ~30 seconds when online.`,
-      );
       setForm(emptyForm());
       setPhotos({});
       loadTrips();
@@ -344,6 +549,20 @@ export default function RemoteTrips() {
               onChange={(e) => updateField('slip_number', e.target.value.toUpperCase())}
               readOnly={!!form.reservation_id}
             />
+            {!!form.slip_number.trim() && !form.reservation_id && (
+              <label className="mt-2 flex items-start gap-2 text-xs text-slate-400">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={Boolean(form.replace_existing)}
+                  onChange={(e) => updateField('replace_existing', e.target.checked)}
+                />
+                <span>
+                  Replace existing slip if already in remote trips (deletes the old cloud row for
+                  this slip)
+                </span>
+              </label>
+            )}
           </div>
           <div>
             <label className="text-xs text-slate-400">Vehicle number *</label>
@@ -377,25 +596,23 @@ export default function RemoteTrips() {
           <div>
             <label className="text-xs text-slate-400">
               {isHywa(form.vehicle_type) ? 'Gross time (1st weigh) *' : 'Arrival / tare time *'}
+              <span className="text-slate-500"> — 24h with seconds</span>
             </label>
-            <input
-              type="datetime-local"
-              className="field-input mt-1"
+            <Datetime24Field
               required
               value={form.timestamp_in}
-              onChange={(e) => updateField('timestamp_in', e.target.value)}
+              onChange={(v) => updateField('timestamp_in', v)}
             />
           </div>
           <div>
             <label className="text-xs text-slate-400">
               {isHywa(form.vehicle_type) ? 'Tare time (2nd weigh / close) *' : 'Close / gross time *'}
+              <span className="text-slate-500"> — 24h with seconds</span>
             </label>
-            <input
-              type="datetime-local"
-              className="field-input mt-1"
+            <Datetime24Field
               required
               value={form.timestamp_out}
-              onChange={(e) => updateField('timestamp_out', e.target.value)}
+              onChange={(v) => updateField('timestamp_out', v)}
             />
           </div>
           <div>

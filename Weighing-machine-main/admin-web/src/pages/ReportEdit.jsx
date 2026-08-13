@@ -135,19 +135,8 @@ export default function ReportEdit() {
 
   async function uploadPhoto(pass, slot, file) {
     if (!file) return null;
-    const { uploadUrl, key } = await api.getUploadUrl(
-      slip,
-      slot,
-      file.type || 'image/jpeg',
-      pass,
-    );
-    const res = await fetch(uploadUrl, {
-      method: 'PUT',
-      body: file,
-      headers: { 'Content-Type': file.type || 'image/jpeg' },
-    });
-    if (!res.ok) throw new Error(`Photo upload failed (${pass} camera ${slot})`);
-    return { slot, key, pass };
+    const uploaded = await api.uploadMirrorPhoto(slip, slot, file, pass);
+    return { slot, key: uploaded.key, pass };
   }
 
   async function onSave(e) {

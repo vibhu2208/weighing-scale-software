@@ -106,7 +106,8 @@ const SettingsService = {
     const row = getDb()
       .prepare('SELECT value FROM settings WHERE key = ?')
       .get(key);
-    if (row && row.value !== undefined && row.value !== null) {
+    // Empty string in DB must not block .env fallback (common for AWS_* keys).
+    if (row && row.value !== undefined && row.value !== null && String(row.value) !== '') {
       return row.value;
     }
     return resolveDefault(key);

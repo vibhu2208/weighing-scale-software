@@ -49,6 +49,19 @@ async function presignPut(key, contentType = 'image/jpeg', expiresIn = 3600) {
   return getSignedUrl(getClient(), command, { expiresIn });
 }
 
+async function putObject(key, body, contentType = 'image/jpeg') {
+  if (!isConfigured()) throw new Error('S3 not configured');
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: getBucket(),
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    }),
+  );
+  return key;
+}
+
 function mirrorPhotoKey(siteId, slip, slot, pass = 'departure') {
   return `sites/${siteId}/mirror/${slip}/${pass}_cam-${slot}.jpg`;
 }
@@ -66,6 +79,7 @@ module.exports = {
   isConfigured,
   presignGet,
   presignPut,
+  putObject,
   mirrorPhotoKey,
   mirrorReportKey,
   remoteTripPhotoKey,

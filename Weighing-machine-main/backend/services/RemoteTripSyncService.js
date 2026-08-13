@@ -131,6 +131,23 @@ async function remappingRemoteSlip(row, localConflict) {
      WHERE id = $1`,
     [row.id, newSlip],
   );
+
+  // Drop stale admin mirror row for the old slip so it cannot block reuse.
+  try {
+    const siteId = (process.env.CLOUD_ADMIN_SITE_ID || process.env.SITE_ID || 'WB-03').trim();
+    await pg.query(
+      `DELETE FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+      [siteId, oldSlip],
+    );
+  } catch (err) {
+    logger.warn('Failed to clear mirror row after remote slip remap', {
+      oldSlip,
+      newSlip,
+      message: err.message,
+    });
+  }
+
   logger.warn('Remote trip slip remapped due to local conflict', {
     remoteId: row.id,
     oldSlip,
@@ -174,14 +191,51 @@ async function processRemoteRow(row, attempt = 0) {
 
   const alreadyImported = TransactionService.getByRemotePgId(remoteId);
   if (alreadyImported) {
+    // Photos may have been attached after the first import — backfill missing local files.
+    try {
+      const photoPaths = await downloadRemotePhotos(row, alreadyImported.id);
+      const photoUpdates = {};
+      for (const col of [
+        'arrival_photo_1',
+        'arrival_photo_2',
+        'arrival_photo_3',
+        'departure_photo_1',
+        'departure_photo_2',
+        'departure_photo_3',
+      ]) {
+        if (photoPaths[col] && !alreadyImported[col]) {
+          photoUpdates[col] = photoPaths[col];
+        }
+      }
+      if (photoPaths.report_path && !alreadyImported.report_path) {
+        photoUpdates.report_path = photoPaths.report_path;
+      }
+      if (Object.keys(photoUpdates).length) {
+        TransactionService.updateFields(alreadyImported.id, photoUpdates);
+        logger.info('Backfilled remote trip photos onto local ticket', {
+          remoteId,
+          localId: alreadyImported.id,
+          slip: alreadyImported.slip_number,
+          fields: Object.keys(photoUpdates),
+        });
+      }
+    } catch (err) {
+      logger.warn('Remote trip photo backfill failed', {
+        remoteId,
+        message: err.message,
+      });
+    }
+
     await markRemoteTripSynced(remoteId, alreadyImported.id, {
       ok: true,
       skipped: true,
       reason: 'already_sent',
     });
-    // Re-push in case the trip never landed in transactions_mirror (admin Reports).
+    // Local may have remapped slip / edited fields — refresh remote_trips + mirror.
     try {
       const CloudAdminSyncService = require('./CloudAdminSyncService');
+      const refreshed = TransactionService.getById(alreadyImported.id) || alreadyImported;
+      await CloudAdminSyncService.syncRemoteTripFromLocal(refreshed);
       CloudAdminSyncService.enqueuePush(alreadyImported.id);
     } catch (_e) {
       /* optional */

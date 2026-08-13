@@ -51,4 +51,52 @@ async function getSyncStatus() {
   };
 }
 
-module.exports = { createCommand, listRecentCommands, getSyncStatus };
+/**
+ * Re-queue a failed (or stuck) command so the weighbridge PC pulls it again.
+ */
+async function retryCommand(commandId) {
+  const siteId = getSiteId();
+  const id = String(commandId || '').trim();
+  if (!id) throw new Error('command id required');
+
+  const res = await query(
+    `UPDATE admin_commands
+     SET status = 'pending',
+         error = NULL,
+         applied_at = NULL
+     WHERE id = $1
+       AND site_id = $2
+       AND status IN ('failed', 'pending')
+     RETURNING id, type, status, error, created_at, applied_at`,
+    [id, siteId],
+  );
+  const row = res.rows[0];
+  if (!row) {
+    throw new Error('Command not found or already applied');
+  }
+  return row;
+}
+
+/** Re-queue all failed commands for this site. */
+async function retryFailedCommands() {
+  const siteId = getSiteId();
+  const res = await query(
+    `UPDATE admin_commands
+     SET status = 'pending',
+         error = NULL,
+         applied_at = NULL
+     WHERE site_id = $1
+       AND status = 'failed'
+     RETURNING id, type, status, created_at`,
+    [siteId],
+  );
+  return { count: (res.rows || []).length, rows: res.rows || [] };
+}
+
+module.exports = {
+  createCommand,
+  listRecentCommands,
+  getSyncStatus,
+  retryCommand,
+  retryFailedCommands,
+};

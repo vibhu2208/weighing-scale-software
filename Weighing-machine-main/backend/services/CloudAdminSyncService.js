@@ -180,7 +180,100 @@ async function pushTransaction(txn) {
     ],
   );
 
+  // Local is source of truth for imported remote trips (slip remaps, edits, etc.).
+  try {
+    await syncRemoteTripFromLocal(txn);
+  } catch (err) {
+    logger.warn('CloudAdminSync remote_trips refresh from local failed', {
+      id: txn.id,
+      remotePgId: txn.remote_pg_id || null,
+      message: err.message,
+    });
+  }
+
   return { ok: true, slip: txn.slip_number };
+}
+
+/**
+ * Overwrite remote_trips with the weighbridge's current ticket fields.
+ * Frees remapped slips so admin can create a new remote trip on the old number.
+ */
+async function syncRemoteTripFromLocal(txn) {
+  const remoteId = String(txn?.remote_pg_id || '').trim();
+  if (!remoteId || !txn?.slip_number) {
+    return { ok: false, skipped: true };
+  }
+
+  const existingRes = await pg.query(
+    'SELECT id, slip_number FROM remote_trips WHERE id = $1 LIMIT 1',
+    [remoteId],
+  );
+  const existing = existingRes.rows[0];
+  if (!existing) return { ok: false, skipped: true, reason: 'no_remote_row' };
+
+  const newSlip = String(txn.slip_number).trim();
+  let slipToWrite = newSlip;
+  if (String(existing.slip_number).trim() !== newSlip) {
+    const clash = await pg.query(
+      `SELECT id FROM remote_trips WHERE slip_number = $1 AND id <> $2 LIMIT 1`,
+      [newSlip, remoteId],
+    );
+    if (clash.rows[0]) {
+      logger.warn('remote_trips slip remap blocked — target slip already used', {
+        remoteId,
+        oldSlip: existing.slip_number,
+        newSlip,
+        takenBy: clash.rows[0].id,
+      });
+      slipToWrite = existing.slip_number;
+    } else {
+      logger.info('remote_trips slip updated from local', {
+        remoteId,
+        oldSlip: existing.slip_number,
+        newSlip,
+      });
+    }
+  }
+
+  await pg.query(
+    `UPDATE remote_trips SET
+      slip_number = $2,
+      truck_number = COALESCE(NULLIF($3, ''), truck_number),
+      rfid_tag = $4,
+      customer_name = COALESCE(NULLIF($5, ''), customer_name),
+      destination = COALESCE(NULLIF($6, ''), destination),
+      material = COALESCE(NULLIF($7, ''), material),
+      operator_name = COALESCE(NULLIF($8, ''), operator_name),
+      transporter = $9,
+      vehicle_type = $10,
+      tare_weight = COALESCE($11, tare_weight),
+      gross_weight = COALESCE($12, gross_weight),
+      timestamp_in = COALESCE($13, timestamp_in),
+      timestamp_out = COALESCE($14, timestamp_out),
+      local_id = $15,
+      synced_to_local = true,
+      synced_at = COALESCE(synced_at, now())
+     WHERE id = $1`,
+    [
+      remoteId,
+      slipToWrite,
+      String(txn.truck_number || '').trim().toUpperCase(),
+      txn.rfid_tag || null,
+      txn.customer_name || null,
+      txn.destination || null,
+      txn.material || null,
+      txn.operator_name || null,
+      txn.vehicle?.transporter || txn.transporter || null,
+      txn.vehicle?.vehicle_type || txn.vehicle_type || null,
+      Number.isFinite(Number(txn.tare_weight)) ? Number(txn.tare_weight) : null,
+      Number.isFinite(Number(txn.gross_weight)) ? Number(txn.gross_weight) : null,
+      txn.timestamp_in || null,
+      txn.timestamp_out || null,
+      txn.id,
+    ],
+  );
+
+  return { ok: true, slip: slipToWrite, remoteId };
 }
 
 async function deleteMirrorRow(slipNumber) {
@@ -249,6 +342,11 @@ async function markCommand(id, status, error) {
   );
 }
 
+function isTransientS3Error(err) {
+  const msg = String(err?.message || err || '');
+  return /timeout|socket|ECONNRESET|ETIMEDOUT|ENOTFOUND|S3 .+ failed after/i.test(msg);
+}
+
 async function applyCommand(row) {
   const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload || {};
   if (row.type === 'edit_report') {
@@ -295,6 +393,15 @@ async function pullCommands() {
       await markCommand(row.id, 'applied', null);
       logger.info('CloudAdminSync command applied', { id: row.id, type: row.type });
     } catch (err) {
+      // Keep transient S3 timeouts pending so the next sync cycle retries.
+      if (row.type === 'edit_report' && isTransientS3Error(err)) {
+        await markCommand(row.id, 'pending', `retry: ${err.message}`);
+        logger.warn('CloudAdminSync edit_report deferred (S3 timeout) — will retry', {
+          id: row.id,
+          message: err.message,
+        });
+        continue;
+      }
       await markCommand(row.id, 'failed', err.message);
       logger.error('CloudAdminSync command failed', { id: row.id, message: err.message });
     }
@@ -447,5 +554,5 @@ function stop() {
 }
 
 module.exports = {
-  start, stop, processNow, enqueuePush, pushTransaction, deleteMirrorRow,
+  start, stop, processNow, enqueuePush, pushTransaction, deleteMirrorRow, syncRemoteTripFromLocal,
 };

@@ -51,11 +51,162 @@ function buildCreatePayload(body = {}) {
   const slip = String(body.slip_number || '').trim();
   if (slip) payload.slip_number = slip.toUpperCase();
 
+  // Optional photo keys (so create+notify includes photos — avoids PC importing first without them).
+  const photoS3Keys = Array.isArray(body.photoS3Keys) ? body.photoS3Keys : [];
+  for (const item of photoS3Keys) {
+    const slot = Number(item.slot);
+    const key = item.key || item.s3Key;
+    const pass = item.pass === 'arrival' ? 'arrival' : 'departure';
+    if (!key || !Number.isFinite(slot) || slot < 1 || slot > 3) continue;
+    payload[`${pass}_photo_${slot}`] = key;
+  }
+
   return payload;
+}
+
+/**
+ * If this slip still sits on remote_trips but the weighbridge remapped the
+ * ticket locally (mirror has the same local_id under a different slip), move
+ * the remote row to the local slip — or delete the stale remote row — so the
+ * old slip can be reused for a new remote trip.
+ */
+async function releaseSlipIfLocallyRemapped(queryFn, slipNumber, siteId = getSiteId()) {
+  const slip = String(slipNumber || '')
+    .trim()
+    .toUpperCase();
+  if (!slip) return null;
+
+  const existingRes = await queryFn(
+    `SELECT * FROM remote_trips WHERE UPPER(slip_number) = $1 LIMIT 1`,
+    [slip],
+  );
+  const existing = existingRes.rows[0];
+  if (!existing) return null;
+
+  let mirrorByLocal = null;
+  if (existing.local_id) {
+    const mRes = await queryFn(
+      `SELECT * FROM transactions_mirror
+       WHERE site_id = $1 AND local_id = $2
+       LIMIT 1`,
+      [siteId, existing.local_id],
+    );
+    mirrorByLocal = mRes.rows[0] || null;
+  }
+
+  const mirrorSlip = mirrorByLocal?.slip_number
+    ? String(mirrorByLocal.slip_number).trim().toUpperCase()
+    : '';
+
+  // Local remapped: mirror kept local_id but changed slip_number.
+  if (mirrorSlip && mirrorSlip !== slip) {
+    const taken = await queryFn(
+      `SELECT id FROM remote_trips
+       WHERE UPPER(slip_number) = $1 AND id <> $2
+       LIMIT 1`,
+      [mirrorSlip, existing.id],
+    );
+
+    if (taken.rows[0]) {
+      // New slip already owned by another remote row — drop the stale blocker.
+      await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [existing.id]);
+      await queryFn(
+        `DELETE FROM transactions_mirror
+         WHERE site_id = $1 AND UPPER(slip_number) = $2`,
+        [siteId, slip],
+      );
+      console.log('[remoteTrip] deleted stale remote row after local remap', {
+        oldSlip: slip,
+        localSlip: mirrorSlip,
+        remoteId: existing.id,
+      });
+      return { action: 'deleted', oldSlip: slip, newSlip: mirrorSlip, remoteId: existing.id };
+    }
+
+    await queryFn(
+      `UPDATE remote_trips SET slip_number = $2 WHERE id = $1`,
+      [existing.id, mirrorSlip],
+    );
+    await queryFn(
+      `DELETE FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = $2
+         AND (local_id IS NULL OR local_id = $3)`,
+      [siteId, slip, existing.local_id],
+    );
+    // Keep mirror in sync with the moved remote slip (may already exist).
+    try {
+      await upsertMirrorFromRemoteTrip(
+        queryFn,
+        { ...existing, slip_number: mirrorSlip },
+        siteId,
+      );
+    } catch (err) {
+      console.warn('[remoteTrip] mirror refresh after remap move failed', err.message);
+    }
+    console.log('[remoteTrip] moved remote slip to match local', {
+      oldSlip: slip,
+      newSlip: mirrorSlip,
+      remoteId: existing.id,
+    });
+    return { action: 'moved', oldSlip: slip, newSlip: mirrorSlip, remoteId: existing.id };
+  }
+
+  // Synced remote trip, but slip no longer exists in mirror at all → stale blocker.
+  if (existing.synced_to_local) {
+    const mirrorBySlip = await queryFn(
+      `SELECT local_id FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = $2
+       LIMIT 1`,
+      [siteId, slip],
+    );
+    if (!mirrorBySlip.rows[0]) {
+      await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [existing.id]);
+      console.log('[remoteTrip] deleted stale remote row missing from local mirror', {
+        oldSlip: slip,
+        remoteId: existing.id,
+        localId: existing.local_id || null,
+      });
+      return { action: 'deleted', oldSlip: slip, reason: 'missing_from_mirror', remoteId: existing.id };
+    }
+  }
+
+  return null;
+}
+
+async function forceReleaseSlip(queryFn, slipNumber, siteId = getSiteId()) {
+  const slip = String(slipNumber || '')
+    .trim()
+    .toUpperCase();
+  if (!slip) return null;
+
+  const delRemote = await queryFn(
+    `DELETE FROM remote_trips WHERE UPPER(slip_number) = $1
+     RETURNING id, slip_number, truck_number, local_id`,
+    [slip],
+  );
+  const delMirror = await queryFn(
+    `DELETE FROM transactions_mirror
+     WHERE site_id = $1 AND UPPER(slip_number) = $2
+     RETURNING local_id, slip_number`,
+    [siteId, slip],
+  );
+  if ((delRemote.rows || []).length || (delMirror.rows || []).length) {
+    console.log('[remoteTrip] force-released slip', {
+      slip,
+      deletedRemote: delRemote.rows,
+      deletedMirror: delMirror.rows,
+    });
+  }
+  return {
+    slip,
+    deletedRemote: delRemote.rows || [],
+    deletedMirror: delMirror.rows || [],
+  };
 }
 
 async function createRemoteTrip(queryFn, body = {}) {
   const data = buildCreatePayload(body);
+  const forceReplace = Boolean(body.replace_existing || body.force_replace);
 
   // If filling a planned gap, lock in that reserved slip before insert.
   const reservationId = body.reservation_id ? String(body.reservation_id).trim() : '';
@@ -77,16 +228,58 @@ async function createRemoteTrip(queryFn, body = {}) {
     data.slip_number = String(row.slip_number).toUpperCase();
   }
 
+  if (data.slip_number) {
+    // Refresh all synced remote_trips from local mirror before claiming this slip.
+    try {
+      await reconcileRemoteTripsFromMirror(queryFn);
+    } catch (err) {
+      console.warn('[remoteTrip] pre-create reconcile from mirror failed', err.message);
+    }
+
+    if (forceReplace) {
+      await forceReleaseSlip(queryFn, data.slip_number);
+    } else {
+      const freed = await releaseSlipIfLocallyRemapped(queryFn, data.slip_number);
+      if (!freed) {
+        const clash = await queryFn(
+          `SELECT slip_number, truck_number, synced_to_local
+           FROM remote_trips WHERE UPPER(slip_number) = $1 LIMIT 1`,
+          [String(data.slip_number).toUpperCase()],
+        );
+        const hit = clash.rows[0];
+        if (hit) {
+          throw new Error(
+            `Slip ${hit.slip_number} already exists in remote trips` +
+              (hit.truck_number ? ` (truck ${hit.truck_number})` : '') +
+              '. Leave slip blank for auto, check "Replace existing slip", or use a free slip.',
+          );
+        }
+      }
+    }
+  }
+
   const cols = Object.keys(data);
   const placeholders = cols.map((_, i) => `$${i + 1}`);
   const values = cols.map((c) => data[c]);
 
-  const res = await queryFn(
-    `INSERT INTO remote_trips (${cols.join(', ')})
-     VALUES (${placeholders.join(', ')})
-     RETURNING *`,
-    values,
-  );
+  let res;
+  try {
+    res = await queryFn(
+      `INSERT INTO remote_trips (${cols.join(', ')})
+       VALUES (${placeholders.join(', ')})
+       RETURNING *`,
+      values,
+    );
+  } catch (err) {
+    const msg = String(err.message || '');
+    if (msg.includes('remote_trips_slip_number_key') || msg.includes('duplicate key')) {
+      throw new Error(
+        `Slip ${data.slip_number || '(auto)'} already exists in remote trips. ` +
+          'If the weighbridge remapped that ticket locally, sync the PC then retry — or leave slip blank.',
+      );
+    }
+    throw err;
+  }
   const trip = res.rows[0];
 
   if (trip?.slip_number) {
@@ -220,12 +413,155 @@ async function reconcileRemoteTripsToMirror(queryFn, siteId = getSiteId(), limit
   return { candidates: (missing.rows || []).length, upserted };
 }
 
+/**
+ * Refresh ALL synced remote_trips from transactions_mirror (local truth).
+ * Moves remapped slips, copies weights/times/truck/etc, drops stale rows.
+ */
+async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
+  const remotes = await queryFn(
+    `SELECT * FROM remote_trips
+     WHERE synced_to_local = true
+     ORDER BY created_at DESC`,
+  );
+
+  let updated = 0;
+  let deleted = 0;
+  let errors = 0;
+
+  for (const rt of remotes.rows || []) {
+    try {
+      let mirror = null;
+      if (rt.local_id) {
+        const byLocal = await queryFn(
+          `SELECT * FROM transactions_mirror
+           WHERE site_id = $1 AND local_id = $2
+           LIMIT 1`,
+          [siteId, rt.local_id],
+        );
+        mirror = byLocal.rows[0] || null;
+      }
+      if (!mirror) {
+        const bySlip = await queryFn(
+          `SELECT * FROM transactions_mirror
+           WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)
+           LIMIT 1`,
+          [siteId, rt.slip_number],
+        );
+        mirror = bySlip.rows[0] || null;
+      }
+
+      if (!mirror) {
+        await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [rt.id]);
+        deleted += 1;
+        console.log('[remoteTrip] removed stale remote_trips row (not in local mirror)', {
+          id: rt.id,
+          slip: rt.slip_number,
+        });
+        continue;
+      }
+
+      const newSlip = String(mirror.slip_number || '').trim().toUpperCase();
+      const oldSlip = String(rt.slip_number || '').trim().toUpperCase();
+      const slipToWrite = newSlip || oldSlip;
+
+      if (newSlip && newSlip !== oldSlip) {
+        const taken = await queryFn(
+          `SELECT id FROM remote_trips
+           WHERE UPPER(slip_number) = $1 AND id <> $2
+           LIMIT 1`,
+          [newSlip, rt.id],
+        );
+        if (taken.rows[0]) {
+          await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [rt.id]);
+          deleted += 1;
+          console.log('[remoteTrip] deleted remapped remote row (target slip taken)', {
+            id: rt.id,
+            oldSlip,
+            newSlip,
+          });
+          continue;
+        }
+      }
+
+      await queryFn(
+        `UPDATE remote_trips SET
+          slip_number = $2,
+          truck_number = COALESCE(NULLIF($3, ''), truck_number),
+          rfid_tag = $4,
+          customer_name = COALESCE(NULLIF($5, ''), customer_name),
+          destination = COALESCE(NULLIF($6, ''), destination),
+          material = COALESCE(NULLIF($7, ''), material),
+          operator_name = COALESCE(NULLIF($8, ''), operator_name),
+          transporter = $9,
+          vehicle_type = $10,
+          tare_weight = COALESCE($11, tare_weight),
+          gross_weight = COALESCE($12, gross_weight),
+          timestamp_in = COALESCE($13, timestamp_in),
+          timestamp_out = COALESCE($14, timestamp_out),
+          local_id = COALESCE($15, local_id),
+          arrival_photo_1 = COALESCE($16, arrival_photo_1),
+          arrival_photo_2 = COALESCE($17, arrival_photo_2),
+          arrival_photo_3 = COALESCE($18, arrival_photo_3),
+          departure_photo_1 = COALESCE($19, departure_photo_1),
+          departure_photo_2 = COALESCE($20, departure_photo_2),
+          departure_photo_3 = COALESCE($21, departure_photo_3),
+          report_s3_key = COALESCE($22, report_s3_key)
+         WHERE id = $1`,
+        [
+          rt.id,
+          slipToWrite,
+          mirror.truck_number || '',
+          mirror.rfid_tag || null,
+          mirror.customer_name || null,
+          mirror.destination || null,
+          mirror.material || null,
+          mirror.operator_name || null,
+          mirror.transporter || null,
+          mirror.vehicle_type || null,
+          mirror.tare_weight != null ? Number(mirror.tare_weight) : null,
+          mirror.gross_weight != null ? Number(mirror.gross_weight) : null,
+          mirror.timestamp_in || null,
+          mirror.timestamp_out || null,
+          // Don't overwrite a real local UUID with the create-time placeholder (remote id).
+          mirror.local_id && mirror.local_id !== rt.id
+            ? mirror.local_id
+            : rt.local_id && rt.local_id !== rt.id
+              ? rt.local_id
+              : mirror.local_id || rt.local_id || null,
+          mirror.arrival_photo_1 || null,
+          mirror.arrival_photo_2 || null,
+          mirror.arrival_photo_3 || null,
+          mirror.departure_photo_1 || null,
+          mirror.departure_photo_2 || null,
+          mirror.departure_photo_3 || null,
+          mirror.report_s3_key || null,
+        ],
+      );
+      updated += 1;
+    } catch (err) {
+      errors += 1;
+      console.warn('[remoteTrip] reconcile from mirror failed', rt.slip_number, err.message);
+    }
+  }
+
+  return {
+    scanned: (remotes.rows || []).length,
+    updated,
+    deleted,
+    errors,
+  };
+}
+
 let reconcileTimer = null;
 
 function startMirrorReconcileWorker(queryFn, everySec = 60) {
   if (reconcileTimer) return;
   const tick = async () => {
     try {
+      const fromLocal = await reconcileRemoteTripsFromMirror(queryFn);
+      if (fromLocal.updated || fromLocal.deleted) {
+        console.log('[remoteTrip] reconciled remote_trips from local mirror', fromLocal);
+      }
       const result = await reconcileRemoteTripsToMirror(queryFn);
       if (result.upserted > 0) {
         console.log('[remoteTrip] reconciled missing mirror rows', result);
@@ -282,9 +618,6 @@ async function getRemoteTrip(queryFn, id) {
 async function attachPhotos(queryFn, id, photoS3Keys = []) {
   const row = await getRemoteTrip(queryFn, id);
   if (!row) throw new Error('Remote trip not found');
-  if (row.synced_to_local) {
-    throw new Error('Trip already synced to weighbridge — cannot change photos');
-  }
 
   const updates = {};
   for (const item of photoS3Keys) {
@@ -297,6 +630,13 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
 
   if (!Object.keys(updates).length) {
     return row;
+  }
+
+  // If PC already imported the trip before photos were attached, re-queue so
+  // RemoteTripSync can download the new S3 keys onto the local ticket.
+  if (row.synced_to_local) {
+    updates.synced_to_local = false;
+    updates.synced_at = null;
   }
 
   const cols = Object.keys(updates);
@@ -314,6 +654,12 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
     } catch (err) {
       console.warn('[remoteTrip] mirror upsert on photos failed', err.message);
     }
+    // Re-notify weighbridge (INSERT trigger already fired; photos often arrive after).
+    try {
+      await queryFn(`SELECT pg_notify('new_remote_trip', $1)`, [String(trip.id)]);
+    } catch (err) {
+      console.warn('[remoteTrip] photo notify failed', err.message);
+    }
   }
   return trip;
 }
@@ -326,5 +672,8 @@ module.exports = {
   attachPhotos,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,
+  reconcileRemoteTripsFromMirror,
+  releaseSlipIfLocallyRemapped,
+  forceReleaseSlip,
   startMirrorReconcileWorker,
 };
