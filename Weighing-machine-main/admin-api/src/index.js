@@ -18,6 +18,8 @@ const {
   ensureSchema: ensureSlipReservationsSchema,
   startFireWorker,
 } = require('./services/slipReservationService');
+const { startMirrorReconcileWorker } = require('./services/remoteTripService');
+const { query } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -71,6 +73,12 @@ async function start() {
         '[api] slip_reservations setup failed — run scripts/rds/003_slip_reservations.sql:',
         err.message,
       );
+    }
+    try {
+      startMirrorReconcileWorker(query, 60);
+      console.log('[api] remote trip → mirror reconcile worker started');
+    } catch (err) {
+      console.warn('[api] mirror reconcile worker failed to start', err.message);
     }
   } else {
     console.warn('[api] DATABASE_URL not configured — API will fail on DB calls');

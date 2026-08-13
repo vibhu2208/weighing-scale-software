@@ -227,6 +227,32 @@ async function processRemoteRow(row, attempt = 0) {
     throw new Error(`Import failed for remote trip ${remoteId}`);
   }
 
+  // Ensure vehicle type is set (HYWA needs timestamp_in = gross on reports).
+  try {
+    const VehicleService = require('./VehicleService');
+    const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
+    const existing = VehicleService.findByNumber(row.truck_number);
+    if (!existing) {
+      VehicleService.create({
+        vehicle_number: row.truck_number,
+        rfid_tag: row.rfid_tag || null,
+        transporter: row.transporter || null,
+        vehicle_type: vType,
+        status: 'active',
+      });
+    } else if (
+      vType &&
+      String(existing.vehicle_type || '').toLowerCase() !== vType.toLowerCase()
+    ) {
+      VehicleService.update(existing.id, { vehicle_type: vType });
+    }
+  } catch (err) {
+    logger.warn('Remote trip vehicle type sync failed', {
+      truck: row.truck_number,
+      message: err.message,
+    });
+  }
+
   if (!importResult.imported && transaction.remote_pg_id !== remoteId) {
     logger.warn('Remote trip import hit slip conflict after remapping check — retrying', {
       remoteId,

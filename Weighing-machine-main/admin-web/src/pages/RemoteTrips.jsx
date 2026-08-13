@@ -5,10 +5,26 @@ import Badge from '../components/Badge.jsx';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 
 const PHOTO_SLOTS = [1, 2, 3];
-const PHOTO_PASSES = [
-  { pass: 'arrival', title: 'Arrival (tare) photos' },
-  { pass: 'departure', title: 'Departure (gross) photos' },
-];
+const HOUR_MS = 60 * 60 * 1000;
+
+function isHywa(vehicleType) {
+  return String(vehicleType || '')
+    .trim()
+    .toLowerCase() === 'hywa';
+}
+
+function photoPassesFor(vehicleType) {
+  if (isHywa(vehicleType)) {
+    return [
+      { pass: 'arrival', title: 'Gross (1st weigh) photos' },
+      { pass: 'departure', title: 'Tare (2nd weigh / close) photos' },
+    ];
+  }
+  return [
+    { pass: 'arrival', title: 'Arrival (tare) photos' },
+    { pass: 'departure', title: 'Departure (gross) photos' },
+  ];
+}
 
 function photoKey(pass, slot) {
   return `${pass}:${slot}`;
@@ -27,15 +43,40 @@ function emptyForm() {
     truck_number: '',
     rfid_tag: '',
     transporter: '',
-    vehicle_type: '',
+    // Remote gap fills are almost always HYWA (gross first).
+    vehicle_type: 'HYWA',
     customer_name: '',
     destination: '',
     material: '',
     operator_name: '',
     tare_weight: '',
     gross_weight: '',
-    timestamp_in: defaultDatetimeLocal(-60 * 60 * 1000),
+    timestamp_in: defaultDatetimeLocal(-HOUR_MS),
     timestamp_out: defaultDatetimeLocal(),
+  };
+}
+
+/** Map planned gap time onto weigh timestamps for the vehicle type. */
+function timesFromPlanned(plannedAt, vehicleType) {
+  const planned = new Date(plannedAt);
+  if (Number.isNaN(planned.getTime())) {
+    return {
+      timestamp_in: defaultDatetimeLocal(-HOUR_MS),
+      timestamp_out: defaultDatetimeLocal(),
+    };
+  }
+  if (isHywa(vehicleType)) {
+    // HYWA: planned time = gross (1st weigh) → timestamp_in
+    // Close/tare is ~1 hour later → timestamp_out
+    return {
+      timestamp_in: toDatetimeLocalValue(planned.toISOString()),
+      timestamp_out: toDatetimeLocalValue(new Date(planned.getTime() + HOUR_MS).toISOString()),
+    };
+  }
+  // Standard: planned time = gross (close) → timestamp_out
+  return {
+    timestamp_in: toDatetimeLocalValue(new Date(planned.getTime() - HOUR_MS).toISOString()),
+    timestamp_out: toDatetimeLocalValue(planned.toISOString()),
   };
 }
 
@@ -123,15 +164,17 @@ export default function RemoteTrips() {
       }));
       return;
     }
-    const planned = new Date(row.planned_at);
-    const arrival = new Date(planned.getTime() - 60 * 60 * 1000);
-    setForm((f) => ({
-      ...f,
-      reservation_id: row.id,
-      slip_number: row.slip_number,
-      timestamp_in: toDatetimeLocalValue(arrival.toISOString()),
-      timestamp_out: toDatetimeLocalValue(row.planned_at),
-    }));
+    setForm((f) => {
+      const vehicleType = f.vehicle_type || 'HYWA';
+      const times = timesFromPlanned(row.planned_at, vehicleType);
+      return {
+        ...f,
+        reservation_id: row.id,
+        slip_number: row.slip_number || '',
+        vehicle_type: vehicleType,
+        ...times,
+      };
+    });
   }
 
   useEffect(() => {
@@ -144,7 +187,17 @@ export default function RemoteTrips() {
   }, [searchParams, reservations, setSearchParams]);
 
   function updateField(key, value) {
-    setForm((f) => ({ ...f, [key]: value }));
+    setForm((f) => {
+      const next = { ...f, [key]: value };
+      // Re-map planned gap times when switching HYWA ↔ standard.
+      if (key === 'vehicle_type' && f.reservation_id) {
+        const reservation = reservations.find((r) => r.id === f.reservation_id);
+        if (reservation?.planned_at) {
+          Object.assign(next, timesFromPlanned(reservation.planned_at, value));
+        }
+      }
+      return next;
+    });
   }
 
   function onReservationChange(id) {
@@ -189,7 +242,7 @@ export default function RemoteTrips() {
       const { trip } = await api.createRemoteTrip(payload);
       const photoS3Keys = [];
 
-      for (const { pass } of PHOTO_PASSES) {
+      for (const { pass } of photoPassesFor(form.vehicle_type)) {
         for (const slot of PHOTO_SLOTS) {
           const file = photos[photoKey(pass, slot)];
           if (!file) continue;
@@ -322,7 +375,9 @@ export default function RemoteTrips() {
             />
           </div>
           <div>
-            <label className="text-xs text-slate-400">Arrival time *</label>
+            <label className="text-xs text-slate-400">
+              {isHywa(form.vehicle_type) ? 'Gross time (1st weigh) *' : 'Arrival / tare time *'}
+            </label>
             <input
               type="datetime-local"
               className="field-input mt-1"
@@ -332,7 +387,9 @@ export default function RemoteTrips() {
             />
           </div>
           <div>
-            <label className="text-xs text-slate-400">Close time *</label>
+            <label className="text-xs text-slate-400">
+              {isHywa(form.vehicle_type) ? 'Tare time (2nd weigh / close) *' : 'Close / gross time *'}
+            </label>
             <input
               type="datetime-local"
               className="field-input mt-1"
@@ -359,12 +416,16 @@ export default function RemoteTrips() {
           </div>
           <div>
             <label className="text-xs text-slate-400">Vehicle type</label>
-            <input
+            <select
               className="field-input mt-1"
-              placeholder="e.g. HYWA, TRUCK"
               value={form.vehicle_type}
               onChange={(e) => updateField('vehicle_type', e.target.value)}
-            />
+            >
+              <option value="HYWA">HYWA (gross first)</option>
+              <option value="TRUCK">TRUCK (tare first)</option>
+              <option value="TANKER">TANKER</option>
+              <option value="CONTAINER">CONTAINER</option>
+            </select>
           </div>
         </div>
 
@@ -393,7 +454,7 @@ export default function RemoteTrips() {
 
         <div className="space-y-3 border-t border-slate-800 pt-4">
           <p className="text-xs text-slate-400">Photos (optional — uploaded to S3 for PC import)</p>
-          {PHOTO_PASSES.map(({ pass, title }) => (
+          {photoPassesFor(form.vehicle_type).map(({ pass, title }) => (
             <div key={pass}>
               <p className="text-xs font-medium text-slate-500 mb-2">{title}</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">

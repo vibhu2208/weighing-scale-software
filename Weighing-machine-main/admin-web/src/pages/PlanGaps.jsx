@@ -117,20 +117,48 @@ export default function PlanGaps() {
     setTimes((prev) => prev.map((t, i) => (i === index ? value : t)));
   }
 
+  function validateLocalGaps(timeValues) {
+    const parsed = timeValues.map((t, i) => {
+      const d = new Date(t);
+      if (Number.isNaN(d.getTime())) {
+        throw new Error(`Trip ${i + 1} has an invalid time`);
+      }
+      return d.getTime();
+    });
+    const sorted = [...parsed].sort((a, b) => a - b);
+    for (let i = 1; i < sorted.length; i += 1) {
+      const diff = sorted[i] - sorted[i - 1];
+      if (diff <= 60 * 1000) {
+        throw new Error(
+          'Planned times must be more than 1 minute apart. ' +
+            `Two trips are only ${Math.max(0, Math.round(diff / 1000))} seconds apart.`,
+        );
+      }
+    }
+  }
+
   async function onPlan(e) {
     e.preventDefault();
     setSaving(true);
     setError('');
     setMessage('');
     try {
+      validateLocalGaps(times);
       const payload = {
         times: times.map((t) => new Date(t).toISOString()),
         note: note.trim() || undefined,
       };
       const res = await api.planSlipReservations(payload);
-      setMessage(
-        `Scheduled ${res.count} gap(s). Each slip will be blocked automatically 5 minutes before its planned time from the live counter.`,
-      );
+      const adjustments = res.adjustments || [];
+      let msg = `Scheduled ${res.count} gap(s). Each slip blocks automatically 5 minutes before its planned gross time.`;
+      if (adjustments.length) {
+        const bits = adjustments.map(
+          (a) =>
+            `Trip ${a.trip}: moved to ${fmtDate(a.scheduled)} (weighbridge was busy at ${fmtDate(a.requested)})`,
+        );
+        msg += ` ${bits.join(' · ')}`;
+      }
+      setMessage(msg);
       setNote('');
       setTripCount(3);
       setTimes(defaultSlotTimes(3));
@@ -176,9 +204,14 @@ export default function PlanGaps() {
       <div>
         <h2 className="text-xl font-semibold">Plan slip gaps</h2>
         <p className="text-sm text-slate-400 mt-1">
-          Schedule remote trip times ahead. The system blocks the <strong className="text-slate-300 font-medium">next live slip</strong>{' '}
-          <strong className="text-slate-300 font-medium">5 minutes before</strong> each planned time — not when you schedule.
-          Fill blocked slips later from Remote Trips.
+          Schedule remote trip times ahead. The system blocks the{' '}
+          <strong className="text-slate-300 font-medium">next live slip</strong>{' '}
+          <strong className="text-slate-300 font-medium">5 minutes before</strong> each planned time —
+          not when you schedule. For HYWA, the planned time is the{' '}
+          <strong className="text-slate-300 font-medium">gross weigh</strong> time (1st pass). Times
+          must be <strong className="text-slate-300 font-medium">more than 1 minute apart</strong>. If
+          the weighbridge already has a ticket in that minute, the plan auto-moves to the next free
+          minute.
         </p>
       </div>
 
@@ -238,7 +271,7 @@ export default function PlanGaps() {
 
         <div className="space-y-2">
           <p className="text-xs text-slate-400">
-            Planned weigh time for each trip (slip assigned at planned time − 5 minutes)
+            Planned gross weigh time for each HYWA trip (slip assigned at planned time − 5 minutes)
           </p>
           {times.map((time, index) => {
             const fireLocal = (() => {

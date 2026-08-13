@@ -384,6 +384,17 @@ async function processNow() {
     return { ok: true };
   } finally {
     processing = false;
+    // Items enqueued while we were busy must not wait for the next cron tick —
+    // that race left remote imports missing from admin Reports.
+    if (pushQueue.size > 0) {
+      setImmediate(() => {
+        processNow().catch((err) => {
+          logger.warn('CloudAdminSync drain after enqueue race failed', {
+            message: err.message,
+          });
+        });
+      });
+    }
   }
 }
 

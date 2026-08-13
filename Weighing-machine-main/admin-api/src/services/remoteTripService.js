@@ -1,6 +1,7 @@
 'use strict';
 
 const { markReservationUsed } = require('./slipReservationService');
+const { getSiteId } = require('../db');
 
 function normalizeText(value, fieldName) {
   const text = String(value || '').trim();
@@ -96,7 +97,148 @@ async function createRemoteTrip(queryFn, body = {}) {
     }
   }
 
+  // Show immediately in Admin Reports — do not wait for weighbridge CloudAdminSync.
+  try {
+    await upsertMirrorFromRemoteTrip(queryFn, trip);
+  } catch (err) {
+    console.warn('[remoteTrip] mirror upsert on create failed', err.message);
+  }
+
   return trip;
+}
+
+/**
+ * Upsert a remote trip into transactions_mirror so Admin Reports lists it.
+ * Weighbridge CloudAdminSync may later refresh the same slip with local ids/photos.
+ */
+async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId()) {
+  if (!row?.slip_number) return null;
+  const localId = row.local_id || row.id;
+  if (!localId) return null;
+
+  // Avoid unique (site_id, local_id) conflicts when slip already exists with another local_id.
+  await queryFn(
+    `DELETE FROM transactions_mirror
+     WHERE site_id = $1 AND local_id = $2 AND slip_number <> $3`,
+    [siteId, localId, row.slip_number],
+  );
+
+  const res = await queryFn(
+    `INSERT INTO transactions_mirror (
+      site_id, local_id, slip_number, truck_number, rfid_tag,
+      customer_name, destination, material, operator_name, transporter, vehicle_type,
+      gross_weight, tare_weight, timestamp_in, timestamp_out,
+      ticket_status, sync_status, mcg_status, mcg_error,
+      arrival_photo_1, arrival_photo_2, arrival_photo_3,
+      departure_photo_1, departure_photo_2, departure_photo_3,
+      report_s3_key, updated_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+      'CLOSED',$16,$17,$18,$19,$20,$21,$22,$23,$24,$25, now()
+    )
+    ON CONFLICT (site_id, slip_number) DO UPDATE SET
+      local_id = EXCLUDED.local_id,
+      truck_number = EXCLUDED.truck_number,
+      rfid_tag = EXCLUDED.rfid_tag,
+      customer_name = EXCLUDED.customer_name,
+      destination = EXCLUDED.destination,
+      material = EXCLUDED.material,
+      operator_name = EXCLUDED.operator_name,
+      transporter = EXCLUDED.transporter,
+      vehicle_type = EXCLUDED.vehicle_type,
+      gross_weight = EXCLUDED.gross_weight,
+      tare_weight = EXCLUDED.tare_weight,
+      timestamp_in = EXCLUDED.timestamp_in,
+      timestamp_out = EXCLUDED.timestamp_out,
+      ticket_status = 'CLOSED',
+      sync_status = COALESCE(EXCLUDED.sync_status, transactions_mirror.sync_status),
+      mcg_status = COALESCE(EXCLUDED.mcg_status, transactions_mirror.mcg_status),
+      mcg_error = COALESCE(EXCLUDED.mcg_error, transactions_mirror.mcg_error),
+      arrival_photo_1 = COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1),
+      arrival_photo_2 = COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2),
+      arrival_photo_3 = COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3),
+      departure_photo_1 = COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1),
+      departure_photo_2 = COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2),
+      departure_photo_3 = COALESCE(EXCLUDED.departure_photo_3, transactions_mirror.departure_photo_3),
+      report_s3_key = COALESCE(EXCLUDED.report_s3_key, transactions_mirror.report_s3_key),
+      updated_at = now()
+    RETURNING slip_number`,
+    [
+      siteId,
+      localId,
+      row.slip_number,
+      row.truck_number,
+      row.rfid_tag || null,
+      row.customer_name || null,
+      row.destination || null,
+      row.material || null,
+      row.operator_name || null,
+      row.transporter || null,
+      row.vehicle_type || null,
+      row.gross_weight,
+      row.tare_weight,
+      row.timestamp_in || null,
+      row.timestamp_out || null,
+      row.sync_status || 'SYNCED',
+      row.mcg_status || null,
+      row.mcg_error || null,
+      row.arrival_photo_1 || null,
+      row.arrival_photo_2 || null,
+      row.arrival_photo_3 || null,
+      row.departure_photo_1 || null,
+      row.departure_photo_2 || null,
+      row.departure_photo_3 || null,
+      row.report_s3_key || null,
+    ],
+  );
+  return res.rows[0] || null;
+}
+
+/** Backfill synced remote trips that never landed in Admin Reports. */
+async function reconcileRemoteTripsToMirror(queryFn, siteId = getSiteId(), limit = 50) {
+  const missing = await queryFn(
+    `SELECT rt.*
+     FROM remote_trips rt
+     WHERE NOT EXISTS (
+       SELECT 1 FROM transactions_mirror m
+       WHERE m.site_id = $1 AND m.slip_number = rt.slip_number
+     )
+     ORDER BY rt.created_at DESC
+     LIMIT $2`,
+    [siteId, limit],
+  );
+
+  let upserted = 0;
+  for (const row of missing.rows || []) {
+    try {
+      await upsertMirrorFromRemoteTrip(queryFn, row, siteId);
+      upserted += 1;
+    } catch (err) {
+      console.warn('[remoteTrip] reconcile mirror failed', row.slip_number, err.message);
+    }
+  }
+  return { candidates: (missing.rows || []).length, upserted };
+}
+
+let reconcileTimer = null;
+
+function startMirrorReconcileWorker(queryFn, everySec = 60) {
+  if (reconcileTimer) return;
+  const tick = async () => {
+    try {
+      const result = await reconcileRemoteTripsToMirror(queryFn);
+      if (result.upserted > 0) {
+        console.log('[remoteTrip] reconciled missing mirror rows', result);
+      }
+    } catch (err) {
+      console.warn('[remoteTrip] reconcile worker error', err.message);
+    }
+  };
+  tick().catch(() => {});
+  reconcileTimer = setInterval(() => {
+    tick().catch(() => {});
+  }, Math.max(15, everySec) * 1000);
+  if (typeof reconcileTimer.unref === 'function') reconcileTimer.unref();
 }
 
 async function listRemoteTrips(queryFn, filters = {}) {
@@ -165,7 +307,15 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
     `UPDATE remote_trips SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
     [id, ...values],
   );
-  return res.rows[0];
+  const trip = res.rows[0];
+  if (trip) {
+    try {
+      await upsertMirrorFromRemoteTrip(queryFn, trip);
+    } catch (err) {
+      console.warn('[remoteTrip] mirror upsert on photos failed', err.message);
+    }
+  }
+  return trip;
 }
 
 module.exports = {
@@ -174,4 +324,7 @@ module.exports = {
   listRemoteTrips,
   getRemoteTrip,
   attachPhotos,
+  upsertMirrorFromRemoteTrip,
+  reconcileRemoteTripsToMirror,
+  startMirrorReconcileWorker,
 };
