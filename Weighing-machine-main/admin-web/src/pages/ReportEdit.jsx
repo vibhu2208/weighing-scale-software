@@ -73,6 +73,7 @@ export default function ReportEdit() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -88,6 +89,8 @@ export default function ReportEdit() {
         const r = reportRes.report;
         setReport(r);
         setForm({
+          slip_number: r.slip_number || slip,
+          truck_number: r.truck_number || '',
           gross_weight: r.gross_weight ?? '',
           tare_weight: r.tare_weight ?? '',
           timestamp_in: toDatetimeLocalValue(r.timestamp_in),
@@ -141,6 +144,14 @@ export default function ReportEdit() {
 
   async function onSave(e) {
     e.preventDefault();
+    if (!String(form.slip_number || '').trim()) {
+      setError('Slip number is required');
+      return;
+    }
+    if (!String(form.truck_number || '').trim()) {
+      setError('Vehicle number is required');
+      return;
+    }
     setSaving(true);
     setError('');
     setMessage('');
@@ -164,9 +175,13 @@ export default function ReportEdit() {
       };
 
       const result = await api.editReport(slip, payload);
+      const savedSlip = result.slip_number || form.slip_number || slip;
       setMessage(
         `Edit queued for weighbridge PC (command ${result.command?.id?.slice(0, 8)}…). Status: ${result.command?.status}. PDF will regenerate on the PC after sync.`,
       );
+      if (savedSlip && savedSlip !== slip) {
+        navigate(`/reports/${encodeURIComponent(savedSlip)}/edit`, { replace: true });
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -214,19 +229,63 @@ export default function ReportEdit() {
           </Link>
           <h2 className="text-xl font-semibold mt-1">Edit report {slip}</h2>
           <p className="text-sm text-slate-400">
-            {report?.truck_number} · Net {fmtKg(report?.net_weight)} · Closed{' '}
+            {form.truck_number || report?.truck_number} · Net {fmtKg(report?.net_weight)} · Closed{' '}
             {fmtDate(report?.timestamp_out)}
           </p>
         </div>
-        {report?.report_url && (
-          <a href={report.report_url} target="_blank" rel="noreferrer" className="btn-ghost text-xs">
-            Download PDF
-          </a>
+        {report && (
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            disabled={pdfBusy}
+            onClick={async () => {
+              setPdfBusy(true);
+              setError('');
+              try {
+                await api.downloadReportPdf(report.slip_number || slip);
+              } catch (err) {
+                setError(err.message);
+              } finally {
+                setPdfBusy(false);
+              }
+            }}
+          >
+            {pdfBusy ? 'Building PDF…' : 'Download PDF'}
+          </button>
         )}
       </div>
 
       <form onSubmit={onSave} className="card p-5 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-slate-400">Slip number</label>
+            <input
+              type="text"
+              className="field-input mt-1 font-mono"
+              value={form.slip_number || ''}
+              onChange={(e) => updateField('slip_number', e.target.value.toUpperCase())}
+              placeholder="e.g. WB0015 or 15"
+            />
+            <p className="text-[11px] text-slate-500 mt-1">
+              Changing this updates the ticket slip. The next new ticket still follows the existing
+              counter. PDF regenerates on the weighbridge PC after sync.
+            </p>
+          </div>
+          <div>
+            <label className="text-xs text-slate-400">Vehicle number</label>
+            <input
+              type="text"
+              className="field-input mt-1 font-mono uppercase"
+              value={form.truck_number || ''}
+              onChange={(e) => updateField('truck_number', e.target.value.toUpperCase())}
+              placeholder="e.g. HR38AH6118"
+              required
+            />
+            <p className="text-[11px] text-slate-500 mt-1">
+              Updates the vehicle on the report and regenerates the PDF on the weighbridge PC after
+              sync.
+            </p>
+          </div>
           <div>
             <label className="text-xs text-slate-400">Gross weight (kg)</label>
             <input

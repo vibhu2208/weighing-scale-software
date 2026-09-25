@@ -34,8 +34,8 @@ function getConfig() {
   return {
     accessKeyId: (SettingsService.get('AWS_ACCESS_KEY_ID') || '').trim(),
     secretAccessKey: (SettingsService.get('AWS_SECRET_ACCESS_KEY') || '').trim(),
-    region: (SettingsService.get('AWS_REGION') || 'ap-south-1').trim(),
-    bucket: (SettingsService.get('AWS_S3_BUCKET') || 'weighbridge-management-system').trim(),
+    region: (SettingsService.get('AWS_REGION') || 'eu-north-1').trim(),
+    bucket: (SettingsService.get('AWS_S3_BUCKET') || 'k1-k2').trim(),
   };
 }
 
@@ -80,13 +80,22 @@ function getBucket() {
 function isRetryableS3Error(err) {
   const msg = String(err?.message || err || '');
   const name = String(err?.name || '');
+  const status = err?.$metadata?.httpStatusCode;
+  // Wrong AWS_REGION → 301 / PermanentRedirect. Retrying burns minutes and blocks sync.
+  if (
+    status === 301 ||
+    /PermanentRedirect|specified endpoint|AuthorizationHeaderMalformed/i.test(msg) ||
+    /PermanentRedirect/i.test(name)
+  ) {
+    return false;
+  }
   return (
     /timeout|ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|socket|networkingerror|unknownerror|throttl/i.test(
       msg,
     ) ||
     /timeout|networkingerror|timeouterror/i.test(name) ||
-    err?.$metadata?.httpStatusCode === 503 ||
-    err?.$metadata?.httpStatusCode === 500
+    status === 503 ||
+    status === 500
   );
 }
 

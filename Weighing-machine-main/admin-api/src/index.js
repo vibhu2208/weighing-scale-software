@@ -19,6 +19,7 @@ const {
   startFireWorker,
 } = require('./services/slipReservationService');
 const { startMirrorReconcileWorker } = require('./services/remoteTripService');
+const { startVehicleReassertWorker } = require('./services/commandService');
 const { query } = require('./db');
 
 const app = express();
@@ -54,37 +55,50 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ ok: false, error: err.message || 'Internal error' });
 });
 
-async function start() {
-  if (isConfigured()) {
-    try {
-      await bootstrapAdminUser();
-    } catch (err) {
-      console.error(
-        '[auth] Bootstrap failed — run scripts/rds/002_admin_panel.sql on RDS:',
-        err.message,
-      );
-    }
-    try {
-      await ensureSlipReservationsSchema();
-      console.log('[api] slip_reservations schema ready');
-      startFireWorker();
-    } catch (err) {
-      console.error(
-        '[api] slip_reservations setup failed — run scripts/rds/003_slip_reservations.sql:',
-        err.message,
-      );
-    }
-    try {
-      startMirrorReconcileWorker(query, 60);
-      console.log('[api] remote trip → mirror reconcile worker started');
-    } catch (err) {
-      console.warn('[api] mirror reconcile worker failed to start', err.message);
-    }
-  } else {
+async function bootstrap() {
+  if (!isConfigured()) {
     console.warn('[api] DATABASE_URL not configured — API will fail on DB calls');
+    return;
   }
-  app.listen(PORT, () => {
+  try {
+    await bootstrapAdminUser();
+  } catch (err) {
+    console.error(
+      '[auth] Bootstrap failed — run scripts/rds/002_admin_panel.sql on RDS:',
+      err.message,
+    );
+  }
+  try {
+    await ensureSlipReservationsSchema();
+    console.log('[api] slip_reservations schema ready');
+    startFireWorker();
+  } catch (err) {
+    console.error(
+      '[api] slip_reservations setup failed — run scripts/rds/003_slip_reservations.sql:',
+      err.message,
+    );
+  }
+  try {
+    startMirrorReconcileWorker(query, 60);
+    console.log('[api] remote trip → mirror reconcile worker started');
+  } catch (err) {
+    console.warn('[api] mirror reconcile worker failed to start', err.message);
+  }
+  try {
+    startVehicleReassertWorker();
+    console.log('[api] vehicle reassert worker started');
+  } catch (err) {
+    console.warn('[api] vehicle reassert worker failed to start', err.message);
+  }
+}
+
+function start() {
+  // Bind immediately so Vite proxy is not refused while RDS bootstrap times out.
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`[api] listening on port ${PORT}`);
+  });
+  bootstrap().catch((err) => {
+    console.error('[api] bootstrap error', err);
   });
 }
 

@@ -509,6 +509,7 @@ const TransactionService = {
       'operator_id',
       'notes',
       'ticket_status',
+      'truck_number',
       'material',
       'driver',
       'customer_name',
@@ -529,6 +530,13 @@ const TransactionService = {
     ];
     const sets = [];
     const params = [];
+
+    const unknown = Object.keys(fields).filter(
+      (key) => fields[key] !== undefined && !allowed.includes(key),
+    );
+    if (unknown.length) {
+      throw new Error(`Cannot update fields: ${unknown.join(', ')}`);
+    }
 
     for (const key of allowed) {
       if (fields[key] !== undefined) {

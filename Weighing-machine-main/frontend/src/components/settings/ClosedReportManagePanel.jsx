@@ -21,6 +21,7 @@ function fmtKg(kg) {
 
 function buildEditForm(report) {
   return {
+    slip_number: report?.slip_number || '',
     gross_weight: report?.gross_weight ?? '',
     tare_weight: report?.tare_weight ?? '',
     timestamp_in: toDatetimeLocalValue(report?.timestamp_in),
@@ -117,12 +118,18 @@ export default function ClosedReportManagePanel() {
       setError('Load a report first');
       return;
     }
+    if (!String(form.slip_number || '').trim()) {
+      setError('Slip number is required');
+      return;
+    }
     setBusy(true);
     setError('');
     setSuccess('');
     try {
       const result = await reportAPI.adminUpdateClosedReport({
         slipNumber: loaded.slip_number,
+        newSlipNumber: form.slip_number.trim(),
+        slip_number: form.slip_number.trim(),
         gross_weight: form.gross_weight,
         tare_weight: form.tare_weight,
         timestamp_in: form.timestamp_in ? new Date(form.timestamp_in).toISOString() : undefined,
@@ -140,8 +147,13 @@ export default function ClosedReportManagePanel() {
 
       const txn = result?.transaction || result;
       setLoaded(txn);
+      setSlipQuery(txn.slip_number || loaded.slip_number);
       setForm(buildEditForm(txn));
-      setSuccess(`Report ${txn.slip_number} updated and PDF regenerated.`);
+      const renamed =
+        result?.newSlipNumber && result.newSlipNumber !== result.oldSlipNumber
+          ? ` Slip number changed to ${txn.slip_number}.`
+          : '';
+      setSuccess(`Report ${txn.slip_number} updated and PDF regenerated.${renamed}`);
       await refreshRecent();
     } catch (e) {
       setError(e.message || 'Update failed');
@@ -228,13 +240,25 @@ export default function ClosedReportManagePanel() {
       {loaded && (
         <div className="space-y-3 rounded-lg border border-slate-700/60 bg-slate-900/40 p-3">
           <p className="text-xs text-slate-400">
-            <span className="font-mono text-white">{loaded.slip_number}</span>
-            {' · '}
             {loaded.truck_number}
             {vehicleType ? ` · ${vehicleType}` : ''}
             {' · net '}
             <span className="font-mono text-white">{fmtKg(loaded.net_weight)}</span>
           </p>
+
+          <label className="block text-xs text-slate-400">
+            Slip number
+            <input
+              type="text"
+              className="field-input w-full mt-1 text-sm font-mono"
+              value={form.slip_number}
+              onChange={(e) => updateField('slip_number', e.target.value.toUpperCase())}
+              placeholder="e.g. WB0015 or 15"
+            />
+            <span className="mt-1 block text-[11px] text-slate-500">
+              Changing this does not move the next-ticket counter. Closed report PDF is regenerated.
+            </span>
+          </label>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block text-xs text-slate-400">

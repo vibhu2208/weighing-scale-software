@@ -218,6 +218,26 @@ async function processRemoteRow(row, attempt = 0) {
           slip: alreadyImported.slip_number,
           fields: Object.keys(photoUpdates),
         });
+
+        // Photos arrived after the first import — rebuild PDF so admin download has images.
+        const photosAdded = Object.keys(photoUpdates).some((k) => k.includes('photo'));
+        if (photosAdded && !photoUpdates.report_path) {
+          try {
+            const ReportService = require('./ReportService');
+            const reportResult = await ReportService.regenerateTripPDF(alreadyImported.id);
+            if (reportResult.ok && reportResult.path) {
+              TransactionService.updateFields(alreadyImported.id, {
+                report_path: reportResult.path,
+              });
+            }
+          } catch (err) {
+            logger.warn('PDF regenerate after photo backfill failed', {
+              remoteId,
+              localId: alreadyImported.id,
+              message: err.message,
+            });
+          }
+        }
       }
     } catch (err) {
       logger.warn('Remote trip photo backfill failed', {

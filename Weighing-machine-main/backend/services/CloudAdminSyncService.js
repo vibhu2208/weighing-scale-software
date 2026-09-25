@@ -49,11 +49,14 @@ function intervalSeconds() {
 }
 
 function getSiteId() {
+  // Normalize "WB - 03" → "WB-03" so commands/mirror always match admin SITE_ID.
   return (
     process.env.WEIGHBRIDGE_ID ||
     SettingsService.get('WEIGHBRIDGE_ID') ||
-    'WB - 03'
-  ).trim();
+    'WB-03'
+  )
+    .trim()
+    .replace(/\s+/g, '');
 }
 
 function enqueuePush(transactionId) {
@@ -298,15 +301,50 @@ async function processPushQueue() {
   }
 }
 
-async function pushRecentTickets() {
+/**
+ * Always push every OPEN ticket (no LIMIT). Catch-up used to mix OPEN with
+ * recent CLOSED ordered by timestamp_out — busy sites then starved open rows
+ * out of the top 150, so admin Reports never showed them.
+ */
+async function pushAllOpenTickets() {
   const { getDb } = require('../database/db');
   const rows = getDb()
     .prepare(
       `SELECT id FROM transactions
-       WHERE ticket_status IN (?, ?, ?)
+       WHERE ticket_status = ?
+       ORDER BY COALESCE(timestamp_in, updated_at) DESC`,
+    )
+    .all(TICKET_STATUS.OPEN);
+  let ok = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const txn = TransactionService.getById(row.id);
+    if (!txn) continue;
+    try {
+      await pushTransaction(txn);
+      ok += 1;
+    } catch (err) {
+      failed += 1;
+      logger.warn('CloudAdminSync open push failed', { id: row.id, message: err.message });
+    }
+  }
+  if (rows.length) {
+    logger.info('CloudAdminSync pushed OPEN tickets', { total: rows.length, ok, failed });
+  }
+  return { total: rows.length, ok, failed };
+}
+
+async function pushRecentTickets() {
+  const { getDb } = require('../database/db');
+  // Opens first — must not compete with closed slips for the LIMIT slot.
+  await pushAllOpenTickets();
+  const rows = getDb()
+    .prepare(
+      `SELECT id FROM transactions
+       WHERE ticket_status IN (?, ?)
        ORDER BY COALESCE(timestamp_out, updated_at) DESC LIMIT 150`,
     )
-    .all(TICKET_STATUS.OPEN, TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
+    .all(TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
   for (const row of rows) {
     const txn = TransactionService.getById(row.id);
     if (txn) {
@@ -344,6 +382,10 @@ async function markCommand(id, status, error) {
 
 function isTransientS3Error(err) {
   const msg = String(err?.message || err || '');
+  // Region/endpoint misconfig will never succeed until settings change — fail the command.
+  if (/PermanentRedirect|specified endpoint|AuthorizationHeaderMalformed/i.test(msg)) {
+    return false;
+  }
   return /timeout|socket|ECONNRESET|ETIMEDOUT|ENOTFOUND|S3 .+ failed after/i.test(msg);
 }
 
@@ -353,8 +395,24 @@ async function applyCommand(row) {
     // Apply locally first, then refresh mirror. Never delete-before-push:
     // a failed S3/mirror push used to leave admin Reports empty while the
     // command stayed pending / blocked later syncs.
-    await AdminReportService.applyRemoteUpdate(payload);
-    const txn = TransactionService.getBySlipNumber(payload.slipNumber);
+    const result = await AdminReportService.applyRemoteUpdate(payload);
+    const lookupSlip = result?.slip_number || payload.newSlipNumber || payload.slipNumber;
+    const txn =
+      TransactionService.getById(result?.transactionId) ||
+      TransactionService.getBySlipNumber(lookupSlip);
+    const wantTruck = String(
+      payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
+    )
+      .trim()
+      .toUpperCase();
+    if (wantTruck) {
+      const gotTruck = String(txn?.truck_number || '').trim().toUpperCase();
+      if (gotTruck !== wantTruck) {
+        throw new Error(
+          `Vehicle number not applied on PC (wanted ${wantTruck}, got ${gotTruck || 'empty'})`,
+        );
+      }
+    }
     if (txn) {
       try {
         await pushTransaction(txn);
@@ -370,6 +428,11 @@ async function applyCommand(row) {
   if (row.type === 'delete_report') {
     await AdminReportService.applyRemoteDelete(payload);
     await deleteMirrorRow(payload.slipNumber);
+    return;
+  }
+  if (row.type === 'sync_open_tickets') {
+    const result = await pushAllOpenTickets();
+    logger.info('CloudAdminSync sync_open_tickets command done', result);
     return;
   }
   throw new Error(`Unknown command type: ${row.type}`);
@@ -483,8 +546,12 @@ async function processNow() {
   processing = true;
   try {
     await heartbeat();
-    await processPushQueue();
+    // Apply admin edits before outbound mirror pushes so a stuck S3 upload
+    // cannot leave edit_report commands pending for hours.
     await pullCommands();
+    await processPushQueue();
+    // Keep open tickets mirrored even when the catch-up job is busy with closed slips.
+    await pushAllOpenTickets();
     await pushWeightFeatureMeta();
     await pullSettings();
     await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
@@ -554,5 +621,13 @@ function stop() {
 }
 
 module.exports = {
-  start, stop, processNow, enqueuePush, pushTransaction, deleteMirrorRow, syncRemoteTripFromLocal,
+  start,
+  stop,
+  processNow,
+  enqueuePush,
+  pushTransaction,
+  pushAllOpenTickets,
+  pushRecentTickets,
+  deleteMirrorRow,
+  syncRemoteTripFromLocal,
 };

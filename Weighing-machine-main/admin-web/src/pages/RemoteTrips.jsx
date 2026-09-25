@@ -281,6 +281,8 @@ export default function RemoteTrips() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [pdfBusy, setPdfBusy] = useState('');
+  const [createdTrip, setCreatedTrip] = useState(null);
 
   const loadTrips = useCallback(async () => {
     setLoading(true);
@@ -457,13 +459,14 @@ export default function RemoteTrips() {
 
       if (photoS3Keys.length) {
         setMessage(
-          `Remote trip ${trip.slip_number} created with ${photoS3Keys.length} photo(s). PC will import/update within ~30 seconds when online.`,
+          `Remote trip ${trip.slip_number} created with ${photoS3Keys.length} photo(s). You can download the PDF now — the weighbridge PC will import within ~30 seconds when online.`,
         );
       } else {
         setMessage(
-          `Remote trip ${trip.slip_number} created (no photos attached). The weighbridge PC will import it within ~30 seconds when online.`,
+          `Remote trip ${trip.slip_number} created (no photos attached). You can still download the PDF — the weighbridge PC will import it within ~30 seconds when online.`,
         );
       }
+      setCreatedTrip(trip);
       setForm(emptyForm());
       setPhotos({});
       loadTrips();
@@ -700,9 +703,33 @@ export default function RemoteTrips() {
         {message && <p className="text-sm text-emerald-400">{message}</p>}
         {error && <p className="text-sm text-red-400">{error}</p>}
 
-        <button type="submit" className="btn-primary" disabled={saving}>
-          {saving ? 'Creating…' : 'Create remote trip'}
-        </button>
+        <div className="flex flex-wrap gap-2 pt-1">
+          <button type="submit" className="btn-primary" disabled={saving}>
+            {saving ? 'Creating…' : 'Create remote trip'}
+          </button>
+          {createdTrip?.id && (
+            <button
+              type="button"
+              className="btn-ghost text-xs"
+              disabled={pdfBusy === createdTrip.id}
+              onClick={async () => {
+                setPdfBusy(createdTrip.id);
+                setError('');
+                try {
+                  await api.downloadRemoteTripPdf(createdTrip.id, createdTrip.slip_number);
+                } catch (err) {
+                  setError(err.message);
+                } finally {
+                  setPdfBusy('');
+                }
+              }}
+            >
+              {pdfBusy === createdTrip.id
+                ? 'Building PDF…'
+                : `Download PDF (${createdTrip.slip_number})`}
+            </button>
+          )}
+        </div>
       </form>
 
       <div className="space-y-3">
@@ -734,6 +761,7 @@ export default function RemoteTrips() {
                 <th className="p-3">Closed</th>
                 <th className="p-3">Sync</th>
                 <th className="p-3">MCG</th>
+                <th className="p-3">PDF</th>
               </tr>
             </thead>
             <tbody>
@@ -750,11 +778,31 @@ export default function RemoteTrips() {
                     </Badge>
                   </td>
                   <td className="p-3 text-xs text-slate-400">{row.mcg_status || '—'}</td>
+                  <td className="p-3">
+                    <button
+                      type="button"
+                      className="text-emerald-400 hover:underline text-xs disabled:opacity-50"
+                      disabled={pdfBusy === row.id}
+                      onClick={async () => {
+                        setPdfBusy(row.id);
+                        setError('');
+                        try {
+                          await api.downloadRemoteTripPdf(row.id, row.slip_number);
+                        } catch (err) {
+                          setError(err.message);
+                        } finally {
+                          setPdfBusy('');
+                        }
+                      }}
+                    >
+                      {pdfBusy === row.id ? 'PDF…' : 'PDF'}
+                    </button>
+                  </td>
                 </tr>
               ))}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="p-6 text-center text-slate-500">
+                  <td colSpan={8} className="p-6 text-center text-slate-500">
                     No remote trips yet.
                   </td>
                 </tr>

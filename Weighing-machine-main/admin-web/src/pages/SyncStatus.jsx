@@ -10,6 +10,7 @@ export default function SyncStatus() {
   const [loading, setLoading] = useState(false);
   const [retryingId, setRetryingId] = useState('');
   const [retryingAll, setRetryingAll] = useState(false);
+  const [syncingOpen, setSyncingOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,11 +76,37 @@ export default function SyncStatus() {
     }
   }
 
+  async function onSyncOpenTickets() {
+    setSyncingOpen(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api.requestSyncOpenTickets();
+      setMessage(
+        result.message ||
+          'Queued open-ticket sync — PC will push within ~30s if it has the updated app.',
+      );
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSyncingOpen(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-semibold">Sync Status</h2>
         <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn-primary text-xs"
+            onClick={onSyncOpenTickets}
+            disabled={syncingOpen || loading}
+          >
+            {syncingOpen ? 'Queuing…' : 'Sync open tickets'}
+          </button>
           {failedCount > 0 && (
             <button
               type="button"
@@ -114,6 +141,9 @@ export default function SyncStatus() {
           <p className="text-xs text-slate-400">Mirrored reports</p>
           <p className="font-semibold mt-1">{data?.mirrorCount ?? 0}</p>
           <p className="text-xs text-slate-500 mt-2">
+            Open {data?.mirrorOpenCount ?? 0} · Closed {data?.mirrorClosedCount ?? 0}
+          </p>
+          <p className="text-xs text-slate-500 mt-1">
             Pending {commands.pending ?? 0} · Applied {commands.applied ?? 0} · Failed{' '}
             {commands.failed ?? 0}
           </p>

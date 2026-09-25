@@ -59,6 +59,44 @@ function fileToDataUrl(file) {
   });
 }
 
+async function downloadPdfBlob(path, filename) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch(`${API_URL}${path}`, { headers });
+  } catch {
+    throw new Error(
+      import.meta.env.DEV
+        ? 'Cannot reach admin API — run "npm run dev" in the admin-api folder (port 3001)'
+        : 'Network error — check VITE_API_URL and that the API is online',
+    );
+  }
+
+  if (res.status === 401) {
+    setToken(null);
+    window.location.href = '/login';
+    throw new Error('Session expired');
+  }
+
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.error || `PDF download failed (${res.status})`);
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'report.pdf';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   login(email, password) {
     return request('/auth/login', {
@@ -78,6 +116,10 @@ export const api = {
 
   getReport(slip) {
     return request(`/reports/${encodeURIComponent(slip)}`);
+  },
+
+  async downloadReportPdf(slip) {
+    return downloadPdfBlob(`/reports/${encodeURIComponent(slip)}/pdf`, `${slip}_report.pdf`);
   },
 
   editReport(slip, body) {
@@ -138,6 +180,12 @@ export const api = {
 
   getSyncStatus() {
     return request('/sync/status');
+  },
+
+  requestSyncOpenTickets() {
+    return request('/sync/sync-open-tickets', {
+      method: 'POST',
+    });
   },
 
   retrySyncCommand(id) {
@@ -211,6 +259,13 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ photoS3Keys }),
     });
+  },
+
+  async downloadRemoteTripPdf(id, slipNumber) {
+    return downloadPdfBlob(
+      `/remote-trips/${encodeURIComponent(id)}/pdf`,
+      `${slipNumber || id}_report.pdf`,
+    );
   },
 
   getSlipReservations(params = {}) {

@@ -554,9 +554,28 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
 
 let reconcileTimer = null;
 
+function isDbConnectivityError(err) {
+  const msg = String(err && err.message ? err.message : err || '').toLowerCase();
+  return (
+    msg.includes('timeout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('enotfound') ||
+    msg.includes('econnreset') ||
+    msg.includes('connection terminated') ||
+    msg.includes('could not connect')
+  );
+}
+
 function startMirrorReconcileWorker(queryFn, everySec = 60) {
   if (reconcileTimer) return;
+  const baseMs = Math.max(15, everySec) * 1000;
+  let failStreak = 0;
+  let nextAllowedAt = 0;
+  let lastWarnAt = 0;
+
   const tick = async () => {
+    const now = Date.now();
+    if (now < nextAllowedAt) return;
     try {
       const fromLocal = await reconcileRemoteTripsFromMirror(queryFn);
       if (fromLocal.updated || fromLocal.deleted) {
@@ -566,14 +585,29 @@ function startMirrorReconcileWorker(queryFn, everySec = 60) {
       if (result.upserted > 0) {
         console.log('[remoteTrip] reconciled missing mirror rows', result);
       }
+      failStreak = 0;
+      nextAllowedAt = 0;
     } catch (err) {
+      failStreak += 1;
+      if (isDbConnectivityError(err)) {
+        // 1m → 2m → 4m … capped at 15m while RDS is unreachable
+        const delayMs = Math.min(15 * 60 * 1000, baseMs * 2 ** Math.min(failStreak - 1, 4));
+        nextAllowedAt = Date.now() + delayMs;
+        if (now - lastWarnAt > 60 * 1000) {
+          console.warn(
+            `[remoteTrip] reconcile worker: DB unreachable (${err.message}); retry in ${Math.round(delayMs / 1000)}s`,
+          );
+          lastWarnAt = now;
+        }
+        return;
+      }
       console.warn('[remoteTrip] reconcile worker error', err.message);
     }
   };
   tick().catch(() => {});
   reconcileTimer = setInterval(() => {
     tick().catch(() => {});
-  }, Math.max(15, everySec) * 1000);
+  }, baseMs);
   if (typeof reconcileTimer.unref === 'function') reconcileTimer.unref();
 }
 
@@ -599,9 +633,11 @@ async function listRemoteTrips(queryFn, filters = {}) {
 
   const res = await queryFn(
     `SELECT id, slip_number, truck_number, customer_name, destination, material,
-            operator_name, tare_weight, gross_weight, net_weight,
+            operator_name, tare_weight, gross_weight, net_weight, vehicle_type,
             timestamp_in, timestamp_out, synced_to_local, synced_at, local_id,
-            mcg_status, created_at
+            mcg_status, created_at, report_s3_key,
+            arrival_photo_1, arrival_photo_2, arrival_photo_3,
+            departure_photo_1, departure_photo_2, departure_photo_3
      FROM remote_trips ${where}
      ORDER BY created_at DESC
      LIMIT $${idx}`,

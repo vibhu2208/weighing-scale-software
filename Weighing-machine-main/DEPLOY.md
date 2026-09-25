@@ -52,7 +52,7 @@ Weighbridge PC (Electron)
 | `AWS_ACCESS_KEY_ID` | S3 read/presign |
 | `AWS_SECRET_ACCESS_KEY` | |
 | `AWS_REGION` | `ap-south-1` |
-| `AWS_S3_BUCKET` | `weighbridge-management-system` |
+| `AWS_S3_BUCKET` | `k1-k2` |
 | `SITE_ID` | `WB-03` |
 | `CORS_ORIGIN` | `https://your-admin-web.vercel.app` |
 
@@ -94,7 +94,7 @@ ADMIN_SYNC_INTERVAL_SECONDS=30
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=ap-south-1
-AWS_S3_BUCKET=weighbridge-management-system
+AWS_S3_BUCKET=k1-k2
 ```
 
 1. Pull latest app code from GitHub.
