@@ -27,7 +27,7 @@ function readEpcPrefixEnv() {
     const RfidBlocklistService = require('../../services/RfidBlocklistService');
     return RfidBlocklistService.getEpcPrefix();
   } catch (_e) {
-    return String(process.env.RFID_EPC_PREFIX || 'E200').trim();
+    return String(process.env.RFID_EPC_PREFIX || '').trim();
   }
 }
 

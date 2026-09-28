@@ -186,25 +186,46 @@ export default function RemoteTrips() {
         timestamp_out: new Date(form.timestamp_out).toISOString(),
       };
 
-      const { trip } = await api.createRemoteTrip(payload);
-      const photoS3Keys = [];
-
+      const slipHint = (form.slip_number || '').trim().toUpperCase();
+      const uploadSlip = slipHint;
+      const selectedPhotos = [];
       for (const { pass } of PHOTO_PASSES) {
         for (const slot of PHOTO_SLOTS) {
           const file = photos[photoKey(pass, slot)];
-          if (!file) continue;
-          // eslint-disable-next-line no-await-in-loop
-          const uploaded = await uploadPhoto(trip.slip_number, pass, slot, file);
-          photoS3Keys.push(uploaded);
+          if (file) selectedPhotos.push({ pass, slot, file });
         }
       }
 
-      if (photoS3Keys.length) {
+      let photoS3Keys = [];
+      if (uploadSlip && selectedPhotos.length) {
+        photoS3Keys = await Promise.all(
+          selectedPhotos.map(({ pass, slot, file }) => uploadPhoto(uploadSlip, pass, slot, file)),
+        );
+        for (const uploaded of photoS3Keys) {
+          payload[`${uploaded.pass}_photo_${uploaded.slot}`] = uploaded.key;
+        }
+      }
+
+      const { trip } = await api.createRemoteTrip(payload);
+
+      if (!uploadSlip && selectedPhotos.length) {
+        photoS3Keys = await Promise.all(
+          selectedPhotos.map(({ pass, slot, file }) => uploadPhoto(trip.slip_number, pass, slot, file)),
+        );
+      }
+
+      if (photoS3Keys.length && !uploadSlip) {
         await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+      } else if (photoS3Keys.length && uploadSlip) {
+        try {
+          await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+        } catch (_err) {
+          /* keys already stored on create */
+        }
       }
 
       setMessage(
-        `Remote trip ${trip.slip_number} created. The weighbridge PC will import it within ~30 seconds when online.`,
+        `Remote trip ${trip.slip_number} created. The weighbridge PC will import it with photos as soon as it is online.`,
       );
       setForm(emptyForm());
       setPhotos({});

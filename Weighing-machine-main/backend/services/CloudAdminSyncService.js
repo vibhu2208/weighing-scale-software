@@ -14,10 +14,13 @@ const AdminReportService = require('./AdminReportService');
 
 let cronJob = null;
 let catchUpJob = null;
+let catchUpTimer = null;
 let listenClient = null;
 let processing = false;
+let rerunRequested = false;
 let started = false;
 const pushQueue = new Set();
+const catchUpDone = new Set();
 
 const REMOTE_SAFE_KEYS = new Set([
   'WEIGHT_ADJUSTMENT_ENABLED',
@@ -53,13 +56,29 @@ function getSiteId() {
 }
 
 function enqueuePush(transactionId) {
-  if (transactionId) pushQueue.add(transactionId);
+  if (!transactionId) return;
+  pushQueue.add(transactionId);
+  catchUpDone.delete(transactionId);
+  // Flush soon so OPEN tickets appear in admin without waiting for the cron tick.
+  processNow().catch((err) => {
+    logger.warn('CloudAdminSync flush after enqueue failed', { message: err.message });
+  });
 }
 
-async function uploadLocalFileIfExists(localPath, s3Key) {
+async function uploadLocalFileIfExists(localPath, s3Key, options = {}) {
   if (!localPath || !S3Service.isConfigured()) return null;
   const normalized = path.resolve(localPath);
   if (!fs.existsSync(normalized)) return null;
+  if (options.onlyIfMissing) {
+    try {
+      if (await S3Service.objectExists(s3Key)) return s3Key;
+    } catch (err) {
+      logger.warn('CloudAdminSync existence check failed — uploading', {
+        s3Key,
+        message: err.message,
+      });
+    }
+  }
   try {
     await S3Service.uploadFile(normalized, s3Key);
     return s3Key;
@@ -69,7 +88,7 @@ async function uploadLocalFileIfExists(localPath, s3Key) {
   }
 }
 
-async function buildMirrorPhotoKeys(txn) {
+async function buildMirrorPhotoKeys(txn, options = {}) {
   const siteId = getSiteId();
   const slip = txn.slip_number;
   const keys = {};
@@ -84,24 +103,32 @@ async function buildMirrorPhotoKeys(txn) {
   for (const { col, pass, slot } of slots) {
     if (!txn[col]) continue;
     const s3Key = S3Service.mirrorPhotoKey(siteId, slip, slot, pass);
-    const uploaded = await uploadLocalFileIfExists(txn[col], s3Key);
+    const uploaded = await uploadLocalFileIfExists(txn[col], s3Key, options);
     if (uploaded) keys[col] = uploaded;
   }
   return keys;
 }
 
-async function pushTransaction(txn) {
-  if (!txn?.id || txn.ticket_status !== TICKET_STATUS.CLOSED) {
+const MIRROR_STATUSES = new Set([
+  TICKET_STATUS.OPEN,
+  TICKET_STATUS.CLOSED,
+  TICKET_STATUS.CANCELLED,
+]);
+
+async function pushTransaction(txn, options = {}) {
+  if (!txn?.id || !MIRROR_STATUSES.has(txn.ticket_status)) {
     return { ok: false, skipped: true };
   }
 
   const siteId = getSiteId();
-  const photoKeys = await buildMirrorPhotoKeys(txn);
+  const photoKeys = await buildMirrorPhotoKeys(txn, options);
   let reportS3Key = null;
-  if (txn.report_path) {
+  // PDF only exists after close — skip upload work for open tickets.
+  if (txn.ticket_status === TICKET_STATUS.CLOSED && txn.report_path) {
     reportS3Key = await uploadLocalFileIfExists(
       txn.report_path,
       S3Service.mirrorReportKey(siteId, txn.slip_number),
+      options,
     );
   }
 
@@ -182,24 +209,50 @@ async function processPushQueue() {
   }
 }
 
-async function pushRecentClosed() {
+async function pushRecentTickets() {
+  try {
+    const RemoteTripSyncService = require('./RemoteTripSyncService');
+    if (RemoteTripSyncService.isBusy()) {
+      logger.info('CloudAdminSync catch-up deferred — remote trip sync in progress');
+      if (!catchUpTimer) {
+        catchUpTimer = setTimeout(() => {
+          catchUpTimer = null;
+          pushRecentTickets().catch(() => {});
+        }, 60000);
+      }
+      return;
+    }
+  } catch (_e) {
+    /* remote sync optional */
+  }
+
   const { getDb } = require('../database/db');
   const rows = getDb()
     .prepare(
-      `SELECT id FROM transactions WHERE ticket_status = ?
-       ORDER BY COALESCE(timestamp_out, updated_at) DESC LIMIT 100`,
+      `SELECT id, ticket_status FROM transactions
+       WHERE ticket_status IN (?, ?, ?)
+       ORDER BY COALESCE(timestamp_out, updated_at) DESC LIMIT 150`,
     )
-    .all(TICKET_STATUS.CLOSED);
+    .all(TICKET_STATUS.OPEN, TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
   for (const row of rows) {
+    // Open tickets keep changing — always re-push. Closed use catchUpDone.
+    if (row.ticket_status !== TICKET_STATUS.OPEN && catchUpDone.has(row.id)) continue;
     const txn = TransactionService.getById(row.id);
-    if (txn) {
-      try {
-        await pushTransaction(txn);
-      } catch (err) {
-        logger.warn('CloudAdminSync catch-up failed', { id: row.id, message: err.message });
+    if (!txn) continue;
+    try {
+      await pushTransaction(txn, { onlyIfMissing: true });
+      if (txn.ticket_status !== TICKET_STATUS.OPEN) {
+        catchUpDone.add(row.id);
       }
+    } catch (err) {
+      logger.warn('CloudAdminSync catch-up failed', { id: row.id, message: err.message });
     }
   }
+}
+
+/** @deprecated use pushRecentTickets */
+async function pushRecentClosed() {
+  return pushRecentTickets();
 }
 
 async function heartbeat() {
@@ -322,22 +375,36 @@ async function pushWeightFeatureMeta() {
 }
 
 async function processNow() {
-  if (processing) return { ok: true, skipped: true };
+  if (processing) {
+    rerunRequested = true;
+    return { ok: true, skipped: true };
+  }
   if (!pg.isConfigured()) return { ok: false, reason: 'not_configured' };
   if (!(await isOnline())) return { ok: false, reason: 'offline' };
   if (!(await pg.ping())) return { ok: false, reason: 'ping_failed' };
 
   processing = true;
   try {
-    await heartbeat();
-    await processPushQueue();
-    await pullCommands();
-    await pushWeightFeatureMeta();
-    await pullSettings();
-    await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
+    let passes = 0;
+    do {
+      rerunRequested = false;
+      passes += 1;
+      await heartbeat();
+      await processPushQueue();
+      await pullCommands();
+      await pushWeightFeatureMeta();
+      await pullSettings();
+      await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
+    } while (rerunRequested && passes < 3);
     return { ok: true };
   } finally {
     processing = false;
+    if (rerunRequested) {
+      rerunRequested = false;
+      setTimeout(() => {
+        processNow().catch(() => {});
+      }, 400);
+    }
   }
 }
 
@@ -372,16 +439,20 @@ function start() {
   const sec = intervalSeconds();
   const cronExpr = sec >= 60 ? `0 */${Math.max(1, Math.floor(sec / 60))} * * * *` : `*/${sec} * * * * *`;
   cronJob = cron.schedule(cronExpr, () => processNow().catch(() => {}));
-  catchUpJob = cron.schedule('0 * * * * *', () => pushRecentClosed().catch(() => {}));
+  catchUpJob = cron.schedule('0 */10 * * * *', () => pushRecentTickets().catch(() => {}));
   logger.info('CloudAdminSync started', { siteId: getSiteId(), intervalSec: sec });
   startListen().catch(() => {});
   processNow().catch(() => {});
-  pushRecentClosed().catch(() => {});
+  catchUpTimer = setTimeout(() => {
+    catchUpTimer = null;
+    pushRecentTickets().catch(() => {});
+  }, 120000);
 }
 
 function stop() {
   if (cronJob) { cronJob.stop(); cronJob = null; }
   if (catchUpJob) { catchUpJob.stop(); catchUpJob = null; }
+  if (catchUpTimer) { clearTimeout(catchUpTimer); catchUpTimer = null; }
   if (listenClient) {
     try { listenClient.release(); } catch (_e) { /* ignore */ }
     listenClient = null;
@@ -391,4 +462,5 @@ function stop() {
 
 module.exports = {
   start, stop, processNow, enqueuePush, pushTransaction, deleteMirrorRow,
+  pushRecentTickets, pushRecentClosed,
 };

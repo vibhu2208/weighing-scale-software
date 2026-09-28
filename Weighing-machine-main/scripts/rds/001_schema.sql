@@ -142,6 +142,15 @@ CREATE TRIGGER trg_remote_trips_notify
   FOR EACH ROW
   EXECUTE PROCEDURE remote_trips_notify();
 
+-- Re-notify when photos are attached after the trip row already exists
+DROP TRIGGER IF EXISTS trg_remote_trips_notify_photos ON remote_trips;
+CREATE TRIGGER trg_remote_trips_notify_photos
+  AFTER UPDATE OF arrival_photo_1, arrival_photo_2, arrival_photo_3,
+                  departure_photo_1, departure_photo_2, departure_photo_3
+  ON remote_trips
+  FOR EACH ROW
+  EXECUTE PROCEDURE remote_trips_notify();
+
 -- ============================================================
 -- 3. Permissions (adjust passwords outside this script)
 -- ============================================================

@@ -4,13 +4,22 @@ const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow, dialog, Menu, shell, protocol } = require('electron');
 
-// Load .env from project root before anything else.
-// Fall back to defaults instead of crashing if missing (edge case).
+function resolveDotenvPath() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, '.env');
+  }
+  return path.join(__dirname, '..', '.env');
+}
+
+function loadDotenvFile(dotenvPath, override) {
+  if (!dotenvPath || !fs.existsSync(dotenvPath)) return false;
+  require('dotenv').config({ path: dotenvPath, override: Boolean(override) });
+  return true;
+}
+
+// Load .env before anything else. Packaged builds read extraResources/.env.
 try {
-  const dotenvPath = path.join(__dirname, '..', '.env');
-  if (fs.existsSync(dotenvPath)) {
-    require('dotenv').config({ path: dotenvPath });
-  } else {
+  if (!loadDotenvFile(resolveDotenvPath(), app.isPackaged)) {
     require('dotenv').config();
   }
 } catch (e) {
@@ -19,7 +28,11 @@ try {
   console.warn('[main] dotenv not loaded:', e && e.message);
 }
 
-const isDev = (process.env.APP_ENV || 'production') === 'development';
+if (app.isPackaged) {
+  process.env.APP_ENV = 'production';
+}
+
+const isDev = !app.isPackaged;
 
 /** Allow renderer to load captured images from uploads/ (file:// is blocked from http origins). */
 protocol.registerSchemesAsPrivileged([
@@ -103,6 +116,23 @@ async function bootstrapBackend() {
 
   const db = safeRequire('../backend/database/db', 'db');
   await tryInvoke('initDatabase', db && (db.initDatabase || db.default?.initDatabase));
+
+  await tryInvoke('applyBundledCloudEnv', () => {
+    const SettingsService = require('../backend/services/SettingsService');
+    const cloudKeys = [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_REGION',
+      'AWS_S3_BUCKET',
+      'PG_SYNC_URL',
+    ];
+    for (const key of cloudKeys) {
+      const value = process.env[key];
+      if (value !== undefined && String(value).trim() !== '') {
+        SettingsService.set(key, String(value).trim());
+      }
+    }
+  });
 
   const monitor = safeRequire('../backend/services/DeviceMonitorService', 'DeviceMonitorService');
   if (monitor && typeof monitor.start === 'function') {
@@ -318,15 +348,24 @@ async function startup() {
     if (app.isPackaged) {
       const { initPackagedStorage } = require('../backend/utils/fileStorage');
       initPackagedStorage(app.getPath('userData'));
+      const bundledEnv = path.join(process.resourcesPath, '.env');
       const userEnv = path.join(app.getPath('userData'), 'weighbridge-data', '.env');
-      if (fs.existsSync(userEnv)) {
-        try {
-          require('dotenv').config({ path: userEnv });
-        } catch (e) {
-          console.warn('[main] user .env not loaded:', e && e.message);
+      try {
+        if (fs.existsSync(bundledEnv)) {
+          fs.copyFileSync(bundledEnv, userEnv);
+          loadDotenvFile(bundledEnv, true);
+        } else if (fs.existsSync(userEnv)) {
+          loadDotenvFile(userEnv, true);
         }
+        process.env.APP_ENV = 'production';
+      } catch (e) {
+        console.warn('[main] user .env not loaded:', e && e.message);
       }
     }
+
+    // Temporary: this installer saves trips without camera photos.
+    process.env.REQUIRE_CAMERA_CAPTURE = 'false';
+    process.env.MIN_PHOTOS_TO_SAVE = '0';
 
     registerLocalMediaProtocol();
     createMainWindow();

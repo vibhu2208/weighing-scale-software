@@ -1,13 +1,24 @@
 'use strict';
 
+const { siteIdAliases } = require('../siteId');
+
 const REPORT_DATE_SQL = `CASE
   WHEN ticket_status = 'CLOSED' THEN COALESCE(timestamp_out, updated_at)
   ELSE timestamp_in
 END`;
 
+const PHOTO_SCORE_SQL = `(
+  (NULLIF(BTRIM(COALESCE(arrival_photo_1, '')), '') IS NOT NULL)::int +
+  (NULLIF(BTRIM(COALESCE(arrival_photo_2, '')), '') IS NOT NULL)::int +
+  (NULLIF(BTRIM(COALESCE(arrival_photo_3, '')), '') IS NOT NULL)::int +
+  (NULLIF(BTRIM(COALESCE(departure_photo_1, '')), '') IS NOT NULL)::int +
+  (NULLIF(BTRIM(COALESCE(departure_photo_2, '')), '') IS NOT NULL)::int +
+  (NULLIF(BTRIM(COALESCE(departure_photo_3, '')), '') IS NOT NULL)::int
+)`;
+
 function buildWhere(siteId, filters = {}) {
-  const clauses = ['site_id = $1'];
-  const params = [siteId];
+  const clauses = ['site_id = ANY($1::text[])'];
+  const params = [siteIdAliases(siteId)];
   let idx = 2;
 
   if (filters.from) {
@@ -64,15 +75,24 @@ async function queryPaginated(queryFn, siteId, filters = {}) {
   const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 200));
   const page = Math.max(0, Number(filters.page) || 0);
   const offset = page * limit;
+  const distinctOrder = `slip_number, ${PHOTO_SCORE_SQL} DESC, ${reportDateSql} DESC`;
 
   const countRes = await queryFn(
-    `SELECT COUNT(*) AS c FROM transactions_mirror ${where}`,
+    `SELECT COUNT(*) AS c FROM (
+       SELECT DISTINCT ON (slip_number) slip_number
+       FROM transactions_mirror ${where}
+       ORDER BY ${distinctOrder}
+     ) d`,
     params,
   );
   const total = Number(countRes.rows[0].c);
 
   const rowsRes = await queryFn(
-    `SELECT * FROM transactions_mirror ${where}
+    `SELECT * FROM (
+       SELECT DISTINCT ON (slip_number) *
+       FROM transactions_mirror ${where}
+       ORDER BY ${distinctOrder}
+     ) d
      ORDER BY ${reportDateSql} DESC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, limit, offset],
@@ -90,7 +110,7 @@ async function queryPaginated(queryFn, siteId, filters = {}) {
 }
 
 async function summarise(queryFn, siteId, filters = {}) {
-  const { where, params } = buildWhere(siteId, filters);
+  const { where, params, reportDateSql } = buildWhere(siteId, filters);
   const res = await queryFn(
     `SELECT
        COUNT(*) AS total,
@@ -101,24 +121,29 @@ async function summarise(queryFn, siteId, filters = {}) {
        COALESCE(SUM(net_weight) FILTER (WHERE ticket_status = 'CLOSED'), 0) AS total_net,
        COUNT(DISTINCT truck_number) AS total_vehicles,
        COUNT(*) FILTER (WHERE report_s3_key IS NOT NULL AND report_s3_key <> '') AS reports_generated
-     FROM transactions_mirror ${where}`,
+     FROM (
+       SELECT DISTINCT ON (slip_number) *
+       FROM transactions_mirror ${where}
+       ORDER BY slip_number, ${PHOTO_SCORE_SQL} DESC, ${reportDateSql} DESC
+     ) d`,
     params,
   );
   return res.rows[0];
 }
 
 async function getFilterOptions(queryFn, siteId) {
+  const aliases = siteIdAliases(siteId);
   const operators = await queryFn(
     `SELECT DISTINCT operator_name AS name FROM transactions_mirror
-     WHERE site_id = $1 AND operator_name IS NOT NULL AND operator_name <> ''
+     WHERE site_id = ANY($1::text[]) AND operator_name IS NOT NULL AND operator_name <> ''
      ORDER BY operator_name`,
-    [siteId],
+    [aliases],
   );
   const materials = await queryFn(
     `SELECT DISTINCT material AS name FROM transactions_mirror
-     WHERE site_id = $1 AND material IS NOT NULL AND material <> ''
+     WHERE site_id = ANY($1::text[]) AND material IS NOT NULL AND material <> ''
      ORDER BY material`,
-    [siteId],
+    [aliases],
   );
   return {
     operators: operators.rows.map((r) => r.name),
@@ -190,4 +215,5 @@ module.exports = {
   formatExportRow,
   EXPORT_HEADERS,
   REPORT_DATE_SQL,
+  PHOTO_SCORE_SQL,
 };

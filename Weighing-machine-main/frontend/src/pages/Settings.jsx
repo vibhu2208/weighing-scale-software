@@ -57,7 +57,7 @@ const FIELDS = {
       key: 'RFID_EPC_PREFIX',
       label: 'Accepted RFID EPC prefix (tag series)',
       type: 'text',
-      hint: 'Only tags starting with this prefix are used (default E200). Other tags on the truck are ignored for scan, lock, and weighment.',
+      hint: 'Leave blank to accept all tags. If set, only tags starting with this prefix are used for scan, lock, and weighment.',
     },
     {
       key: 'RFID_BLOCKED_TAGS',

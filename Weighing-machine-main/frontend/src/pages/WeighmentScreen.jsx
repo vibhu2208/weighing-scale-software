@@ -120,7 +120,9 @@ export default function WeighmentScreen() {
   const testMode = testConfig?.useWebcamCamera;
   const requiredPhotos = testConfig?.enabledPhotos ?? testConfig?.requiredPhotos ?? 1;
   const configuredCameras = testConfig?.cameras || [];
-  const minPhotosToSave = testConfig?.minPhotosToSave ?? 1;
+  const cameraRequired = testConfig?.cameraRequired !== false;
+  const minPhotosToSave = testConfig?.minPhotosToSave ?? (cameraRequired ? 1 : 0);
+  const photosOptional = !cameraRequired || minPhotosToSave <= 0;
   const useRtspCameras = testConfig?.useRtspCamera && !testConfig?.useWebcamCamera;
   const cameraPreviewOnDemand = testConfig?.cameraPreviewOnDemand !== false;
   const manualPhotoCapture =
@@ -129,6 +131,7 @@ export default function WeighmentScreen() {
   const manualPhotosForPass =
     manualPhotos?.passKey === photoPassKey ? manualPhotos : null;
   const manualPhotosReady =
+    photosOptional ||
     !manualPhotoCapture ||
     (manualPhotosForPass?.snapshots?.length ?? 0) >= minPhotosToSave;
 
@@ -145,7 +148,7 @@ export default function WeighmentScreen() {
 
   const saveBlockedReason = !truckForSave && !selectedOpenTicket
     ? 'Scan RFID, enter vehicle number, or select an open ticket below'
-    : manualPhotoCapture && !manualPhotosReady
+    : !photosOptional && manualPhotoCapture && !manualPhotosReady
       ? `Press Capture images first (at least ${minPhotosToSave} photo${minPhotosToSave === 1 ? '' : 's'} required)`
       : weighMode === 'CLOSE' && !material
         ? 'Select material before closing'
@@ -1317,10 +1320,14 @@ export default function WeighmentScreen() {
                   <div className="flex flex-col items-center justify-center gap-2 py-8 px-4 text-center">
                     <span className="text-3xl">📷</span>
                     <p className="text-slate-400 text-sm">
-                      Press Capture images to take photos from all cameras.
+                      {photosOptional
+                        ? 'Cameras are optional for now — you can Save the trip without photos.'
+                        : 'Press Capture images to take photos from all cameras.'}
                     </p>
                     <p className="text-slate-500 text-xs">
-                      Review each photo — use Retry if grey or distorted — then Save.
+                      {photosOptional
+                        ? 'Photos will be skipped until cameras are working again.'
+                        : 'Review each photo — use Retry if grey or distorted — then Save.'}
                     </p>
                   </div>
                 ) : (
@@ -1375,9 +1382,11 @@ export default function WeighmentScreen() {
             )}
             {!testConfig?.useWebcamCamera && (
               <p className="mt-2 text-xs text-slate-500">
-                {manualPhotoCapture
-                  ? `Capture up to ${requiredPhotos} photo${requiredPhotos === 1 ? '' : 's'} (at least ${minPhotosToSave} required), review and retry if needed, then Save.`
-                  : `Save captures ${requiredPhotos} fresh snapshot${requiredPhotos === 1 ? '' : 's'} for the report.`}
+                {photosOptional
+                  ? 'Temporary: Save works without camera photos while cameras are down.'
+                  : manualPhotoCapture
+                    ? `Capture up to ${requiredPhotos} photo${requiredPhotos === 1 ? '' : 's'} (at least ${minPhotosToSave} required), review and retry if needed, then Save.`
+                    : `Save captures ${requiredPhotos} fresh snapshot${requiredPhotos === 1 ? '' : 's'} for the report.`}
               </p>
             )}
             {saveBlockedReason && !saving && (

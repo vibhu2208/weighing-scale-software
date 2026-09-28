@@ -6,6 +6,7 @@ const {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   DeleteObjectCommand,
   ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
@@ -13,8 +14,8 @@ const { NodeHttpHandler } = require('@smithy/node-http-handler');
 
 const SettingsService = require('./SettingsService');
 
-const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const CONNECTION_TIMEOUT_MS = 30 * 1000;
+const REQUEST_TIMEOUT_MS = 60 * 1000;
+const CONNECTION_TIMEOUT_MS = 15 * 1000;
 
 let client = null;
 
@@ -23,7 +24,7 @@ function getConfig() {
     accessKeyId: (SettingsService.get('AWS_ACCESS_KEY_ID') || '').trim(),
     secretAccessKey: (SettingsService.get('AWS_SECRET_ACCESS_KEY') || '').trim(),
     region: (SettingsService.get('AWS_REGION') || 'ap-south-1').trim(),
-    bucket: (SettingsService.get('AWS_S3_BUCKET') || 'weighbridge-management-system').trim(),
+    bucket: (SettingsService.get('AWS_S3_BUCKET') || 'k1-k2').trim(),
   };
 }
 
@@ -44,6 +45,7 @@ function getClient() {
       requestHandler: new NodeHttpHandler({
         requestTimeout: REQUEST_TIMEOUT_MS,
         connectionTimeout: CONNECTION_TIMEOUT_MS,
+        throwOnRequestTimeout: true,
       }),
     });
   }
@@ -97,6 +99,26 @@ async function uploadFile(localPath, s3Key, contentType) {
   return { bucket, key: s3Key };
 }
 
+function isMissingObject(err) {
+  const status = err?.$metadata?.httpStatusCode;
+  const name = err?.name || err?.Code || '';
+  return status === 404 || name === 'NotFound' || name === 'NoSuchKey';
+}
+
+async function objectExists(s3Key) {
+  const key = (s3Key || '').trim();
+  if (!key || !isConfigured()) return false;
+  try {
+    await getClient().send(
+      new HeadObjectCommand({ Bucket: getBucket(), Key: key }),
+    );
+    return true;
+  } catch (err) {
+    if (isMissingObject(err)) return false;
+    throw err;
+  }
+}
+
 /**
  * Download an S3 object to a local path.
  */
@@ -123,11 +145,30 @@ async function deleteFile(s3Key) {
 }
 
 /**
- * List object keys under a prefix (e.g. db-backups/).
+ * List object keys under a prefix, stopping once maxKeys is reached.
  */
 async function listKeys(prefix, maxKeys = 200) {
-  const all = await listAllKeys(prefix);
-  return maxKeys ? all.slice(0, maxKeys) : all;
+  if (!maxKeys) return listAllKeys(prefix);
+  const bucket = getBucket();
+  const keys = [];
+  let token;
+  do {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await getClient().send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: token,
+        MaxKeys: Math.min(1000, maxKeys - keys.length),
+      }),
+    );
+    for (const obj of res.Contents || []) {
+      if (obj.Key && !obj.Key.endsWith('/')) keys.push(obj.Key);
+      if (keys.length >= maxKeys) return keys;
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return keys;
 }
 
 /** List every object key under a prefix (paginated). */
@@ -170,6 +211,8 @@ module.exports = {
   isConfigured,
   uploadFile,
   downloadFile,
+  objectExists,
+  isMissingObject,
   deleteFile,
   listKeys,
   listAllKeys,

@@ -50,6 +50,27 @@ function buildCreatePayload(body = {}) {
   const slip = String(body.slip_number || '').trim();
   if (slip) payload.slip_number = slip.toUpperCase();
 
+  const photoCols = [
+    'arrival_photo_1',
+    'arrival_photo_2',
+    'arrival_photo_3',
+    'departure_photo_1',
+    'departure_photo_2',
+    'departure_photo_3',
+  ];
+  for (const col of photoCols) {
+    if (body[col]) payload[col] = String(body[col]).trim();
+  }
+  if (Array.isArray(body.photoS3Keys)) {
+    for (const item of body.photoS3Keys) {
+      const slot = Number(item.slot);
+      const key = item.key || item.s3Key;
+      const pass = item.pass === 'arrival' ? 'arrival' : 'departure';
+      if (!key || !Number.isFinite(slot) || slot < 1 || slot > 3) continue;
+      payload[`${pass}_photo_${slot}`] = key;
+    }
+  }
+
   return payload;
 }
 
@@ -140,9 +161,6 @@ async function getRemoteTrip(queryFn, id) {
 async function attachPhotos(queryFn, id, photoS3Keys = []) {
   const row = await getRemoteTrip(queryFn, id);
   if (!row) throw new Error('Remote trip not found');
-  if (row.synced_to_local) {
-    throw new Error('Trip already synced to weighbridge — cannot change photos');
-  }
 
   const updates = {};
   for (const item of photoS3Keys) {
@@ -158,7 +176,11 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   }
 
   const cols = Object.keys(updates);
-  const sets = cols.map((c, i) => `${c} = $${i + 2}`);
+  // Re-queue photo download even if trip data already imported locally.
+  const sets = [
+    ...cols.map((c, i) => `${c} = $${i + 2}`),
+    'synced_to_local = false',
+  ];
   const values = cols.map((c) => updates[c]);
 
   const res = await queryFn(

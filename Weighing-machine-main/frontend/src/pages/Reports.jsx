@@ -6,7 +6,6 @@ import ReportDownloadPanel from '../components/reports/ReportDownloadPanel.jsx';
 import DateRangeCalendar from '../components/reports/DateRangeCalendar.jsx';
 import PhotoGalleryModal from '../components/reports/PhotoGalleryModal.jsx';
 import ReportPreviewModal from '../components/reports/ReportPreviewModal.jsx';
-import EditSlipModal from '../components/reports/EditSlipModal.jsx';
 import {
   isClosedTicket,
   ticketStatusLabel,
@@ -101,7 +100,6 @@ export default function Reports() {
 
   const [exportOpen, setExportOpen] = useState(false);
   const [previewTicket, setPreviewTicket] = useState(null);
-  const [editSlipTicket, setEditSlipTicket] = useState(null);
   const [galleryTicket, setGalleryTicket] = useState(null);
   const [calendarOpen, setCalendarOpen] = useState(false);
 
@@ -707,26 +705,11 @@ export default function Reports() {
                                     transactionId: t.id,
                                     slip_number: t.slip_number,
                                     images: listTripCameraImages(t),
-                                    editable: isClosedTicket(t),
+                                    editable: false,
                                   })
                                 }
                               >
                                 {photoLabel(photoCount)}
-                              </button>
-                            ) : isClosedTicket(t) ? (
-                              <button
-                                type="button"
-                                className="text-xs text-brand-300 hover:text-brand-200"
-                                onClick={() =>
-                                  setGalleryTicket({
-                                    transactionId: t.id,
-                                    slip_number: t.slip_number,
-                                    images: [],
-                                    editable: true,
-                                  })
-                                }
-                              >
-                                Add photos
                               </button>
                             ) : (
                               '—'
@@ -737,15 +720,6 @@ export default function Reports() {
                               <button type="button" className="text-brand-300" onClick={() => setPreviewTicket(t)}>
                                 Preview
                               </button>
-                              {t.ticket_status !== 'DELETED' && (
-                                <button
-                                  type="button"
-                                  className="text-amber-300 hover:text-amber-200"
-                                  onClick={() => setEditSlipTicket(t)}
-                                >
-                                  Edit Slip
-                                </button>
-                              )}
                               {(isClosedTicket(t) || t.ticket_status === 'DELETED') && (
                                 <button
                                   type="button"
@@ -829,24 +803,16 @@ export default function Reports() {
           transactionId={previewTicket.id}
           slipNumber={previewTicket.slip_number}
           ticket={previewTicket}
-          editable={isClosedTicket(previewTicket)}
+          editable={false}
           onClose={() => setPreviewTicket(null)}
           onPhotosUpdated={refreshTicketRow}
-        />
-      )}
-
-      {editSlipTicket && (
-        <EditSlipModal
-          ticket={editSlipTicket}
-          onClose={() => setEditSlipTicket(null)}
-          onSaved={refreshTicketRow}
         />
       )}
 
       {galleryTicket && (
         <PhotoGalleryModal
           ticket={galleryTicket}
-          editable={galleryTicket.editable}
+          editable={false}
           onClose={() => setGalleryTicket(null)}
           onPhotosUpdated={refreshTicketRow}
         />

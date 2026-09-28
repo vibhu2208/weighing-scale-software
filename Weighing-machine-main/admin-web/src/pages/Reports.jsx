@@ -15,7 +15,7 @@ function SummaryCard({ label, value }) {
 
 export default function Reports() {
   const [period, setPeriod] = useState('last_7_days');
-  const [ticketStatus, setTicketStatus] = useState('CLOSED');
+  const [ticketStatus, setTicketStatus] = useState('all');
   const [operator, setOperator] = useState('all');
   const [material, setMaterial] = useState('all');
   const [search, setSearch] = useState('');

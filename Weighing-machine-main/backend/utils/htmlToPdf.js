@@ -74,12 +74,18 @@ async function renderHtmlToPdf(html, options = {}) {
       })
     `);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const pdf = await win.webContents.printToPDF({
-      printBackground: true,
-      paperWidth: options.paperWidth ?? 8.27,
-      paperHeight: options.paperHeight ?? 11.69,
-      margins: options.margins ?? { marginType: 'default' },
-    });
+    const pdfTimeoutMs = Number(options.timeoutMs) || 90000;
+    const pdf = await Promise.race([
+      win.webContents.printToPDF({
+        printBackground: true,
+        paperWidth: options.paperWidth ?? 8.27,
+        paperHeight: options.paperHeight ?? 11.69,
+        margins: options.margins ?? { marginType: 'default' },
+      }),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('PDF render timed out')), pdfTimeoutMs);
+      }),
+    ]);
     return { ok: true, pdf };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };

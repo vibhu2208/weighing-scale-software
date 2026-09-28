@@ -94,7 +94,7 @@ function seed(db) {
     const adminId = uuidv4();
     db.prepare(
       `INSERT OR IGNORE INTO operators (id, name, pin, role, status, created_at)
-       VALUES (?, 'Admin', '1234', 'admin', 'active', ?)`,
+       VALUES (?, 'Admin', '4916', 'admin', 'active', ?)`,
     ).run(adminId, now);
 
     const adminRow = db
