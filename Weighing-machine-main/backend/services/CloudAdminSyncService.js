@@ -52,7 +52,14 @@ function intervalSeconds() {
 }
 
 function getSiteId() {
-  return (process.env.WEIGHBRIDGE_ID || SettingsService.get('WEIGHBRIDGE_ID') || 'WB-03').trim();
+  // Normalize "WB - 03" → "WB-03" so commands/mirror always match admin SITE_ID.
+  return (
+    process.env.WEIGHBRIDGE_ID ||
+    SettingsService.get('WEIGHBRIDGE_ID') ||
+    'WB-03'
+  )
+    .trim()
+    .replace(/\s+/g, '');
 }
 
 function enqueuePush(transactionId) {
@@ -132,6 +139,13 @@ async function pushTransaction(txn, options = {}) {
     );
   }
 
+  // Upsert by slip so edits refresh the same admin row even if local_id differs.
+  // Clear any other mirror row that owns this local_id to avoid unique conflicts.
+  await pg.query(
+    'DELETE FROM transactions_mirror WHERE site_id = $1 AND local_id = $2 AND slip_number <> $3',
+    [siteId, txn.id, txn.slip_number],
+  );
+
   await pg.query(
     `INSERT INTO transactions_mirror (
       site_id, local_id, slip_number, truck_number, rfid_tag,
@@ -145,8 +159,8 @@ async function pushTransaction(txn, options = {}) {
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
       $20,$21,$22,$23,$24,$25,$26, now()
     )
-    ON CONFLICT (site_id, local_id) DO UPDATE SET
-      slip_number = EXCLUDED.slip_number,
+    ON CONFLICT (site_id, slip_number) DO UPDATE SET
+      local_id = EXCLUDED.local_id,
       truck_number = EXCLUDED.truck_number,
       rfid_tag = EXCLUDED.rfid_tag,
       customer_name = EXCLUDED.customer_name,
@@ -184,7 +198,100 @@ async function pushTransaction(txn, options = {}) {
     ],
   );
 
+  // Local is source of truth for imported remote trips (slip remaps, edits, etc.).
+  try {
+    await syncRemoteTripFromLocal(txn);
+  } catch (err) {
+    logger.warn('CloudAdminSync remote_trips refresh from local failed', {
+      id: txn.id,
+      remotePgId: txn.remote_pg_id || null,
+      message: err.message,
+    });
+  }
+
   return { ok: true, slip: txn.slip_number };
+}
+
+/**
+ * Overwrite remote_trips with the weighbridge's current ticket fields.
+ * Frees remapped slips so admin can create a new remote trip on the old number.
+ */
+async function syncRemoteTripFromLocal(txn) {
+  const remoteId = String(txn?.remote_pg_id || '').trim();
+  if (!remoteId || !txn?.slip_number) {
+    return { ok: false, skipped: true };
+  }
+
+  const existingRes = await pg.query(
+    'SELECT id, slip_number FROM remote_trips WHERE id = $1 LIMIT 1',
+    [remoteId],
+  );
+  const existing = existingRes.rows[0];
+  if (!existing) return { ok: false, skipped: true, reason: 'no_remote_row' };
+
+  const newSlip = String(txn.slip_number).trim();
+  let slipToWrite = newSlip;
+  if (String(existing.slip_number).trim() !== newSlip) {
+    const clash = await pg.query(
+      `SELECT id FROM remote_trips WHERE slip_number = $1 AND id <> $2 LIMIT 1`,
+      [newSlip, remoteId],
+    );
+    if (clash.rows[0]) {
+      logger.warn('remote_trips slip remap blocked — target slip already used', {
+        remoteId,
+        oldSlip: existing.slip_number,
+        newSlip,
+        takenBy: clash.rows[0].id,
+      });
+      slipToWrite = existing.slip_number;
+    } else {
+      logger.info('remote_trips slip updated from local', {
+        remoteId,
+        oldSlip: existing.slip_number,
+        newSlip,
+      });
+    }
+  }
+
+  await pg.query(
+    `UPDATE remote_trips SET
+      slip_number = $2,
+      truck_number = COALESCE(NULLIF($3, ''), truck_number),
+      rfid_tag = $4,
+      customer_name = COALESCE(NULLIF($5, ''), customer_name),
+      destination = COALESCE(NULLIF($6, ''), destination),
+      material = COALESCE(NULLIF($7, ''), material),
+      operator_name = COALESCE(NULLIF($8, ''), operator_name),
+      transporter = $9,
+      vehicle_type = $10,
+      tare_weight = COALESCE($11, tare_weight),
+      gross_weight = COALESCE($12, gross_weight),
+      timestamp_in = COALESCE($13, timestamp_in),
+      timestamp_out = COALESCE($14, timestamp_out),
+      local_id = $15,
+      synced_to_local = true,
+      synced_at = COALESCE(synced_at, now())
+     WHERE id = $1`,
+    [
+      remoteId,
+      slipToWrite,
+      String(txn.truck_number || '').trim().toUpperCase(),
+      txn.rfid_tag || null,
+      txn.customer_name || null,
+      txn.destination || null,
+      txn.material || null,
+      txn.operator_name || null,
+      txn.vehicle?.transporter || txn.transporter || null,
+      txn.vehicle?.vehicle_type || txn.vehicle_type || null,
+      Number.isFinite(Number(txn.tare_weight)) ? Number(txn.tare_weight) : null,
+      Number.isFinite(Number(txn.gross_weight)) ? Number(txn.gross_weight) : null,
+      txn.timestamp_in || null,
+      txn.timestamp_out || null,
+      txn.id,
+    ],
+  );
+
+  return { ok: true, slip: slipToWrite, remoteId };
 }
 
 async function deleteMirrorRow(slipNumber) {
@@ -209,6 +316,39 @@ async function processPushQueue() {
   }
 }
 
+/**
+ * Always push every OPEN ticket (no LIMIT). Catch-up used to mix OPEN with
+ * recent CLOSED ordered by timestamp_out — busy sites then starved open rows
+ * out of the top 150, so admin Reports never showed them.
+ */
+async function pushAllOpenTickets() {
+  const { getDb } = require('../database/db');
+  const rows = getDb()
+    .prepare(
+      `SELECT id FROM transactions
+       WHERE ticket_status = ?
+       ORDER BY COALESCE(timestamp_in, updated_at) DESC`,
+    )
+    .all(TICKET_STATUS.OPEN);
+  let ok = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const txn = TransactionService.getById(row.id);
+    if (!txn) continue;
+    try {
+      await pushTransaction(txn);
+      ok += 1;
+    } catch (err) {
+      failed += 1;
+      logger.warn('CloudAdminSync open push failed', { id: row.id, message: err.message });
+    }
+  }
+  if (rows.length) {
+    logger.info('CloudAdminSync pushed OPEN tickets', { total: rows.length, ok, failed });
+  }
+  return { total: rows.length, ok, failed };
+}
+
 async function pushRecentTickets() {
   try {
     const RemoteTripSyncService = require('./RemoteTripSyncService');
@@ -227,23 +367,22 @@ async function pushRecentTickets() {
   }
 
   const { getDb } = require('../database/db');
+  // Opens first — must not compete with closed slips for the LIMIT slot.
+  await pushAllOpenTickets();
   const rows = getDb()
     .prepare(
-      `SELECT id, ticket_status FROM transactions
-       WHERE ticket_status IN (?, ?, ?)
+      `SELECT id FROM transactions
+       WHERE ticket_status IN (?, ?)
        ORDER BY COALESCE(timestamp_out, updated_at) DESC LIMIT 150`,
     )
-    .all(TICKET_STATUS.OPEN, TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
+    .all(TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
   for (const row of rows) {
-    // Open tickets keep changing — always re-push. Closed use catchUpDone.
-    if (row.ticket_status !== TICKET_STATUS.OPEN && catchUpDone.has(row.id)) continue;
+    if (catchUpDone.has(row.id)) continue;
     const txn = TransactionService.getById(row.id);
     if (!txn) continue;
     try {
       await pushTransaction(txn, { onlyIfMissing: true });
-      if (txn.ticket_status !== TICKET_STATUS.OPEN) {
-        catchUpDone.add(row.id);
-      }
+      catchUpDone.add(row.id);
     } catch (err) {
       logger.warn('CloudAdminSync catch-up failed', { id: row.id, message: err.message });
     }
@@ -273,13 +412,49 @@ async function markCommand(id, status, error) {
   );
 }
 
+function isTransientS3Error(err) {
+  const msg = String(err?.message || err || '');
+  // Region/endpoint misconfig will never succeed until settings change — fail the command.
+  if (/PermanentRedirect|specified endpoint|AuthorizationHeaderMalformed/i.test(msg)) {
+    return false;
+  }
+  return /timeout|socket|ECONNRESET|ETIMEDOUT|ENOTFOUND|S3 .+ failed after/i.test(msg);
+}
+
 async function applyCommand(row) {
   const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload || {};
   if (row.type === 'edit_report') {
-    await AdminReportService.applyRemoteUpdate(payload);
-    await deleteMirrorRow(payload.slipNumber);
-    const txn = TransactionService.getBySlipNumber(payload.slipNumber);
-    if (txn) await pushTransaction(txn);
+    // Apply locally first, then refresh mirror. Never delete-before-push:
+    // a failed S3/mirror push used to leave admin Reports empty while the
+    // command stayed pending / blocked later syncs.
+    const result = await AdminReportService.applyRemoteUpdate(payload);
+    const lookupSlip = result?.slip_number || payload.newSlipNumber || payload.slipNumber;
+    const txn =
+      TransactionService.getById(result?.transactionId) ||
+      TransactionService.getBySlipNumber(lookupSlip);
+    const wantTruck = String(
+      payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
+    )
+      .trim()
+      .toUpperCase();
+    if (wantTruck) {
+      const gotTruck = String(txn?.truck_number || '').trim().toUpperCase();
+      if (gotTruck !== wantTruck) {
+        throw new Error(
+          `Vehicle number not applied on PC (wanted ${wantTruck}, got ${gotTruck || 'empty'})`,
+        );
+      }
+    }
+    if (txn) {
+      try {
+        await pushTransaction(txn);
+      } catch (err) {
+        logger.warn('CloudAdminSync mirror push after edit failed', {
+          slip: payload.slipNumber,
+          message: err.message,
+        });
+      }
+    }
     return;
   }
   if (row.type === 'delete_report') {
@@ -287,21 +462,41 @@ async function applyCommand(row) {
     await deleteMirrorRow(payload.slipNumber);
     return;
   }
+  if (row.type === 'sync_open_tickets') {
+    const result = await pushAllOpenTickets();
+    logger.info('CloudAdminSync sync_open_tickets command done', result);
+    return;
+  }
   throw new Error(`Unknown command type: ${row.type}`);
 }
 
 async function pullCommands() {
+  const siteId = getSiteId();
   const res = await pg.query(
     `SELECT id, type, payload FROM admin_commands
      WHERE site_id = $1 AND status = 'pending'
      ORDER BY created_at ASC LIMIT 20`,
-    [getSiteId()],
+    [siteId],
   );
-  for (const row of res.rows || []) {
+  const rows = res.rows || [];
+  if (rows.length) {
+    logger.info('CloudAdminSync pulling commands', { siteId, count: rows.length });
+  }
+  for (const row of rows) {
     try {
       await applyCommand(row);
       await markCommand(row.id, 'applied', null);
+      logger.info('CloudAdminSync command applied', { id: row.id, type: row.type });
     } catch (err) {
+      // Keep transient S3 timeouts pending so the next sync cycle retries.
+      if (row.type === 'edit_report' && isTransientS3Error(err)) {
+        await markCommand(row.id, 'pending', `retry: ${err.message}`);
+        logger.warn('CloudAdminSync edit_report deferred (S3 timeout) — will retry', {
+          id: row.id,
+          message: err.message,
+        });
+        continue;
+      }
       await markCommand(row.id, 'failed', err.message);
       logger.error('CloudAdminSync command failed', { id: row.id, message: err.message });
     }
@@ -390,8 +585,12 @@ async function processNow() {
       rerunRequested = false;
       passes += 1;
       await heartbeat();
-      await processPushQueue();
+      // Apply admin edits before outbound mirror pushes so a stuck S3 upload
+      // cannot leave edit_report commands pending for hours.
       await pullCommands();
+      await processPushQueue();
+      // Keep open tickets mirrored even when the catch-up job is busy with closed slips.
+      await pushAllOpenTickets();
       await pushWeightFeatureMeta();
       await pullSettings();
       await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
@@ -404,6 +603,16 @@ async function processNow() {
       setTimeout(() => {
         processNow().catch(() => {});
       }, 400);
+    } else if (pushQueue.size > 0) {
+      // Items enqueued while we were busy must not wait for the next cron tick —
+      // that race left remote imports missing from admin Reports.
+      setImmediate(() => {
+        processNow().catch((err) => {
+          logger.warn('CloudAdminSync drain after enqueue race failed', {
+            message: err.message,
+          });
+        });
+      });
     }
   }
 }
@@ -439,14 +648,11 @@ function start() {
   const sec = intervalSeconds();
   const cronExpr = sec >= 60 ? `0 */${Math.max(1, Math.floor(sec / 60))} * * * *` : `*/${sec} * * * * *`;
   cronJob = cron.schedule(cronExpr, () => processNow().catch(() => {}));
-  catchUpJob = cron.schedule('0 */10 * * * *', () => pushRecentTickets().catch(() => {}));
+  catchUpJob = cron.schedule('0 * * * * *', () => pushRecentTickets().catch(() => {}));
   logger.info('CloudAdminSync started', { siteId: getSiteId(), intervalSec: sec });
   startListen().catch(() => {});
   processNow().catch(() => {});
-  catchUpTimer = setTimeout(() => {
-    catchUpTimer = null;
-    pushRecentTickets().catch(() => {});
-  }, 120000);
+  pushRecentTickets().catch(() => {});
 }
 
 function stop() {
@@ -461,6 +667,14 @@ function stop() {
 }
 
 module.exports = {
-  start, stop, processNow, enqueuePush, pushTransaction, deleteMirrorRow,
-  pushRecentTickets, pushRecentClosed,
+  start,
+  stop,
+  processNow,
+  enqueuePush,
+  pushTransaction,
+  pushAllOpenTickets,
+  pushRecentTickets,
+  pushRecentClosed,
+  deleteMirrorRow,
+  syncRemoteTripFromLocal,
 };

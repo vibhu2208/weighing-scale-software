@@ -57,7 +57,7 @@ const ENV_DEFAULTS = Object.freeze({
   COMPANY_ADDRESS: '',
   COMPANY_PHONE: '',
   SITE_NAME: 'BANDHWARI SLF SITE GURURAM (HARYANA) DCC',
-  WEIGHBRIDGE_ID: 'WB - 03',
+  WEIGHBRIDGE_ID: 'WB-03',
   REPORT_COMPANY_NAME: 'DAYA CHARAN & COMPANY',
   REPORT_LOGO_PATH: '',
   PRINTER_NAME: '',
@@ -71,7 +71,7 @@ const ENV_DEFAULTS = Object.freeze({
   WEIGHT_ADJUSTMENT_AUTO_DISABLE_MINUTES: '',
   AWS_ACCESS_KEY_ID: '',
   AWS_SECRET_ACCESS_KEY: '',
-  AWS_REGION: 'ap-south-1',
+  AWS_REGION: 'eu-north-1',
   AWS_S3_BUCKET: 'k1-k2',
   CLOUD_BACKUP_INTERVAL_MINUTES: '60',
   CLOUD_LOG_UPLOAD_ENABLED: 'true',
@@ -106,7 +106,8 @@ const SettingsService = {
     const row = getDb()
       .prepare('SELECT value FROM settings WHERE key = ?')
       .get(key);
-    if (row && row.value !== undefined && row.value !== null) {
+    // Empty string in DB must not block .env fallback (common for AWS_* keys).
+    if (row && row.value !== undefined && row.value !== null && String(row.value) !== '') {
       return row.value;
     }
     return resolveDefault(key);

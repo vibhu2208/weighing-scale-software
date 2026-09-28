@@ -26,6 +26,7 @@ export default defineConfig({
       '/sync': 'http://127.0.0.1:3001',
       '/media': 'http://127.0.0.1:3001',
       '/remote-trips': 'http://127.0.0.1:3001',
+      '/slip-reservations': 'http://127.0.0.1:3001',
       '/health': 'http://127.0.0.1:3001',
     },
   },

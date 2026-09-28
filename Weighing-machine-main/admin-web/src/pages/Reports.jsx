@@ -26,6 +26,7 @@ export default function Reports() {
   const [filterOptions, setFilterOptions] = useState({ operators: [], materials: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [pdfBusy, setPdfBusy] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -123,6 +124,7 @@ export default function Reports() {
           <option value="yesterday">Yesterday</option>
           <option value="last_7_days">Last 7 days</option>
           <option value="this_month">This month</option>
+          <option value="last_month">Previous month</option>
         </select>
         <select
           className="field-input"
@@ -191,7 +193,7 @@ export default function Reports() {
               <th className="p-3">Gross</th>
               <th className="p-3">Tare</th>
               <th className="p-3">Net</th>
-              <th className="p-3">Closed</th>
+              <th className="p-3">In / Out</th>
               <th className="p-3">Status</th>
               <th className="p-3">Actions</th>
             </tr>
@@ -206,9 +208,21 @@ export default function Reports() {
                 <td className="p-3">{fmtKg(row.gross_weight)}</td>
                 <td className="p-3">{fmtKg(row.tare_weight)}</td>
                 <td className="p-3">{fmtKg(row.net_weight)}</td>
-                <td className="p-3 text-xs">{fmtDate(row.timestamp_out)}</td>
+                <td className="p-3 text-xs">
+                  {row.ticket_status === 'OPEN'
+                    ? fmtDate(row.timestamp_in)
+                    : fmtDate(row.timestamp_out || row.timestamp_in)}
+                </td>
                 <td className="p-3">
-                  <Badge tone={row.ticket_status === 'CLOSED' ? 'success' : 'default'}>
+                  <Badge
+                    tone={
+                      row.ticket_status === 'CLOSED'
+                        ? 'success'
+                        : row.ticket_status === 'OPEN'
+                          ? 'warning'
+                          : 'default'
+                    }
+                  >
                     {row.ticket_status}
                   </Badge>
                 </td>
@@ -219,15 +233,25 @@ export default function Reports() {
                   >
                     Edit
                   </Link>
-                  {row.report_url && (
-                    <a
-                      href={row.report_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-emerald-400 hover:underline text-xs"
+                  {row.ticket_status === 'CLOSED' && (
+                    <button
+                      type="button"
+                      className="text-emerald-400 hover:underline text-xs disabled:opacity-50"
+                      disabled={pdfBusy === row.slip_number}
+                      onClick={async () => {
+                        setPdfBusy(row.slip_number);
+                        setError('');
+                        try {
+                          await api.downloadReportPdf(row.slip_number);
+                        } catch (err) {
+                          setError(err.message);
+                        } finally {
+                          setPdfBusy('');
+                        }
+                      }}
                     >
-                      PDF
-                    </a>
+                      {pdfBusy === row.slip_number ? 'PDF…' : 'PDF'}
+                    </button>
                   )}
                 </td>
               </tr>
@@ -235,7 +259,8 @@ export default function Reports() {
             {!loading && rows.length === 0 && (
               <tr>
                 <td colSpan={10} className="p-6 text-center text-slate-500">
-                  No reports found. Close a ticket on the weighbridge PC to sync data.
+                  No tickets found for this filter. Open or closed tickets sync from the weighbridge
+                  PC — check Sync Status if the list stays empty.
                 </td>
               </tr>
             )}

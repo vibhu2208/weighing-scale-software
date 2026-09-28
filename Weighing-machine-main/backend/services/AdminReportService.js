@@ -75,6 +75,40 @@ function findClosedBySlip(slipNumber) {
   return TransactionService.getBySlipNumber(slip);
 }
 
+function requestedNewSlipNumber(data, currentSlip) {
+  const raw = data.newSlipNumber != null && String(data.newSlipNumber).trim() !== ''
+    ? data.newSlipNumber
+    : data.slip_number;
+  if (raw == null || String(raw).trim() === '') return null;
+  const next = normalizeSlipNumber(raw);
+  const current = String(currentSlip || '').trim().toUpperCase();
+  if (next === current) return null;
+  return next;
+}
+
+function applySlipRename(txn, newSlip) {
+  const oldSlip = String(txn.slip_number || '').trim();
+  if (!oldSlip) {
+    throw new Error('Ticket has no slip number to change');
+  }
+  if (String(newSlip).trim().toUpperCase() === oldSlip.toUpperCase()) {
+    return null;
+  }
+  const conflict = TransactionService.getBySlipNumber(newSlip);
+  if (conflict && conflict.id !== txn.id) {
+    throw new Error(`Slip number ${newSlip} is already used by another ticket`);
+  }
+  TransactionService.updateSlipNumber(txn.id, newSlip);
+  return { oldSlip, newSlip };
+}
+
+function cleanupOldSlipFilesAfterRename(oldSlip, newSlip, reportPath) {
+  const keep = new Set();
+  if (reportPath) keep.add(path.resolve(reportPath));
+  if (newSlip) keep.add(path.resolve(path.join(PATHS.REPORTS, `${newSlip}_report.pdf`)));
+  removeOldSlipFiles(oldSlip, keep);
+}
+
 function requireClosedReport(txn) {
   if (!txn) {
     throw new Error('Report not found for that slip number');
@@ -113,7 +147,7 @@ function getClosedReportBySlip(slipNumber) {
 }
 
 async function performClosedReportUpdate(data = {}) {
-  const slip = String(data.slipNumber || data.slip_number || '').trim();
+  const slip = String(data.slipNumber || '').trim() || String(data.slip_number || '').trim();
   const txn = requireClosedReport(
     data.transactionId
       ? TransactionService.getById(data.transactionId)
@@ -164,6 +198,15 @@ async function performClosedReportUpdate(data = {}) {
       const value = String(data[key]).trim();
       if (!value) throw new Error(`${key.replace(/_/g, ' ')} cannot be empty`);
       updates[key] = value;
+    }
+  }
+
+  const truckRaw = data.truck_number ?? data.truckNumber ?? data.vehicle_number;
+  if (truckRaw != null && truckRaw !== '') {
+    const truckNumber = String(truckRaw).trim().toUpperCase();
+    if (!truckNumber) throw new Error('Vehicle number cannot be empty');
+    if (truckNumber !== String(txn.truck_number || '').toUpperCase()) {
+      updates.truck_number = truckNumber;
     }
   }
 
@@ -257,18 +300,45 @@ async function performClosedReportUpdate(data = {}) {
     }
   }
 
-  if (!Object.keys(updates).length) throw new Error('No changes to save');
+  const newSlip = requestedNewSlipNumber(data, txn.slip_number);
+  if (!Object.keys(updates).length && !newSlip) throw new Error('No changes to save');
 
-  TransactionService.updateFields(txn.id, updates);
+  if (Object.keys(updates).length) {
+    TransactionService.updateFields(txn.id, updates);
+  }
+
+  let renamed = null;
+  if (newSlip) {
+    renamed = applySlipRename(txn, newSlip);
+  }
+
   const regen = await ReportService.regenerateTripPDF(txn.id);
-  if (!regen.ok) throw new Error(regen.error || 'Report regeneration failed');
+  if (!regen.ok) {
+    if (renamed) TransactionService.updateSlipNumber(txn.id, renamed.oldSlip);
+    throw new Error(regen.error || 'Report regeneration failed');
+  }
+
+  if (renamed) {
+    cleanupOldSlipFilesAfterRename(renamed.oldSlip, renamed.newSlip, regen.path);
+  }
 
   const updated = TransactionService.getById(txn.id);
+  if (updates.truck_number) {
+    const got = String(updated?.truck_number || '').trim().toUpperCase();
+    const want = String(updates.truck_number).trim().toUpperCase();
+    if (got !== want) {
+      throw new Error(
+        `Vehicle number did not save (wanted ${want}, got ${got || 'empty'})`,
+      );
+    }
+  }
   return {
     ok: true,
     transaction: toPublicTransaction(updated),
     reportPath: regen.path,
     slip_number: updated.slip_number,
+    oldSlipNumber: renamed?.oldSlip || null,
+    newSlipNumber: renamed?.newSlip || null,
     transactionId: updated.id,
   };
 }
@@ -292,22 +362,12 @@ async function updateSlipNumber(data = {}) {
     throw new Error('Ticket not found');
   }
 
-  const oldSlip = String(txn.slip_number || '').trim();
-  if (!oldSlip) {
-    throw new Error('Ticket has no slip number to change');
-  }
-
   const newSlip = normalizeSlipNumber(data.newSlipNumber || data.slip_number);
-  if (newSlip === oldSlip) {
+  const renamed = applySlipRename(txn, newSlip);
+  if (!renamed) {
     throw new Error('New slip number is the same as the current one');
   }
-
-  const conflict = TransactionService.getBySlipNumber(newSlip);
-  if (conflict && conflict.id !== txn.id) {
-    throw new Error(`Slip number ${newSlip} is already used by another ticket`);
-  }
-
-  TransactionService.updateSlipNumber(txn.id, newSlip);
+  const { oldSlip } = renamed;
 
   let reportPath = null;
   if (isClosedTrip(txn)) {

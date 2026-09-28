@@ -50,6 +50,53 @@ async function request(path, options = {}) {
   return json;
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read image file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function downloadPdfBlob(path, filename) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch(`${API_URL}${path}`, { headers });
+  } catch {
+    throw new Error(
+      import.meta.env.DEV
+        ? 'Cannot reach admin API — run "npm run dev" in the admin-api folder (port 3001)'
+        : 'Network error — check VITE_API_URL and that the API is online',
+    );
+  }
+
+  if (res.status === 401) {
+    setToken(null);
+    window.location.href = '/login';
+    throw new Error('Session expired');
+  }
+
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.error || `PDF download failed (${res.status})`);
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'report.pdf';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   login(email, password) {
     return request('/auth/login', {
@@ -69,6 +116,10 @@ export const api = {
 
   getReport(slip) {
     return request(`/reports/${encodeURIComponent(slip)}`);
+  },
+
+  async downloadReportPdf(slip) {
+    return downloadPdfBlob(`/reports/${encodeURIComponent(slip)}/pdf`, `${slip}_report.pdf`);
   },
 
   editReport(slip, body) {
@@ -131,6 +182,24 @@ export const api = {
     return request('/sync/status');
   },
 
+  requestSyncOpenTickets() {
+    return request('/sync/sync-open-tickets', {
+      method: 'POST',
+    });
+  },
+
+  retrySyncCommand(id) {
+    return request(`/sync/commands/${encodeURIComponent(id)}/retry`, {
+      method: 'POST',
+    });
+  },
+
+  retryFailedSyncCommands() {
+    return request('/sync/commands/retry-failed', {
+      method: 'POST',
+    });
+  },
+
   getUploadUrl(slip, slot, contentType, pass = 'departure') {
     return request('/media/upload-url', {
       method: 'POST',
@@ -142,6 +211,34 @@ export const api = {
     return request('/media/remote-trip-upload-url', {
       method: 'POST',
       body: JSON.stringify({ slip, slot, contentType, pass }),
+    });
+  },
+
+  async uploadRemoteTripPhoto(slip, slot, file, pass = 'departure') {
+    const imageBase64 = await fileToDataUrl(file);
+    return request('/media/remote-trip-upload', {
+      method: 'POST',
+      body: JSON.stringify({
+        slip,
+        slot,
+        pass,
+        contentType: file.type || 'image/jpeg',
+        imageBase64,
+      }),
+    });
+  },
+
+  async uploadMirrorPhoto(slip, slot, file, pass = 'departure') {
+    const imageBase64 = await fileToDataUrl(file);
+    return request('/media/upload', {
+      method: 'POST',
+      body: JSON.stringify({
+        slip,
+        slot,
+        pass,
+        contentType: file.type || 'image/jpeg',
+        imageBase64,
+      }),
     });
   },
 
@@ -162,6 +259,13 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ photoS3Keys }),
     });
+  },
+
+  async downloadRemoteTripPdf(id, slipNumber) {
+    return downloadPdfBlob(
+      `/remote-trips/${encodeURIComponent(id)}/pdf`,
+      `${slipNumber || id}_report.pdf`,
+    );
   },
 
   getSlipReservations(params = {}) {

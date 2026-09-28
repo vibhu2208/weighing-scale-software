@@ -47,15 +47,22 @@ router.get('/', async (req, res) => {
 router.post('/plan', async (req, res) => {
   try {
     const createdBy = req.user?.email || req.user?.id || null;
-    const rows = await planReservations(req.body || {}, createdBy);
+    const result = await planReservations(req.body || {}, createdBy);
+    const rows = Array.isArray(result) ? result : result.rows || [];
+    const adjustments = Array.isArray(result) ? [] : result.adjustments || [];
     return res.status(201).json({
       ok: true,
       rows,
       count: rows.length,
+      adjustments,
       fire_early_minutes: FIRE_EARLY_MINUTES,
     });
   } catch (err) {
-    const status = /required|Invalid|Maximum|at least|Provide/i.test(err.message) ? 400 : 500;
+    const status = /required|Invalid|Maximum|at least|Provide|more than 1 minute|apart|free minute/i.test(
+      err.message,
+    )
+      ? 400
+      : 500;
     return res.status(status).json({ ok: false, error: err.message });
   }
 });

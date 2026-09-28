@@ -509,6 +509,7 @@ const TransactionService = {
       'operator_id',
       'notes',
       'ticket_status',
+      'truck_number',
       'material',
       'driver',
       'customer_name',
@@ -529,6 +530,13 @@ const TransactionService = {
     ];
     const sets = [];
     const params = [];
+
+    const unknown = Object.keys(fields).filter(
+      (key) => fields[key] !== undefined && !allowed.includes(key),
+    );
+    if (unknown.length) {
+      throw new Error(`Cannot update fields: ${unknown.join(', ')}`);
+    }
 
     for (const key of allowed) {
       if (fields[key] !== undefined) {
@@ -576,13 +584,19 @@ const TransactionService = {
     if (existing.ticket_status !== TICKET_STATUS.OPEN) {
       throw new Error('Only OPEN tickets can be cancelled');
     }
-    return this.updateFields(id, {
+    const updated = this.updateFields(id, {
       ticket_status: TICKET_STATUS.CANCELLED,
       status: TRANSACTION_STATUS.CANCELLED,
       notes: existing.notes
         ? `${existing.notes}; Cancelled by operator`
         : 'Cancelled by operator',
     });
+    try {
+      require('./CloudAdminSyncService').enqueuePush(id);
+    } catch (_e) {
+      /* optional */
+    }
+    return updated;
   },
 
   getAll(filters = {}) {

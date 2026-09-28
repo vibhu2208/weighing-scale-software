@@ -3,7 +3,7 @@ export function toDatetimeLocalValue(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 export function fmtKg(kg) {
@@ -44,6 +44,12 @@ export function periodToRange(period) {
     case 'this_month':
       from = new Date(now.getFullYear(), now.getMonth(), 1);
       break;
+    case 'last_month': {
+      const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      from = new Date(prev.getFullYear(), prev.getMonth(), 1);
+      to = new Date(prev.getFullYear(), prev.getMonth() + 1, 0, 23, 59, 59, 999);
+      break;
+    }
     default:
       from = startOfDay(new Date(now.getTime() - 6 * 86400000));
   }

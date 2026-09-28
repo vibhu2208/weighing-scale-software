@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { query } = require('../db');
+const { query, getSiteId } = require('../db');
 const { authMiddleware } = require('../auth');
 const {
   createRemoteTrip,
@@ -9,14 +9,71 @@ const {
   getRemoteTrip,
   attachPhotos,
 } = require('../services/remoteTripService');
+const { generateTripPdf } = require('../services/reportPdfService');
+const { isConfigured, presignGet } = require('../services/s3Presign');
 
 const router = express.Router();
 router.use(authMiddleware);
 
+async function attachTripMedia(row) {
+  if (!row || !isConfigured()) return row;
+  const out = { ...row };
+  if (out.report_s3_key) {
+    try {
+      out.report_url = await presignGet(out.report_s3_key);
+    } catch {
+      out.report_url = null;
+    }
+  }
+  const photoCols = [
+    'arrival_photo_1',
+    'arrival_photo_2',
+    'arrival_photo_3',
+    'departure_photo_1',
+    'departure_photo_2',
+    'departure_photo_3',
+  ];
+  out.has_photos = photoCols.some((c) => Boolean(out[c]));
+  return out;
+}
+
 router.get('/', async (req, res) => {
   try {
     const rows = await listRemoteTrips(query, req.query || {});
-    return res.json({ ok: true, rows });
+    const withMedia = await Promise.all(rows.map(attachTripMedia));
+    return res.json({ ok: true, rows: withMedia });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const trip = await getRemoteTrip(query, req.params.id);
+    if (!trip) return res.status(404).json({ ok: false, error: 'Not found' });
+
+    const siteId = getSiteId();
+    const built = await generateTripPdf(trip, { siteId, upload: true });
+
+    if (built.report_s3_key) {
+      await query(`UPDATE remote_trips SET report_s3_key = $2 WHERE id = $1`, [
+        trip.id,
+        built.report_s3_key,
+      ]);
+      await query(
+        `UPDATE transactions_mirror
+         SET report_s3_key = $3, updated_at = now()
+         WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+        [siteId, trip.slip_number, built.report_s3_key],
+      );
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${built.filename}"`,
+    );
+    return res.send(built.pdf);
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
@@ -26,7 +83,7 @@ router.get('/:id', async (req, res) => {
   try {
     const row = await getRemoteTrip(query, req.params.id);
     if (!row) return res.status(404).json({ ok: false, error: 'Not found' });
-    return res.json({ ok: true, trip: row });
+    return res.json({ ok: true, trip: await attachTripMedia(row) });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

@@ -552,6 +552,23 @@ async function remappingRemoteSlip(row, localConflict) {
      WHERE id = $1`,
     [row.id, newSlip],
   );
+
+  // Drop stale admin mirror row for the old slip so it cannot block reuse.
+  try {
+    const siteId = (process.env.CLOUD_ADMIN_SITE_ID || process.env.SITE_ID || 'WB-03').trim();
+    await pg.query(
+      `DELETE FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+      [siteId, oldSlip],
+    );
+  } catch (err) {
+    logger.warn('Failed to clear mirror row after remote slip remap', {
+      oldSlip,
+      newSlip,
+      message: err.message,
+    });
+  }
+
   logger.warn('Remote trip slip remapped due to local conflict', {
     remoteId: row.id,
     oldSlip,
@@ -630,6 +647,15 @@ async function processRemoteRow(row, attempt = 0) {
     }
     pendingLocalIds.delete(remoteId);
     photoMissCounts.delete(remoteId);
+    // Local may have remapped slip / edited fields — refresh remote_trips + mirror.
+    try {
+      const CloudAdminSyncService = require('./CloudAdminSyncService');
+      const refreshed = TransactionService.getById(alreadyImported.id) || alreadyImported;
+      await CloudAdminSyncService.syncRemoteTripFromLocal(refreshed);
+      CloudAdminSyncService.enqueuePush(alreadyImported.id);
+    } catch (_e) {
+      /* optional */
+    }
     return {
       ok: true,
       reason: 'already_imported',
@@ -677,6 +703,32 @@ async function processRemoteRow(row, attempt = 0) {
   const transaction = importResult.transaction;
   if (!transaction?.id) {
     throw new Error(`Import failed for remote trip ${remoteId}`);
+  }
+
+  // Ensure vehicle type is set (HYWA needs timestamp_in = gross on reports).
+  try {
+    const VehicleService = require('./VehicleService');
+    const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
+    const existing = VehicleService.findByNumber(row.truck_number);
+    if (!existing) {
+      VehicleService.create({
+        vehicle_number: row.truck_number,
+        rfid_tag: row.rfid_tag || null,
+        transporter: row.transporter || null,
+        vehicle_type: vType,
+        status: 'active',
+      });
+    } else if (
+      vType &&
+      String(existing.vehicle_type || '').toLowerCase() !== vType.toLowerCase()
+    ) {
+      VehicleService.update(existing.id, { vehicle_type: vType });
+    }
+  } catch (err) {
+    logger.warn('Remote trip vehicle type sync failed', {
+      truck: row.truck_number,
+      message: err.message,
+    });
   }
 
   if (!importResult.imported && transaction.remote_pg_id !== remoteId) {
@@ -736,6 +788,24 @@ async function processRemoteRow(row, attempt = 0) {
   }
   pendingLocalIds.delete(remoteId);
   photoMissCounts.delete(remoteId);
+
+  // Push into transactions_mirror so the admin Reports panel sees this trip.
+  // Remote imports skip TripCaptureService, which normally calls enqueuePush.
+  try {
+    const CloudAdminSyncService = require('./CloudAdminSyncService');
+    CloudAdminSyncService.enqueuePush(transaction.id);
+    CloudAdminSyncService.processNow().catch((err) => {
+      logger.warn('CloudAdminSync push after remote import failed', {
+        transactionId: transaction.id,
+        message: err.message,
+      });
+    });
+  } catch (err) {
+    logger.warn('CloudAdminSync enqueue after remote import failed', {
+      transactionId: transaction.id,
+      message: err.message,
+    });
+  }
 
   logger.info('Remote trip synced to local', {
     remoteId,

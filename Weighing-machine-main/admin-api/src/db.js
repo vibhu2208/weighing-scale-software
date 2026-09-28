@@ -46,7 +46,7 @@ async function query(text, params = []) {
 }
 
 function getSiteId() {
-  return (process.env.SITE_ID || 'WB-03').trim();
+  return (process.env.SITE_ID || 'WB-03').trim().replace(/\s+/g, '');
 }
 
 module.exports = { query, getPool, isConfigured, getSiteId };

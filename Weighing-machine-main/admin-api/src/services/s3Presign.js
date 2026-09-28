@@ -3,8 +3,8 @@
 const {
   S3Client,
   GetObjectCommand,
-  PutObjectCommand,
   HeadObjectCommand,
+  PutObjectCommand,
   ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -13,7 +13,7 @@ function getConfig() {
   return {
     accessKeyId: (process.env.AWS_ACCESS_KEY_ID || '').trim(),
     secretAccessKey: (process.env.AWS_SECRET_ACCESS_KEY || '').trim(),
-    region: (process.env.AWS_REGION || 'ap-south-1').trim(),
+    region: (process.env.AWS_REGION || 'eu-north-1').trim(),
     bucket: (process.env.AWS_S3_BUCKET || 'k1-k2').trim(),
   };
 }
@@ -51,6 +51,49 @@ async function presignPut(key, contentType = 'image/jpeg', expiresIn = 3600) {
   return getSignedUrl(getClient(), command, { expiresIn });
 }
 
+async function objectExists(key) {
+  if (!isConfigured() || !key) return false;
+  try {
+    await getClient().send(new HeadObjectCommand({ Bucket: getBucket(), Key: key }));
+    return true;
+  } catch (err) {
+    const status = err?.$metadata?.httpStatusCode;
+    if (status === 404 || err?.name === 'NotFound' || err?.name === 'NoSuchKey') return false;
+    throw err;
+  }
+}
+
+async function putObject(key, body, contentType = 'image/jpeg') {
+  if (!isConfigured()) throw new Error('S3 not configured');
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: getBucket(),
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    }),
+  );
+  return key;
+}
+
+async function getObjectBuffer(key) {
+  if (!isConfigured() || !key) return null;
+  try {
+    const res = await getClient().send(
+      new GetObjectCommand({ Bucket: getBucket(), Key: key }),
+    );
+    const chunks = [];
+    for await (const chunk of res.Body) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  } catch (err) {
+    const status = err?.$metadata?.httpStatusCode;
+    if (status === 404 || err?.name === 'NotFound' || err?.name === 'NoSuchKey') return null;
+    throw err;
+  }
+}
+
 function mirrorPhotoKey(siteId, slip, slot, pass = 'departure') {
   return `sites/${siteId}/mirror/${slip}/${pass}_cam-${slot}.jpg`;
 }
@@ -62,17 +105,6 @@ function mirrorReportKey(siteId, slip) {
 function remoteTripPhotoKey(slip, slot, pass = 'departure') {
   const tag = pass === 'arrival' ? 'arrival' : 'departure';
   return `remote-trips/${slip}/${tag}_cam-${slot}.jpg`;
-}
-
-async function objectExists(key) {
-  const s3Key = String(key || '').trim();
-  if (!s3Key || !isConfigured()) return false;
-  try {
-    await getClient().send(new HeadObjectCommand({ Bucket: getBucket(), Key: s3Key }));
-    return true;
-  } catch (_err) {
-    return false;
-  }
 }
 
 async function listKeys(prefix, maxKeys = 40) {
@@ -115,6 +147,8 @@ module.exports = {
   objectExists,
   listKeys,
   inferPhotoFieldFromKey,
+  putObject,
+  getObjectBuffer,
   mirrorPhotoKey,
   mirrorReportKey,
   remoteTripPhotoKey,

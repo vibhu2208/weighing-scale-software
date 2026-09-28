@@ -5,6 +5,9 @@ const { getPool, query } = require('../db');
 const FIRE_EARLY_MINUTES = 5;
 const MISS_AFTER_MINUTES = 30;
 const WORKER_INTERVAL_MS = 30_000;
+/** Planned gap times must be strictly more than 1 minute apart. */
+const MIN_GAP_MS = 60 * 1000;
+const MAX_BUMP_STEPS = 120;
 
 let schemaReady = false;
 let workerTimer = null;
@@ -83,6 +86,91 @@ function parseTimestamp(value, fieldName) {
   return parsed.toISOString();
 }
 
+function assertGapsMoreThanOneMinute(sortedIsoTimes, labelPrefix = 'Trip') {
+  for (let i = 1; i < sortedIsoTimes.length; i += 1) {
+    const prev = new Date(sortedIsoTimes[i - 1]).getTime();
+    const cur = new Date(sortedIsoTimes[i]).getTime();
+    const diff = cur - prev;
+    if (diff <= MIN_GAP_MS) {
+      const prevLabel = new Date(sortedIsoTimes[i - 1]).toLocaleString('en-IN');
+      const curLabel = new Date(sortedIsoTimes[i]).toLocaleString('en-IN');
+      throw new Error(
+        `${labelPrefix} times must be more than 1 minute apart. ` +
+          `"${curLabel}" is only ${Math.max(0, Math.round(diff / 1000))}s after "${prevLabel}".`,
+      );
+    }
+  }
+}
+
+async function loadActiveReservationTimes(queryFn = query, excludeIds = []) {
+  const res = await queryFn(
+    `SELECT id, planned_at, status, slip_number
+     FROM slip_reservations
+     WHERE status IN ('scheduled', 'held', 'missed')
+     ORDER BY planned_at ASC`,
+  );
+  const exclude = new Set(excludeIds.map(String));
+  return (res.rows || [])
+    .filter((r) => !exclude.has(String(r.id)))
+    .map((r) => ({
+      id: r.id,
+      planned_at: new Date(r.planned_at).toISOString(),
+      status: r.status,
+      slip_number: r.slip_number,
+    }));
+}
+
+/**
+ * True if weighbridge mirror has a ticket (live kata) whose in/out falls in the same minute.
+ */
+async function minuteHasLiveWeighment(queryFn, siteId, plannedIso) {
+  const start = new Date(plannedIso);
+  if (Number.isNaN(start.getTime())) return false;
+  const minuteStart = new Date(Math.floor(start.getTime() / MIN_GAP_MS) * MIN_GAP_MS);
+  const minuteEnd = new Date(minuteStart.getTime() + MIN_GAP_MS);
+
+  const res = await queryFn(
+    `SELECT slip_number, ticket_status
+     FROM transactions_mirror
+     WHERE site_id = $1
+       AND ticket_status IN ('OPEN', 'CLOSED')
+       AND (
+         (timestamp_in >= $2 AND timestamp_in < $3)
+         OR (timestamp_out >= $2 AND timestamp_out < $3)
+       )
+     LIMIT 1`,
+    [siteId, minuteStart.toISOString(), minuteEnd.toISOString()],
+  );
+  return res.rows[0] || null;
+}
+
+/**
+ * If the planned minute collides with live weighbridge traffic, bump +1 minute
+ * until that minute is free of mirror OPEN/CLOSED weighments.
+ */
+async function resolveAwayFromLiveTraffic(queryFn, siteId, plannedIso) {
+  let candidate = new Date(plannedIso);
+  if (Number.isNaN(candidate.getTime())) {
+    throw new Error('Invalid planned time');
+  }
+  const bumps = [];
+  for (let step = 0; step < MAX_BUMP_STEPS; step += 1) {
+    const iso = candidate.toISOString();
+    const live = await minuteHasLiveWeighment(queryFn, siteId, iso);
+    if (!live) {
+      return { planned_at: iso, bumps };
+    }
+    bumps.push({
+      from: iso,
+      reason: `weighbridge busy (slip ${live.slip_number}, ${live.ticket_status})`,
+    });
+    candidate = new Date(candidate.getTime() + MIN_GAP_MS);
+  }
+  throw new Error(
+    `Could not find a free minute after ${plannedIso} — weighbridge is continuously busy`,
+  );
+}
+
 function normalizeSlots(body = {}) {
   const rawSlots = Array.isArray(body.slots) ? body.slots : null;
   if (rawSlots && rawSlots.length) {
@@ -125,14 +213,52 @@ async function getCounterHint(queryFn = query) {
 
 async function planReservations(body = {}, createdBy = null) {
   await ensureSchema();
+  const { getSiteId } = require('../db');
+  const siteId = getSiteId();
   const slots = normalizeSlots(body);
   const batchNote = body.note ? String(body.note).trim() : null;
+
+  // Reject batch times that are ≤1 minute apart (before live bumping).
+  const batchSorted = [...slots]
+    .map((s) => s.planned_at)
+    .sort((a, b) => new Date(a) - new Date(b));
+  assertGapsMoreThanOneMinute(batchSorted, 'Planned');
+
+  const existing = await loadActiveReservationTimes();
+
+  const resolved = [];
+  const adjustments = [];
+  for (let i = 0; i < slots.length; i += 1) {
+    const slot = slots[i];
+    const before = slot.planned_at;
+    const { planned_at: after, bumps } = await resolveAwayFromLiveTraffic(
+      query,
+      siteId,
+      before,
+    );
+    if (after !== before) {
+      adjustments.push({
+        trip: i + 1,
+        requested: before,
+        scheduled: after,
+        bumps,
+      });
+    }
+    resolved.push({ ...slot, planned_at: after, original_planned_at: before });
+  }
+
+  // New times vs each other (after bump) and vs already scheduled/held gaps.
+  const allTimes = [
+    ...existing.map((e) => e.planned_at),
+    ...resolved.map((s) => s.planned_at),
+  ].sort((a, b) => new Date(a) - new Date(b));
+  assertGapsMoreThanOneMinute(allTimes, 'Gap');
 
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     const created = [];
-    for (const slot of slots) {
+    for (const slot of resolved) {
       const note = slot.note || batchNote || null;
       const ins = await client.query(
         `INSERT INTO slip_reservations
@@ -141,10 +267,13 @@ async function planReservations(body = {}, createdBy = null) {
          RETURNING *`,
         [slot.planned_at, note, createdBy],
       );
-      created.push(ins.rows[0]);
+      created.push({
+        ...ins.rows[0],
+        original_planned_at: slot.original_planned_at,
+      });
     }
     await client.query('COMMIT');
-    return created;
+    return { rows: created, adjustments };
   } catch (err) {
     try {
       await client.query('ROLLBACK');
@@ -413,6 +542,7 @@ async function markReservationUsed(slipNumber, remoteTripId = null, queryFn = qu
 module.exports = {
   FIRE_EARLY_MINUTES,
   MISS_AFTER_MINUTES,
+  MIN_GAP_MS,
   ensureSchema,
   getCounterHint,
   planReservations,
