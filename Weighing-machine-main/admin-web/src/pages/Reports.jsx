@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
-import { fmtDate, fmtKg, periodToRange } from '../lib/format.js';
+import { customDateToRange, fmtDate, fmtKg, periodToRange } from '../lib/format.js';
 
 function SummaryCard({ label, value }) {
   return (
@@ -15,10 +15,13 @@ function SummaryCard({ label, value }) {
 
 export default function Reports() {
   const [period, setPeriod] = useState('last_7_days');
+  const [customDate, setCustomDate] = useState('');
   const [ticketStatus, setTicketStatus] = useState('all');
   const [operator, setOperator] = useState('all');
   const [material, setMaterial] = useState('all');
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
+  const loadSeq = useRef(0);
   const [page, setPage] = useState(0);
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState({});
@@ -28,11 +31,42 @@ export default function Reports() {
   const [error, setError] = useState('');
   const [pdfBusy, setPdfBusy] = useState('');
 
+  function activeRange() {
+    if (period === 'custom') return customDateToRange(customDate);
+    return periodToRange(period);
+  }
+
+  useEffect(() => {
+    const next = searchInput.trim();
+    const timer = setTimeout(() => {
+      setSearch((current) => (current === next ? current : next));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  const searchTouched = useRef(false);
+  useEffect(() => {
+    if (!searchTouched.current) {
+      searchTouched.current = true;
+      return;
+    }
+    setPage(0);
+  }, [search]);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError('');
+    const range = period === 'custom' ? customDateToRange(customDate) : periodToRange(period);
+    if (period === 'custom' && !range) {
+      if (seq !== loadSeq.current) return;
+      setRows([]);
+      setSummary({});
+      setPagination({ totalPages: 1, total: 0 });
+      setLoading(false);
+      return;
+    }
     try {
-      const range = periodToRange(period);
       const params = {
         ...range,
         page: String(page),
@@ -44,15 +78,17 @@ export default function Reports() {
       if (search.trim()) params.search = search.trim();
 
       const data = await api.getReports(params);
+      if (seq !== loadSeq.current) return;
       setRows(data.rows || []);
       setSummary(data.summary || {});
       setPagination(data.pagination || { totalPages: 1, total: 0 });
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
-  }, [period, ticketStatus, operator, material, search, page]);
+  }, [period, customDate, ticketStatus, operator, material, search, page]);
 
   useEffect(() => {
     api.getReportFilters().then(setFilterOptions).catch(console.error);
@@ -64,19 +100,25 @@ export default function Reports() {
 
   async function exportFile(type) {
     try {
-      const range = periodToRange(period);
+      const range = activeRange();
+      if (period === 'custom' && !range) {
+        alert('Choose a date to download that day’s report.');
+        return;
+      }
       const params = { ...range };
       if (ticketStatus !== 'all') params.ticket_status = ticketStatus;
       if (operator !== 'all') params.operator_name = operator;
       if (material !== 'all') params.material = material;
-      if (search.trim()) params.search = search.trim();
+      const typed = searchInput.trim();
+      if (typed) params.search = typed;
 
       const path = type === 'csv' ? '/reports/export/csv' : '/reports/export/excel';
       const blob = await api.downloadExport(path, params);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = type === 'csv' ? 'weighbridge-report.csv' : 'weighbridge-report.xlsx';
+      const stamp = period === 'custom' && customDate ? `-${customDate}` : '';
+      a.download = type === 'csv' ? `weighbridge-report${stamp}.csv` : `weighbridge-report${stamp}.xlsx`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -125,6 +167,7 @@ export default function Reports() {
           <option value="last_7_days">Last 7 days</option>
           <option value="this_month">This month</option>
           <option value="last_month">Previous month</option>
+          <option value="custom">Custom date</option>
         </select>
         <select
           className="field-input"
@@ -173,10 +216,28 @@ export default function Reports() {
         <input
           className="field-input"
           placeholder="Search slip, truck…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && load()}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return;
+            const next = e.currentTarget.value.trim();
+            setSearch(next);
+            if (next === search) load();
+          }}
         />
+        {period === 'custom' && (
+          <input
+            type="date"
+            aria-label="Particular date"
+            title="Particular date"
+            className="field-input [color-scheme:dark]"
+            value={customDate}
+            onChange={(e) => {
+              setPage(0);
+              setCustomDate(e.target.value);
+            }}
+          />
+        )}
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -259,8 +320,9 @@ export default function Reports() {
             {!loading && rows.length === 0 && (
               <tr>
                 <td colSpan={10} className="p-6 text-center text-slate-500">
-                  No tickets found for this filter. Open or closed tickets sync from the weighbridge
-                  PC — check Sync Status if the list stays empty.
+                  {period === 'custom' && !customDate
+                    ? 'Choose a date to view and download that day’s report.'
+                    : 'No tickets found for this filter. Open or closed tickets sync from the weighbridge PC — check Sync Status if the list stays empty.'}
                 </td>
               </tr>
             )}

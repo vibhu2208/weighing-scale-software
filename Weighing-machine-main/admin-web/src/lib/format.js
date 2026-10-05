@@ -56,3 +56,12 @@ export function periodToRange(period) {
 
   return { from: from.toISOString(), to: to.toISOString() };
 }
+
+/** Inclusive local calendar day for a `YYYY-MM-DD` value. */
+export function customDateToRange(dateStr) {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const from = new Date(`${dateStr}T00:00:00`);
+  const to = new Date(`${dateStr}T23:59:59.999`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null;
+  return { from: from.toISOString(), to: to.toISOString() };
+}

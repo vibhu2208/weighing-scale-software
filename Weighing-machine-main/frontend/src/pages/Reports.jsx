@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mcgAPI, reportAPI, transactionAPI } from '../api/ipc.js';
 import Badge from '../components/shared/Badge.jsx';
 import ExportCenter from '../components/reports/ExportCenter.jsx';
@@ -93,6 +93,7 @@ export default function Reports() {
   const [filterOptions, setFilterOptions] = useState({ operators: [], materials: [], companies: [] });
 
   const [page, setPage] = useState(0);
+  const loadSeq = useRef(0);
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -131,21 +132,24 @@ export default function Reports() {
   }, [from, to, period, status, operator, material, company, search, page]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const [data, todayStats] = await Promise.all([
         reportAPI.getPaginatedReport(filters),
         transactionAPI.getTodayStats(),
       ]);
+      if (seq !== loadSeq.current) return;
       setRows(data?.rows || []);
       setSummary({ ...EMPTY_SUMMARY, ...(data?.summary || {}) });
       setPagination(data?.pagination || { page: 0, pageSize: PAGE_SIZE, total: 0, totalPages: 1 });
       setTodayNetWeight(todayStats?.totalWeight || 0);
       setSelected(new Set());
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       console.error(e);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [filters]);
 
