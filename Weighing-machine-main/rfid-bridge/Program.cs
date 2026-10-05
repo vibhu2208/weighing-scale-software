@@ -14,7 +14,7 @@ namespace RfidBridge
         private static readonly object WriteLock = new object();
         private static readonly HashSet<string> BlockedTags =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private static string EpcPrefix = "E200";
+        private static string EpcPrefix = "";
         private string _connId = "";
         private bool _running = true;
 
@@ -342,7 +342,7 @@ namespace RfidBridge
         {
             if (string.IsNullOrWhiteSpace(raw))
             {
-                EpcPrefix = "E200";
+                EpcPrefix = "";
                 return;
             }
 

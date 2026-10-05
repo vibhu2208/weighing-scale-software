@@ -14,10 +14,13 @@ const AdminReportService = require('./AdminReportService');
 
 let cronJob = null;
 let catchUpJob = null;
+let catchUpTimer = null;
 let listenClient = null;
 let processing = false;
+let rerunRequested = false;
 let started = false;
 const pushQueue = new Set();
+const catchUpDone = new Set();
 
 const REMOTE_SAFE_KEYS = new Set([
   'WEIGHT_ADJUSTMENT_ENABLED',
@@ -62,16 +65,27 @@ function getSiteId() {
 function enqueuePush(transactionId) {
   if (!transactionId) return;
   pushQueue.add(transactionId);
+  catchUpDone.delete(transactionId);
   // Flush soon so OPEN tickets appear in admin without waiting for the cron tick.
   processNow().catch((err) => {
     logger.warn('CloudAdminSync flush after enqueue failed', { message: err.message });
   });
 }
 
-async function uploadLocalFileIfExists(localPath, s3Key) {
+async function uploadLocalFileIfExists(localPath, s3Key, options = {}) {
   if (!localPath || !S3Service.isConfigured()) return null;
   const normalized = path.resolve(localPath);
   if (!fs.existsSync(normalized)) return null;
+  if (options.onlyIfMissing) {
+    try {
+      if (await S3Service.objectExists(s3Key)) return s3Key;
+    } catch (err) {
+      logger.warn('CloudAdminSync existence check failed — uploading', {
+        s3Key,
+        message: err.message,
+      });
+    }
+  }
   try {
     await S3Service.uploadFile(normalized, s3Key);
     return s3Key;
@@ -81,7 +95,7 @@ async function uploadLocalFileIfExists(localPath, s3Key) {
   }
 }
 
-async function buildMirrorPhotoKeys(txn) {
+async function buildMirrorPhotoKeys(txn, options = {}) {
   const siteId = getSiteId();
   const slip = txn.slip_number;
   const keys = {};
@@ -96,7 +110,7 @@ async function buildMirrorPhotoKeys(txn) {
   for (const { col, pass, slot } of slots) {
     if (!txn[col]) continue;
     const s3Key = S3Service.mirrorPhotoKey(siteId, slip, slot, pass);
-    const uploaded = await uploadLocalFileIfExists(txn[col], s3Key);
+    const uploaded = await uploadLocalFileIfExists(txn[col], s3Key, options);
     if (uploaded) keys[col] = uploaded;
   }
   return keys;
@@ -108,19 +122,20 @@ const MIRROR_STATUSES = new Set([
   TICKET_STATUS.CANCELLED,
 ]);
 
-async function pushTransaction(txn) {
+async function pushTransaction(txn, options = {}) {
   if (!txn?.id || !MIRROR_STATUSES.has(txn.ticket_status)) {
     return { ok: false, skipped: true };
   }
 
   const siteId = getSiteId();
-  const photoKeys = await buildMirrorPhotoKeys(txn);
+  const photoKeys = await buildMirrorPhotoKeys(txn, options);
   let reportS3Key = null;
   // PDF only exists after close — skip upload work for open tickets.
   if (txn.ticket_status === TICKET_STATUS.CLOSED && txn.report_path) {
     reportS3Key = await uploadLocalFileIfExists(
       txn.report_path,
       S3Service.mirrorReportKey(siteId, txn.slip_number),
+      options,
     );
   }
 
@@ -335,6 +350,22 @@ async function pushAllOpenTickets() {
 }
 
 async function pushRecentTickets() {
+  try {
+    const RemoteTripSyncService = require('./RemoteTripSyncService');
+    if (RemoteTripSyncService.isBusy()) {
+      logger.info('CloudAdminSync catch-up deferred — remote trip sync in progress');
+      if (!catchUpTimer) {
+        catchUpTimer = setTimeout(() => {
+          catchUpTimer = null;
+          pushRecentTickets().catch(() => {});
+        }, 60000);
+      }
+      return;
+    }
+  } catch (_e) {
+    /* remote sync optional */
+  }
+
   const { getDb } = require('../database/db');
   // Opens first — must not compete with closed slips for the LIMIT slot.
   await pushAllOpenTickets();
@@ -346,13 +377,14 @@ async function pushRecentTickets() {
     )
     .all(TICKET_STATUS.CLOSED, TICKET_STATUS.CANCELLED);
   for (const row of rows) {
+    if (catchUpDone.has(row.id)) continue;
     const txn = TransactionService.getById(row.id);
-    if (txn) {
-      try {
-        await pushTransaction(txn);
-      } catch (err) {
-        logger.warn('CloudAdminSync catch-up failed', { id: row.id, message: err.message });
-      }
+    if (!txn) continue;
+    try {
+      await pushTransaction(txn, { onlyIfMissing: true });
+      catchUpDone.add(row.id);
+    } catch (err) {
+      logger.warn('CloudAdminSync catch-up failed', { id: row.id, message: err.message });
     }
   }
 }
@@ -538,29 +570,42 @@ async function pushWeightFeatureMeta() {
 }
 
 async function processNow() {
-  if (processing) return { ok: true, skipped: true };
+  if (processing) {
+    rerunRequested = true;
+    return { ok: true, skipped: true };
+  }
   if (!pg.isConfigured()) return { ok: false, reason: 'not_configured' };
   if (!(await isOnline())) return { ok: false, reason: 'offline' };
   if (!(await pg.ping())) return { ok: false, reason: 'ping_failed' };
 
   processing = true;
   try {
-    await heartbeat();
-    // Apply admin edits before outbound mirror pushes so a stuck S3 upload
-    // cannot leave edit_report commands pending for hours.
-    await pullCommands();
-    await processPushQueue();
-    // Keep open tickets mirrored even when the catch-up job is busy with closed slips.
-    await pushAllOpenTickets();
-    await pushWeightFeatureMeta();
-    await pullSettings();
-    await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
+    let passes = 0;
+    do {
+      rerunRequested = false;
+      passes += 1;
+      await heartbeat();
+      // Apply admin edits before outbound mirror pushes so a stuck S3 upload
+      // cannot leave edit_report commands pending for hours.
+      await pullCommands();
+      await processPushQueue();
+      // Keep open tickets mirrored even when the catch-up job is busy with closed slips.
+      await pushAllOpenTickets();
+      await pushWeightFeatureMeta();
+      await pullSettings();
+      await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
+    } while (rerunRequested && passes < 3);
     return { ok: true };
   } finally {
     processing = false;
-    // Items enqueued while we were busy must not wait for the next cron tick —
-    // that race left remote imports missing from admin Reports.
-    if (pushQueue.size > 0) {
+    if (rerunRequested) {
+      rerunRequested = false;
+      setTimeout(() => {
+        processNow().catch(() => {});
+      }, 400);
+    } else if (pushQueue.size > 0) {
+      // Items enqueued while we were busy must not wait for the next cron tick —
+      // that race left remote imports missing from admin Reports.
       setImmediate(() => {
         processNow().catch((err) => {
           logger.warn('CloudAdminSync drain after enqueue race failed', {
@@ -613,6 +658,7 @@ function start() {
 function stop() {
   if (cronJob) { cronJob.stop(); cronJob = null; }
   if (catchUpJob) { catchUpJob.stop(); catchUpJob = null; }
+  if (catchUpTimer) { clearTimeout(catchUpTimer); catchUpTimer = null; }
   if (listenClient) {
     try { listenClient.release(); } catch (_e) { /* ignore */ }
     listenClient = null;
@@ -628,6 +674,7 @@ module.exports = {
   pushTransaction,
   pushAllOpenTickets,
   pushRecentTickets,
+  pushRecentClosed,
   deleteMirrorRow,
   syncRemoteTripFromLocal,
 };

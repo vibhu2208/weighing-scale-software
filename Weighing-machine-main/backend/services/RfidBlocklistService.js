@@ -17,7 +17,7 @@ function parseList(raw) {
   return set;
 }
 
-const DEFAULT_EPC_PREFIX = 'E200';
+const DEFAULT_EPC_PREFIX = '';
 
 let cachedRaw = null;
 let cachedSet = null;

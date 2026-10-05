@@ -30,6 +30,7 @@ const MIN_JPEG_BYTES = parseInt(process.env.CAMERA_MIN_JPEG_BYTES || '2048', 10)
 
 function verifyPhotoFields(fields, kind) {
   const minCount = getMinPhotoCountToSave();
+  if (!isCameraRequired() || minCount <= 0) return;
   const configured = getRequiredPhotoCount();
   const prefix = kind === 'departure' ? 'departure' : 'arrival';
   let validCount = 0;
@@ -338,6 +339,8 @@ async function saveTripCapture(data = {}) {
 
   const manualPhoto = useManualPhotoConfirm();
   if (
+    isCameraRequired() &&
+    getMinPhotoCountToSave() > 0 &&
     manualPhoto &&
     !data.imageBase64 &&
     !data.imagePath &&

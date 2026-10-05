@@ -27,7 +27,7 @@ function validateSnapshots(
   const configured = getRequiredPhotoCount();
   const list = normalizeSnapshots(snapshots);
 
-  if (list.length < minCount) {
+  if (minCount > 0 && list.length < minCount) {
     throw new Error(
       `At least ${minCount} photo(s) required for ${label} — got ${list.length}. Capture or retry cameras.`,
     );
@@ -68,7 +68,7 @@ async function captureManualSession({ sessionId, passKey = 'arrival' } = {}) {
   const minCount = getMinPhotoCountToSave();
   const enabledCount = countEnabledCameras(DeviceMonitorService.getCameraConfig());
 
-  if (snapshots.length < Math.min(minCount, enabledCount || minCount)) {
+  if (minCount > 0 && snapshots.length < Math.min(minCount, enabledCount || minCount)) {
     const failedLabels = failures.map((f) => f.label).join(', ') || 'all cameras';
     throw new Error(
       `No cameras responded — need at least ${minCount} photo(s). Failed: ${failedLabels}. Check camera network and retry.`,

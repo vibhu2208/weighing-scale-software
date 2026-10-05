@@ -5,6 +5,7 @@ const {
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
+  ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
@@ -106,11 +107,46 @@ function remoteTripPhotoKey(slip, slot, pass = 'departure') {
   return `remote-trips/${slip}/${tag}_cam-${slot}.jpg`;
 }
 
+async function listKeys(prefix, maxKeys = 40) {
+  if (!isConfigured() || !prefix) return [];
+  try {
+    const res = await getClient().send(
+      new ListObjectsV2Command({
+        Bucket: getBucket(),
+        Prefix: prefix,
+        MaxKeys: maxKeys,
+      }),
+    );
+    return (res.Contents || []).map((obj) => obj.Key).filter(Boolean);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function inferPhotoFieldFromKey(s3Key) {
+  const base = String(s3Key || '')
+    .split('/')
+    .pop()
+    .toLowerCase();
+  if (!base) return null;
+  const arrivalCam = base.match(/arrival[-_]?cam[-_]?(\d)/);
+  if (arrivalCam) return `arrival_photo_${arrivalCam[1]}`;
+  const departureCam = base.match(/departure[-_]?cam[-_]?(\d)/);
+  if (departureCam) return `departure_photo_${departureCam[1]}`;
+  const ac = base.match(/(?:^|[-_])ac(\d)/);
+  if (ac) return `arrival_photo_${ac[1]}`;
+  const dc = base.match(/(?:^|[-_])dc(\d)/);
+  if (dc) return `departure_photo_${dc[1]}`;
+  return null;
+}
+
 module.exports = {
   isConfigured,
   presignGet,
   presignPut,
   objectExists,
+  listKeys,
+  inferPhotoFieldFromKey,
   putObject,
   getObjectBuffer,
   mirrorPhotoKey,

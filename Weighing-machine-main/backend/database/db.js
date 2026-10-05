@@ -32,6 +32,7 @@ const migration016 = require('./migrations/016_fix_hywa_swapped_photos');
 const migration017 = require('./migrations/017_backfill_hywa_photo_columns');
 const migration018 = require('./migrations/018_soft_delete_tickets');
 const migration019 = require('./migrations/019_ticket_company');
+const migration020 = require('./migrations/020_clear_rfid_epc_prefix');
 
 let db = null;
 
@@ -72,6 +73,7 @@ function runMigrations(handle = db) {
     migration017,
     migration018,
     migration019,
+    migration020,
   ];
 
   const apply = handle.transaction(() => {
@@ -97,7 +99,7 @@ function runMigrations(handle = db) {
   }
 }
 
-/** Ensure a default admin exists on fresh installs (PIN: 1234). */
+/** Ensure a default admin exists on fresh installs (PIN: 4916). */
 function ensureDefaultAdmin(handle = db) {
   if (!handle) return;
 
@@ -114,11 +116,11 @@ function ensureDefaultAdmin(handle = db) {
   handle
     .prepare(
       `INSERT INTO operators (id, name, pin, role, status, created_at)
-       VALUES (?, 'Admin', '1234', 'admin', 'active', ?)`,
+       VALUES (?, 'Admin', '4916', 'admin', 'active', ?)`,
     )
     .run(uuidv4(), now);
 
-  logger.info('Default admin operator created', { pin: '1234' });
+  logger.info('Default admin operator created', { pin: '4916' });
 }
 
 /** Open (or create) the SQLite database. Returns the singleton. */

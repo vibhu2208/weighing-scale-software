@@ -310,6 +310,17 @@ function buildCreatePayload(body = {}, lists = {}) {
     payload.mcg_status = 'waiting';
   }
 
+  const photoCols = [
+    'arrival_photo_1',
+    'arrival_photo_2',
+    'arrival_photo_3',
+    'departure_photo_1',
+    'departure_photo_2',
+    'departure_photo_3',
+  ];
+  for (const col of photoCols) {
+    if (body[col]) payload[col] = String(body[col]).trim();
+  }
   // Optional photo keys (so create+notify includes photos — avoids PC importing first without them).
   const photoS3Keys = Array.isArray(body.photoS3Keys) ? body.photoS3Keys : [];
   for (const item of photoS3Keys) {
@@ -1043,7 +1054,11 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   }
 
   const cols = Object.keys(updates);
-  const sets = cols.map((c, i) => `${c} = $${i + 2}`);
+  // Re-queue photo download even if trip data already imported locally.
+  const sets = [
+    ...cols.map((c, i) => `${c} = $${i + 2}`),
+    'synced_to_local = false',
+  ];
   const values = cols.map((c) => updates[c]);
 
   const res = await queryFn(

@@ -41,6 +41,7 @@ module.exports = {
   ],
 
   extraResources: [
+    { from: '.env', to: '.env' },
     { from: 'database', to: 'database', filter: ['**/*'] },
     { from: 'uploads', to: 'uploads', filter: ['**/*'] },
     ...(includeFfmpeg

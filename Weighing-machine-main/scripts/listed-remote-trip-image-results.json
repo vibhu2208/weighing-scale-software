@@ -1,0 +1,497 @@
+[
+  {
+    "slip": "WB2658",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2653",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2651",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2648",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2636",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2633",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2631",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2616",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 4,
+    "urlCandidates": 4,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2619",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 3,
+    "urlCandidates": 3,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2634",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2538",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2809",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 3,
+    "urlCandidates": 3,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2801",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2800",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2789",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 1,
+    "renderable": 1,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 4,
+    "urlCandidates": 4,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2788",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 1,
+    "renderable": 1,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 4,
+    "urlCandidates": 4,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2760",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 6,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2757",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 6,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2755",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 5,
+    "urlCandidates": 5,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2754",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 6,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2732",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2751",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 1,
+    "renderable": 1,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2671",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 2,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 2,
+    "urlCandidates": 2,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2743",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 5,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB - 03:2",
+      "WB-03:2"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2742",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 6,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB-03:6",
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2723",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 6,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB-03:6",
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2721",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 3,
+    "imagesSynced": 1,
+    "renderable": 1,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 3,
+    "urlCandidates": 3,
+    "mirrorPhotos": [],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2689",
+    "tripSynced": true,
+    "remoteExists": true,
+    "remoteSynced": true,
+    "imagesFound": 6,
+    "imagesSynced": 1,
+    "renderable": 1,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 6,
+    "urlCandidates": 6,
+    "mirrorPhotos": [
+      "WB-03:6",
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  },
+  {
+    "slip": "WB2660",
+    "tripSynced": true,
+    "remoteExists": false,
+    "remoteSynced": false,
+    "imagesFound": 4,
+    "imagesSynced": 2,
+    "renderable": 2,
+    "pdfExists": true,
+    "visibleInReport": true,
+    "urlsOk": 4,
+    "urlCandidates": 4,
+    "mirrorPhotos": [
+      "WB - 03:6"
+    ],
+    "status": "Fixed"
+  }
+]

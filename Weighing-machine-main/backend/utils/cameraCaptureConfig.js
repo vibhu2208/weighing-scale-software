@@ -17,7 +17,8 @@ function getRequiredPhotoCount() {
 /** Minimum working camera photos needed to allow Save (partial capture OK). */
 function getMinPhotoCountToSave() {
   const explicit = parseInt(process.env.MIN_PHOTOS_TO_SAVE || '', 10);
-  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+  if (!isCameraRequired()) return 0;
   return 1;
 }
 
