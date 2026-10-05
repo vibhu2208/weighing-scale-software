@@ -30,6 +30,10 @@ function toIso(value) {
   return String(value);
 }
 
+function isOpenRemoteRow(row) {
+  return String(row?.ticket_status || '').toUpperCase() === 'OPEN';
+}
+
 async function downloadPhotoIfPresent(s3Key, localPath) {
   const key = (s3Key || '').trim();
   if (!key) return null;
@@ -162,7 +166,8 @@ async function remappingRemoteSlip(row, localConflict) {
 
 async function markRemoteTripSynced(remoteId, localId, mcgResult) {
   const mcgStatus =
-    mcgResult?.skipped && mcgResult?.reason === 'not_configured'
+    mcgResult?.reason === 'open_ticket' ||
+    (mcgResult?.skipped && mcgResult?.reason === 'not_configured')
       ? 'skipped'
       : mcgResult?.ok
         ? 'sent'
@@ -221,7 +226,7 @@ async function processRemoteRow(row, attempt = 0) {
 
         // Photos arrived after the first import — rebuild PDF so admin download has images.
         const photosAdded = Object.keys(photoUpdates).some((k) => k.includes('photo'));
-        if (photosAdded && !photoUpdates.report_path) {
+        if (photosAdded && !photoUpdates.report_path && !isOpenRemoteRow(row)) {
           try {
             const ReportService = require('./ReportService');
             const reportResult = await ReportService.regenerateTripPDF(alreadyImported.id);
@@ -249,7 +254,7 @@ async function processRemoteRow(row, attempt = 0) {
     await markRemoteTripSynced(remoteId, alreadyImported.id, {
       ok: true,
       skipped: true,
-      reason: 'already_sent',
+      reason: isOpenRemoteRow(row) ? 'open_ticket' : 'already_sent',
     });
     // Local may have remapped slip / edited fields — refresh remote_trips + mirror.
     try {
@@ -270,31 +275,53 @@ async function processRemoteRow(row, attempt = 0) {
 
   const localTxnId = uuidv4();
   const photoPaths = await downloadRemotePhotos(row, localTxnId);
+  const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
 
-  const importResult = TransactionService.importClosedTrip({
-    id: localTxnId,
-    remote_pg_id: remoteId,
-    slip_number: row.slip_number,
-    truck_number: row.truck_number,
-    rfid_tag: row.rfid_tag,
-    customer_name: row.customer_name,
-    destination: row.destination,
-    material: row.material,
-    operator_name: row.operator_name,
-    // Remote trips are DCC-only — never import as another company
-    company: 'DCC',
-    gross_weight: row.gross_weight,
-    tare_weight: row.tare_weight,
-    timestamp_in: toIso(row.timestamp_in),
-    timestamp_out: toIso(row.timestamp_out),
-    arrival_photo_1: photoPaths.arrival_photo_1 || null,
-    arrival_photo_2: photoPaths.arrival_photo_2 || null,
-    arrival_photo_3: photoPaths.arrival_photo_3 || null,
-    departure_photo_1: photoPaths.departure_photo_1 || null,
-    departure_photo_2: photoPaths.departure_photo_2 || null,
-    departure_photo_3: photoPaths.departure_photo_3 || null,
-    report_path: photoPaths.report_path || null,
-  });
+  const openTicket = isOpenRemoteRow(row);
+  const importResult = openTicket
+    ? TransactionService.importOpenTrip({
+        id: localTxnId,
+        remote_pg_id: remoteId,
+        slip_number: row.slip_number,
+        truck_number: row.truck_number,
+        rfid_tag: row.rfid_tag,
+        customer_name: row.customer_name,
+        destination: row.destination,
+        material: row.material,
+        operator_name: row.operator_name,
+        company: 'DCC',
+        vehicle_type: vType,
+        gross_weight: row.gross_weight,
+        tare_weight: row.tare_weight,
+        timestamp_in: toIso(row.timestamp_in),
+        arrival_photo_1: photoPaths.arrival_photo_1 || null,
+        arrival_photo_2: photoPaths.arrival_photo_2 || null,
+        arrival_photo_3: photoPaths.arrival_photo_3 || null,
+      })
+    : TransactionService.importClosedTrip({
+        id: localTxnId,
+        remote_pg_id: remoteId,
+        slip_number: row.slip_number,
+        truck_number: row.truck_number,
+        rfid_tag: row.rfid_tag,
+        customer_name: row.customer_name,
+        destination: row.destination,
+        material: row.material,
+        operator_name: row.operator_name,
+        // Remote trips are DCC-only — never import as another company
+        company: 'DCC',
+        gross_weight: row.gross_weight,
+        tare_weight: row.tare_weight,
+        timestamp_in: toIso(row.timestamp_in),
+        timestamp_out: toIso(row.timestamp_out),
+        arrival_photo_1: photoPaths.arrival_photo_1 || null,
+        arrival_photo_2: photoPaths.arrival_photo_2 || null,
+        arrival_photo_3: photoPaths.arrival_photo_3 || null,
+        departure_photo_1: photoPaths.departure_photo_1 || null,
+        departure_photo_2: photoPaths.departure_photo_2 || null,
+        departure_photo_3: photoPaths.departure_photo_3 || null,
+        report_path: photoPaths.report_path || null,
+      });
 
   const transaction = importResult.transaction;
   if (!transaction?.id) {
@@ -304,7 +331,6 @@ async function processRemoteRow(row, attempt = 0) {
   // Ensure vehicle type is set (HYWA needs timestamp_in = gross on reports).
   try {
     const VehicleService = require('./VehicleService');
-    const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
     const existing = VehicleService.findByNumber(row.truck_number);
     if (!existing) {
       VehicleService.create({
@@ -344,8 +370,12 @@ async function processRemoteRow(row, attempt = 0) {
     return processRemoteRow(row, attempt + 1);
   }
 
-  let mcgResult = { ok: true, skipped: true, reason: 'already_sent' };
-  if (row.mcg_status !== 'sent') {
+  let mcgResult = {
+    ok: true,
+    skipped: true,
+    reason: openTicket ? 'open_ticket' : 'already_sent',
+  };
+  if (!openTicket && row.mcg_status !== 'sent') {
     try {
       mcgResult = await McgPortalService.postClosedTicket(transaction.id);
     } catch (err) {
@@ -357,7 +387,7 @@ async function processRemoteRow(row, attempt = 0) {
     }
   }
 
-  if (!photoPaths.report_path) {
+  if (!openTicket && !photoPaths.report_path) {
     try {
       const ReportService = require('./ReportService');
       const reportResult = await ReportService.exportTripPDF(transaction.id);
@@ -407,7 +437,8 @@ async function processRemoteRow(row, attempt = 0) {
 async function loadPendingRows() {
   const res = await pg.query(
     `SELECT * FROM remote_trips
-     WHERE synced_to_local = false
+     WHERE (
+        synced_to_local = false
         OR (
           mcg_error IS NOT NULL
           AND (
@@ -415,7 +446,10 @@ async function loadPendingRows() {
             OR mcg_error ILIKE '%slip%conflict%'
           )
         )
-     ORDER BY created_at ASC
+      )
+      AND (timestamp_out IS NULL OR timestamp_out <= now())
+      AND (release_at IS NULL OR release_at <= now())
+     ORDER BY timestamp_out ASC NULLS LAST, created_at ASC
      LIMIT 50`,
   );
   return res.rows || [];

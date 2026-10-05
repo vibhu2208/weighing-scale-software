@@ -76,11 +76,17 @@ CREATE TABLE IF NOT EXISTS remote_trips (
   operator_name     TEXT NOT NULL,
   transporter       TEXT,
   vehicle_type      TEXT,
-  tare_weight       DOUBLE PRECISION NOT NULL,
-  gross_weight      DOUBLE PRECISION NOT NULL,
-  net_weight        DOUBLE PRECISION GENERATED ALWAYS AS (gross_weight - tare_weight) STORED,
+  tare_weight       DOUBLE PRECISION,
+  gross_weight      DOUBLE PRECISION,
+  net_weight        DOUBLE PRECISION GENERATED ALWAYS AS (
+    CASE
+      WHEN gross_weight IS NOT NULL AND tare_weight IS NOT NULL
+      THEN gross_weight - tare_weight
+      ELSE NULL
+    END
+  ) STORED,
   timestamp_in      TIMESTAMPTZ NOT NULL,
-  timestamp_out     TIMESTAMPTZ NOT NULL,
+  timestamp_out     TIMESTAMPTZ,
   ticket_status     TEXT NOT NULL DEFAULT 'CLOSED',
   status            TEXT NOT NULL DEFAULT 'captured',
 

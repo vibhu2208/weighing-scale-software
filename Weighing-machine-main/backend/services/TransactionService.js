@@ -489,6 +489,142 @@ const TransactionService = {
     };
   },
 
+  /**
+   * Import an open remote trip (first weigh only) so the weighbridge can close it on site.
+   * HYWA stores gross; other vehicle types store tare.
+   */
+  importOpenTrip(data) {
+    const remotePgId = data.remote_pg_id ? String(data.remote_pg_id).trim() : null;
+    if (!remotePgId) {
+      throw new Error('remote_pg_id is required for import');
+    }
+
+    const existingByPg = this.getByRemotePgId(remotePgId);
+    if (existingByPg) {
+      return { imported: false, transaction: existingByPg, existing: true };
+    }
+
+    const slipNumber = String(data.slip_number || '').trim();
+    if (!slipNumber) {
+      throw new Error('slip_number is required for import');
+    }
+
+    const existingBySlip = this.getBySlipNumber(slipNumber);
+    if (existingBySlip) {
+      return { imported: false, transaction: existingBySlip, existing: true };
+    }
+
+    const truckNumber = String(data.truck_number || '')
+      .trim()
+      .toUpperCase();
+    if (!truckNumber) {
+      throw new Error('truck_number is required for import');
+    }
+
+    const openForTruck = this.findOpenTicketByTruck(truckNumber);
+    if (openForTruck) {
+      throw new Error(
+        `Open ticket ${openForTruck.slip_number} already exists for ${truckNumber}`,
+      );
+    }
+
+    const hywa = isHywa(data.vehicle_type);
+    const grossWeight =
+      data.gross_weight != null && data.gross_weight !== ''
+        ? Number(data.gross_weight)
+        : null;
+    const tareWeight =
+      data.tare_weight != null && data.tare_weight !== ''
+        ? Number(data.tare_weight)
+        : null;
+
+    if (hywa) {
+      if (!Number.isFinite(grossWeight) || grossWeight <= 0) {
+        throw new Error('gross_weight is required for a HYWA open ticket');
+      }
+    } else if (!Number.isFinite(tareWeight) || tareWeight <= 0) {
+      throw new Error('tare_weight is required for an open ticket');
+    }
+
+    const id = data.id ? String(data.id) : uuidv4();
+    const now = ts.now();
+    const timestampIn = data.timestamp_in || now;
+
+    const db = getDb();
+    const insert = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO transactions (
+          id, truck_number, rfid_tag, gross_weight, tare_weight,
+          timestamp_in, timestamp_out, image_path, operator_id,
+          slip_number, sync_status, status, notes, created_at, updated_at,
+          ticket_status, material, driver, customer_name, destination, operator_name, company,
+          arrival_photo_1, arrival_photo_2, arrival_photo_3,
+          departure_photo_1, departure_photo_2, departure_photo_3,
+          report_path, remote_pg_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        truckNumber,
+        data.rfid_tag || null,
+        hywa ? grossWeight : null,
+        hywa ? null : tareWeight,
+        timestampIn,
+        null,
+        data.image_path || data.arrival_photo_1 || null,
+        data.operator_id || null,
+        slipNumber,
+        SYNC_STATUS.SYNCED,
+        TRANSACTION_STATUS.WEIGHING,
+        data.notes || 'Imported open ticket from remote trip',
+        now,
+        now,
+        TICKET_STATUS.OPEN,
+        data.material || null,
+        data.driver || null,
+        data.customer_name || null,
+        data.destination || null,
+        data.operator_name || null,
+        data.company || 'DCC',
+        data.arrival_photo_1 || null,
+        data.arrival_photo_2 || null,
+        data.arrival_photo_3 || null,
+        null,
+        null,
+        null,
+        null,
+        remotePgId,
+      );
+    });
+
+    insert();
+
+    const numeric = SlipNumberService.parseSlipNumeric(slipNumber);
+    if (numeric > 0) {
+      ensureSlipCounter(db);
+      const row = db
+        .prepare('SELECT id, current_value FROM slip_counter ORDER BY id LIMIT 1')
+        .get();
+      if (row && row.current_value < numeric) {
+        db.prepare(
+          'UPDATE slip_counter SET current_value = ?, updated_at = ? WHERE id = ?',
+        ).run(numeric, now, row.id);
+      }
+    }
+
+    logger.info('Imported open trip from RDS', {
+      transactionId: id,
+      slipNumber,
+      remotePgId,
+      vehicleType: data.vehicle_type || null,
+    });
+
+    return {
+      imported: true,
+      transaction: this.getById(id),
+      existing: false,
+    };
+  },
+
   updateFields(id, fields = {}) {
     const existing = this.getById(id);
     if (!existing) throw new Error(`Transaction not found: ${id}`);

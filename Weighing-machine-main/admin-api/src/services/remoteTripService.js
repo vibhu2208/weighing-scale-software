@@ -1,63 +1,323 @@
 'use strict';
 
 const { markReservationUsed } = require('./slipReservationService');
+const { getList } = require('./settingsService');
 const { getSiteId } = require('../db');
 
-function normalizeText(value, fieldName) {
-  const text = String(value || '').trim();
-  if (!text) throw new Error(`${fieldName} is required`);
-  return text;
+const ALLOWED_VEHICLE_TYPES = ['HYWA', 'TRUCK', 'TANKER', 'CONTAINER'];
+const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
+const SLIP_RE = /^WB[0-9]+$/;
+const MAX_WEIGHT_KG = 200000;
+
+function compactToken(value) {
+  return String(value || '')
+    .toUpperCase()
+    .replace(/[\s-]/g, '');
 }
 
-function parseWeight(value, fieldName) {
+function listLabel(name) {
+  return (
+    {
+      materials: 'material',
+      customers: 'customer',
+      destinations: 'destination',
+      operators: 'operator',
+    }[name] || name
+  );
+}
+
+function matchingListNames(value, lists) {
+  const norm = String(value || '').trim().toLowerCase();
+  if (!norm) return [];
+  return Object.entries(lists || {})
+    .filter(([, items]) =>
+      (items || []).some((item) => String(item).trim().toLowerCase() === norm),
+    )
+    .map(([name]) => name);
+}
+
+function canonicalFromList(value, items) {
+  const norm = String(value || '').trim().toLowerCase();
+  const hit = (items || []).find((item) => String(item).trim().toLowerCase() === norm);
+  return hit ? String(hit).trim() : null;
+}
+
+function looksLikeWeightText(value) {
+  const text = String(value || '')
+    .trim()
+    .replace(/,/g, '');
+  if (!/^\d+(\.\d+)?(\s*kg)?$/i.test(text)) return false;
+  const n = Number(text.replace(/\s*kg/i, ''));
+  return Number.isFinite(n) && n > 0 && n <= MAX_WEIGHT_KG;
+}
+
+function readWeightKg(value, fieldName, errors, key) {
+  if (value === null || value === undefined || String(value).trim() === '') {
+    errors[key] = `${fieldName} is required`;
+    return null;
+  }
   const n = Math.round(Number(value));
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`Valid ${fieldName} is required`);
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_WEIGHT_KG) {
+    errors[key] = `${fieldName} must be a weight from 1 to ${MAX_WEIGHT_KG} kg`;
+    return null;
+  }
   return n;
 }
 
-function parseTimestamp(value, fieldName) {
-  if (!value) throw new Error(`${fieldName} is required`);
+function readRequiredTime(value, fieldName, errors, key) {
+  if (!value) {
+    errors[key] = `${fieldName} is required`;
+    return null;
+  }
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid ${fieldName}`);
+  if (Number.isNaN(parsed.getTime())) {
+    errors[key] = `${fieldName} must be a date and time`;
+    return null;
+  }
   return parsed.toISOString();
 }
 
-function buildCreatePayload(body = {}) {
-  const gross = parseWeight(body.gross_weight, 'gross weight');
-  const tare = parseWeight(body.tare_weight, 'tare weight');
-  if (gross <= tare) throw new Error('Gross weight must be greater than tare weight');
+function readMaster(raw, fieldName, listName, lists, errors, key) {
+  const text = String(raw || '').trim();
+  if (!text) {
+    errors[key] = `${fieldName} is required`;
+    return null;
+  }
+  if (
+    looksLikeWeightText(text) ||
+    SLIP_RE.test(compactToken(text)) ||
+    PLATE_RE.test(compactToken(text))
+  ) {
+    errors[key] = `${fieldName} must be a ${listLabel(listName)}, not a weight, slip, or vehicle number`;
+    return null;
+  }
+  const items = (lists && lists[listName]) || [];
+  const hits = matchingListNames(text, lists);
+  const foreign = hits.filter((name) => name !== listName);
+  if (items.length) {
+    const match = canonicalFromList(text, items);
+    if (!match) {
+      const extra = foreign.length
+        ? ` That value is a saved ${foreign.map(listLabel).join(' / ')}.`
+        : ' Choose one from the saved list.';
+      errors[key] = `${fieldName} must match a saved ${listLabel(listName)}.${extra}`;
+      return null;
+    }
+    return match;
+  }
+  if (foreign.length) {
+    errors[key] = `${fieldName} is a saved ${foreign.map(listLabel).join(' / ')}, not a ${listLabel(listName)}`;
+    return null;
+  }
+  return text;
+}
 
-  const timestampIn = parseTimestamp(body.timestamp_in, 'arrival time');
-  const timestampOut = parseTimestamp(body.timestamp_out, 'close time');
-  if (new Date(timestampOut).getTime() < new Date(timestampIn).getTime()) {
-    throw new Error('Close time must be after arrival time');
+/**
+ * Every remote-trip field must carry the kind of data that column stores:
+ * plate, kg, weigh time, or the matching saved list.
+ */
+function validateRemoteTripFields(body = {}, lists = {}) {
+  const errors = {};
+  const openStatus = String(body.ticket_status || 'CLOSED').trim().toUpperCase();
+  if (openStatus !== 'OPEN' && openStatus !== 'CLOSED') {
+    errors.ticket_status = 'Ticket must be Open or Closed';
+  }
+  const open = openStatus === 'OPEN';
+
+  const vehicleType = String(body.vehicle_type || '').trim().toUpperCase();
+  if (!ALLOWED_VEHICLE_TYPES.includes(vehicleType)) {
+    errors.vehicle_type = 'Vehicle type must be HYWA, TRUCK, TANKER, or CONTAINER';
+  }
+  const hywa = vehicleType === 'HYWA';
+
+  let slip = String(body.slip_number || '').trim();
+  if (slip) {
+    slip = compactToken(slip);
+    if (!SLIP_RE.test(slip)) {
+      errors.slip_number = 'Slip number must look like WB1234';
+    }
   }
 
+  const plate = compactToken(body.truck_number);
+  if (!plate) {
+    errors.truck_number = 'Vehicle number is required';
+  } else if (!PLATE_RE.test(plate)) {
+    errors.truck_number =
+      'Vehicle number must be a registration (e.g. HR38AH6118)';
+  } else if (
+    matchingListNames(plate, lists).length ||
+    matchingListNames(body.truck_number, lists).length
+  ) {
+    errors.truck_number =
+      'Vehicle number matches a material, customer, destination, or operator';
+  }
+
+  let tare = null;
+  let gross = null;
+  if (open && hywa) {
+    if (body.tare_weight != null && String(body.tare_weight).trim() !== '') {
+      errors.tare_weight = 'An open HYWA ticket carries gross weight only';
+    }
+    gross = readWeightKg(body.gross_weight, 'Gross weight', errors, 'gross_weight');
+  } else if (open) {
+    if (body.gross_weight != null && String(body.gross_weight).trim() !== '') {
+      errors.gross_weight = 'An open ticket for this vehicle carries tare weight only';
+    }
+    tare = readWeightKg(body.tare_weight, 'Tare weight', errors, 'tare_weight');
+  } else {
+    gross = readWeightKg(body.gross_weight, 'Gross weight', errors, 'gross_weight');
+    tare = readWeightKg(body.tare_weight, 'Tare weight', errors, 'tare_weight');
+    if (gross != null && tare != null && gross <= tare) {
+      errors.gross_weight = 'Gross weight must be greater than tare weight';
+    }
+  }
+
+  const inLabel = hywa ? 'Gross time' : 'Arrival time';
+  const timestampIn = readRequiredTime(body.timestamp_in, inLabel, errors, 'timestamp_in');
+  let timestampOut = null;
+  if (open) {
+    if (body.timestamp_out) {
+      errors.timestamp_out = 'An open ticket carries the first weigh time only';
+    }
+  } else {
+    const outLabel = hywa ? 'Tare time' : 'Close time';
+    timestampOut = readRequiredTime(body.timestamp_out, outLabel, errors, 'timestamp_out');
+    if (
+      timestampIn &&
+      timestampOut &&
+      new Date(timestampOut).getTime() < new Date(timestampIn).getTime()
+    ) {
+      errors.timestamp_out = `${outLabel} must be after ${inLabel.toLowerCase()}`;
+    }
+  }
+
+  let rfid = body.rfid_tag ? String(body.rfid_tag).trim() : '';
+  if (rfid) {
+    if (!/^[A-Za-z0-9:_-]{4,64}$/.test(rfid)) {
+      errors.rfid_tag = 'RFID tag must be the tag id (letters, numbers, _ or -)';
+    } else if (looksLikeWeightText(rfid)) {
+      errors.rfid_tag = 'RFID tag looks like a weight';
+    } else if (matchingListNames(rfid, lists).length) {
+      errors.rfid_tag = 'RFID tag matches a material, customer, destination, or operator';
+    } else if (PLATE_RE.test(compactToken(rfid)) && compactToken(rfid) !== plate) {
+      errors.rfid_tag = 'RFID tag looks like a vehicle number';
+    }
+  }
+
+  let transporter = body.transporter ? String(body.transporter).trim() : '';
+  if (transporter) {
+    if (looksLikeWeightText(transporter) || SLIP_RE.test(compactToken(transporter))) {
+      errors.transporter = 'Transporter must be a name, not a weight or slip number';
+    } else if (PLATE_RE.test(compactToken(transporter))) {
+      errors.transporter = 'Transporter looks like a vehicle number';
+    } else if (transporter.length < 2) {
+      errors.transporter = 'Transporter must be a name';
+    }
+  }
+
+  const material = readMaster(body.material, 'Material', 'materials', lists, errors, 'material');
+  const customer = readMaster(
+    body.customer_name,
+    'Customer',
+    'customers',
+    lists,
+    errors,
+    'customer_name',
+  );
+  const destination = readMaster(
+    body.destination,
+    'Destination',
+    'destinations',
+    lists,
+    errors,
+    'destination',
+  );
+  const operator = readMaster(
+    body.operator_name,
+    'Operator',
+    'operators',
+    lists,
+    errors,
+    'operator_name',
+  );
+
+  return {
+    errors,
+    values: {
+      truck_number: plate,
+      customer_name: customer,
+      destination,
+      material,
+      operator_name: operator,
+      tare_weight: tare,
+      gross_weight: gross,
+      timestamp_in: timestampIn,
+      timestamp_out: timestampOut,
+      ticket_status: open ? 'OPEN' : 'CLOSED',
+      status: open ? 'weighing' : 'captured',
+      rfid_tag: rfid || null,
+      transporter: transporter || null,
+      vehicle_type: ALLOWED_VEHICLE_TYPES.includes(vehicleType) ? vehicleType : null,
+      slip_number: slip || undefined,
+    },
+  };
+}
+
+async function loadMasterLists() {
+  const [materials, customers, destinations, operators] = await Promise.all([
+    getList('materials'),
+    getList('customers'),
+    getList('destinations'),
+    getList('operators'),
+  ]);
+  return { materials, customers, destinations, operators };
+}
+
+function buildCreatePayload(body = {}, lists = {}) {
+  const { errors, values } = validateRemoteTripFields(body, lists);
+  const messages = Object.values(errors).filter(Boolean);
+  if (messages.length) throw new Error(messages.join(' '));
+
+  const open = values.ticket_status === 'OPEN';
   const payload = {
-    truck_number: normalizeText(body.truck_number, 'Vehicle number').toUpperCase(),
-    customer_name: normalizeText(body.customer_name, 'Customer'),
-    destination: normalizeText(body.destination, 'Destination'),
-    material: normalizeText(body.material, 'Material'),
-    operator_name: normalizeText(body.operator_name, 'Operator'),
-    tare_weight: tare,
-    gross_weight: gross,
-    timestamp_in: timestampIn,
-    timestamp_out: timestampOut,
-    rfid_tag: body.rfid_tag ? String(body.rfid_tag).trim() : null,
-    transporter: body.transporter ? String(body.transporter).trim() : null,
-    vehicle_type: body.vehicle_type ? String(body.vehicle_type).trim() : null,
+    truck_number: values.truck_number,
+    customer_name: values.customer_name,
+    destination: values.destination,
+    material: values.material,
+    operator_name: values.operator_name,
+    tare_weight: values.tare_weight,
+    gross_weight: values.gross_weight,
+    timestamp_in: values.timestamp_in,
+    timestamp_out: values.timestamp_out,
+    ticket_status: values.ticket_status,
+    status: values.status,
+    rfid_tag: values.rfid_tag,
+    transporter: values.transporter,
+    vehicle_type: values.vehicle_type,
   };
 
-  const slip = String(body.slip_number || '').trim();
-  if (slip) payload.slip_number = slip.toUpperCase();
+  if (open) {
+    // Open tickets are not posted to MCG until the weighbridge closes them.
+    payload.mcg_status = 'skipped';
+  }
+
+  if (values.slip_number) payload.slip_number = values.slip_number;
+
+  // Future close times stay hidden from the weighbridge until that moment.
+  if (!open && new Date(values.timestamp_out).getTime() > Date.now()) {
+    payload.synced_to_local = true;
+    payload.release_at = values.timestamp_out;
+    payload.mcg_status = 'waiting';
+  }
 
   // Optional photo keys (so create+notify includes photos — avoids PC importing first without them).
   const photoS3Keys = Array.isArray(body.photoS3Keys) ? body.photoS3Keys : [];
   for (const item of photoS3Keys) {
     const slot = Number(item.slot);
     const key = item.key || item.s3Key;
-    const pass = item.pass === 'arrival' ? 'arrival' : 'departure';
     if (!key || !Number.isFinite(slot) || slot < 1 || slot > 3) continue;
+    if (open && item.pass === 'departure') continue;
+    const pass = item.pass === 'arrival' || open ? 'arrival' : 'departure';
     payload[`${pass}_photo_${slot}`] = key;
   }
 
@@ -204,8 +464,94 @@ async function forceReleaseSlip(queryFn, slipNumber, siteId = getSiteId()) {
   };
 }
 
+async function ensureReleaseColumn(queryFn) {
+  await queryFn(
+    `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS release_at TIMESTAMPTZ`,
+  );
+}
+
+/** Open tickets store only the first weigh, so the second weight and close time may be null. */
+async function ensureOpenTicketColumns(queryFn) {
+  await queryFn(`ALTER TABLE remote_trips ALTER COLUMN tare_weight DROP NOT NULL`);
+  await queryFn(`ALTER TABLE remote_trips ALTER COLUMN gross_weight DROP NOT NULL`);
+  await queryFn(`ALTER TABLE remote_trips ALTER COLUMN timestamp_out DROP NOT NULL`);
+  await queryFn(
+    `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS ticket_status TEXT NOT NULL DEFAULT 'CLOSED'`,
+  );
+}
+
+function isHeldUntilOutTime(row) {
+  if (!row?.release_at) return false;
+  const at = new Date(row.release_at).getTime();
+  return Number.isFinite(at) && at > Date.now();
+}
+
+/**
+ * Park unsynced trips whose close time is still in the future, then release
+ * any that have reached timestamp_out so the weighbridge PC imports them.
+ */
+async function runOutTimeRelease(queryFn) {
+  await ensureReleaseColumn(queryFn);
+
+  await queryFn(
+    `UPDATE remote_trips
+     SET synced_to_local = true,
+         release_at = timestamp_out,
+         mcg_status = CASE
+           WHEN mcg_status IS NULL OR mcg_status IN ('pending', '') THEN 'waiting'
+           ELSE mcg_status
+         END
+     WHERE synced_to_local = false
+       AND local_id IS NULL
+       AND timestamp_out > now()`,
+  );
+
+  const due = await queryFn(
+    `UPDATE remote_trips
+     SET synced_to_local = false,
+         release_at = NULL,
+         mcg_status = CASE WHEN mcg_status = 'waiting' THEN 'pending' ELSE mcg_status END
+     WHERE release_at IS NOT NULL
+       AND release_at <= now()
+       AND local_id IS NULL
+     RETURNING id, slip_number`,
+  );
+
+  for (const row of due.rows || []) {
+    try {
+      await queryFn(`SELECT pg_notify('new_remote_trip', $1)`, [String(row.id)]);
+    } catch (err) {
+      console.warn('[remoteTrip] out-time notify failed', row.slip_number, err.message);
+    }
+  }
+
+  if ((due.rows || []).length) {
+    console.log('[remoteTrip] released trips at close time', {
+      count: due.rows.length,
+      slips: due.rows.map((r) => r.slip_number),
+    });
+  }
+  return { released: (due.rows || []).length };
+}
+
+let outTimeTimer = null;
+function startOutTimeReleaseWorker(queryFn, intervalMs = 15000) {
+  if (outTimeTimer) return;
+  const tick = () => {
+    runOutTimeRelease(queryFn).catch((err) => {
+      console.warn('[remoteTrip] out-time release failed', err.message);
+    });
+  };
+  tick();
+  outTimeTimer = setInterval(tick, Math.max(5000, intervalMs));
+  if (typeof outTimeTimer.unref === 'function') outTimeTimer.unref();
+}
+
 async function createRemoteTrip(queryFn, body = {}) {
-  const data = buildCreatePayload(body);
+  await ensureReleaseColumn(queryFn);
+  await ensureOpenTicketColumns(queryFn);
+  const lists = await loadMasterLists();
+  const data = buildCreatePayload(body, lists);
   const forceReplace = Boolean(body.replace_existing || body.force_replace);
 
   // If filling a planned gap, lock in that reserved slip before insert.
@@ -327,7 +673,7 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId()) {
       report_s3_key, updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-      'CLOSED',$16,$17,$18,$19,$20,$21,$22,$23,$24,$25, now()
+      $26,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25, now()
     )
     ON CONFLICT (site_id, slip_number) DO UPDATE SET
       local_id = EXCLUDED.local_id,
@@ -339,11 +685,16 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId()) {
       operator_name = EXCLUDED.operator_name,
       transporter = EXCLUDED.transporter,
       vehicle_type = EXCLUDED.vehicle_type,
-      gross_weight = EXCLUDED.gross_weight,
-      tare_weight = EXCLUDED.tare_weight,
+      gross_weight = COALESCE(EXCLUDED.gross_weight, transactions_mirror.gross_weight),
+      tare_weight = COALESCE(EXCLUDED.tare_weight, transactions_mirror.tare_weight),
       timestamp_in = EXCLUDED.timestamp_in,
-      timestamp_out = EXCLUDED.timestamp_out,
-      ticket_status = 'CLOSED',
+      timestamp_out = COALESCE(EXCLUDED.timestamp_out, transactions_mirror.timestamp_out),
+      ticket_status = CASE
+        WHEN transactions_mirror.ticket_status = 'CLOSED'
+         AND EXCLUDED.ticket_status IS DISTINCT FROM 'CLOSED'
+        THEN 'CLOSED'
+        ELSE EXCLUDED.ticket_status
+      END,
       sync_status = COALESCE(EXCLUDED.sync_status, transactions_mirror.sync_status),
       mcg_status = COALESCE(EXCLUDED.mcg_status, transactions_mirror.mcg_status),
       mcg_error = COALESCE(EXCLUDED.mcg_error, transactions_mirror.mcg_error),
@@ -382,6 +733,7 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId()) {
       row.departure_photo_2 || null,
       row.departure_photo_3 || null,
       row.report_s3_key || null,
+      String(row.ticket_status || 'CLOSED').toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSED',
     ],
   );
   return res.rows[0] || null;
@@ -505,7 +857,17 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           departure_photo_1 = COALESCE($19, departure_photo_1),
           departure_photo_2 = COALESCE($20, departure_photo_2),
           departure_photo_3 = COALESCE($21, departure_photo_3),
-          report_s3_key = COALESCE($22, report_s3_key)
+          report_s3_key = COALESCE($22, report_s3_key),
+          ticket_status = CASE
+            WHEN $23 = 'CLOSED' THEN 'CLOSED'
+            WHEN ticket_status = 'CLOSED' THEN ticket_status
+            ELSE COALESCE(NULLIF($23, ''), ticket_status)
+          END,
+          mcg_status = CASE
+            WHEN $23 = 'CLOSED' AND ticket_status = 'OPEN' AND NULLIF($24, '') IS NOT NULL
+            THEN $24
+            ELSE mcg_status
+          END
          WHERE id = $1`,
         [
           rt.id,
@@ -535,6 +897,8 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           mirror.departure_photo_2 || null,
           mirror.departure_photo_3 || null,
           mirror.report_s3_key || null,
+          mirror.ticket_status || null,
+          mirror.mcg_status || null,
         ],
       );
       updated += 1;
@@ -617,7 +981,9 @@ async function listRemoteTrips(queryFn, filters = {}) {
   let idx = 1;
 
   if (filters.pending === 'true' || filters.pending === true) {
-    clauses.push('synced_to_local = false');
+    clauses.push(
+      `(synced_to_local = false OR (release_at IS NOT NULL AND release_at > now()))`,
+    );
   }
   if (filters.search && String(filters.search).trim()) {
     const term = `%${String(filters.search).trim()}%`;
@@ -634,7 +1000,7 @@ async function listRemoteTrips(queryFn, filters = {}) {
   const res = await queryFn(
     `SELECT id, slip_number, truck_number, customer_name, destination, material,
             operator_name, tare_weight, gross_weight, net_weight, vehicle_type,
-            timestamp_in, timestamp_out, synced_to_local, synced_at, local_id,
+            timestamp_in, timestamp_out, ticket_status, synced_to_local, synced_at, local_id, release_at,
             mcg_status, created_at, report_s3_key,
             arrival_photo_1, arrival_photo_2, arrival_photo_3,
             departure_photo_1, departure_photo_2, departure_photo_3
@@ -670,7 +1036,8 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
 
   // If PC already imported the trip before photos were attached, re-queue so
   // RemoteTripSync can download the new S3 keys onto the local ticket.
-  if (row.synced_to_local) {
+  // Held future tickets stay hidden until close time.
+  if (row.synced_to_local && !isHeldUntilOutTime(row)) {
     updates.synced_to_local = false;
     updates.synced_at = null;
   }
@@ -690,11 +1057,13 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
     } catch (err) {
       console.warn('[remoteTrip] mirror upsert on photos failed', err.message);
     }
-    // Re-notify weighbridge (INSERT trigger already fired; photos often arrive after).
-    try {
-      await queryFn(`SELECT pg_notify('new_remote_trip', $1)`, [String(trip.id)]);
-    } catch (err) {
-      console.warn('[remoteTrip] photo notify failed', err.message);
+    if (!isHeldUntilOutTime(trip)) {
+      // Re-notify weighbridge (INSERT trigger already fired; photos often arrive after).
+      try {
+        await queryFn(`SELECT pg_notify('new_remote_trip', $1)`, [String(trip.id)]);
+      } catch (err) {
+        console.warn('[remoteTrip] photo notify failed', err.message);
+      }
     }
   }
   return trip;
@@ -702,6 +1071,7 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
 
 module.exports = {
   buildCreatePayload,
+  validateRemoteTripFields,
   createRemoteTrip,
   listRemoteTrips,
   getRemoteTrip,
@@ -712,4 +1082,6 @@ module.exports = {
   releaseSlipIfLocallyRemapped,
   forceReleaseSlip,
   startMirrorReconcileWorker,
+  startOutTimeReleaseWorker,
+  runOutTimeRelease,
 };

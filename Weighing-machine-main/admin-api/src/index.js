@@ -18,7 +18,10 @@ const {
   ensureSchema: ensureSlipReservationsSchema,
   startFireWorker,
 } = require('./services/slipReservationService');
-const { startMirrorReconcileWorker } = require('./services/remoteTripService');
+const {
+  startMirrorReconcileWorker,
+  startOutTimeReleaseWorker,
+} = require('./services/remoteTripService');
 const { startVehicleReassertWorker } = require('./services/commandService');
 const { query } = require('./db');
 
@@ -80,6 +83,7 @@ async function bootstrap() {
   }
   try {
     startMirrorReconcileWorker(query, 60);
+    startOutTimeReleaseWorker(query, 15000);
     console.log('[api] remote trip → mirror reconcile worker started');
   } catch (err) {
     console.warn('[api] mirror reconcile worker failed to start', err.message);
