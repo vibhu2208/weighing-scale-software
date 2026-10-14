@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
-import { fmtDate, fmtKg, periodToRange } from '../lib/format.js';
+import { fmtDate, fmtKg, listRecentMonths, periodToRange } from '../lib/format.js';
 
 function SummaryCard({ label, value }) {
   return (
@@ -27,6 +27,7 @@ export default function Reports() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [pdfBusy, setPdfBusy] = useState('');
+  const recentMonths = listRecentMonths(4);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -125,6 +126,12 @@ export default function Reports() {
           <option value="last_7_days">Last 7 days</option>
           <option value="this_month">This month</option>
           <option value="last_month">Previous month</option>
+          <option value="last_4_months">Last 4 months</option>
+          <optgroup label="Month wise">
+            {recentMonths.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </optgroup>
         </select>
         <select
           className="field-input"

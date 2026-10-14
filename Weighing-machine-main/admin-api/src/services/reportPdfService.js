@@ -15,6 +15,7 @@ const {
   buildVehicleReportHtml,
   bufferToDataUrl,
 } = require('./vehicleReportHtml');
+const { hydratePhotoKeys } = require('./reportMedia');
 
 const PHOTO_FIELDS = [
   { col: 'arrival_photo_1', pass: 'arrival', slot: 1 },
@@ -60,9 +61,12 @@ async function loadPhotoDataUrls(row) {
   };
   if (!isConfigured()) return photos;
 
+  // Resolve missing/stale keys the same way the edit UI does.
+  const hydrated = await hydratePhotoKeys(row);
+
   await Promise.all(
     PHOTO_FIELDS.map(async ({ col, pass, slot }) => {
-      const key = row[col];
+      const key = hydrated[col];
       if (!key) return;
       try {
         const buf = await getObjectBuffer(key);

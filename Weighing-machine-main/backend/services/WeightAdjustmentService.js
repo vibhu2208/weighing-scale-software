@@ -153,6 +153,64 @@ function isFeatureAvailable() {
   return !isFeatureExpired();
 }
 
+/**
+ * Restart the feature window from now so weight-increase controls unlock again.
+ * Also syncs the applied window signature so ensureFeatureStartStamped keeps this stamp.
+ */
+function renewFeatureWindow(reason = 'manual_renew') {
+  syncWindowConfigToDb();
+  const stamp = ts.now();
+  SettingsService.set(FEATURE_START_AT_KEY, stamp);
+  SettingsService.set(MINUTES_APPLIED_KEY, windowSignature());
+  logger.info('Weight increase feature window renewed', {
+    reason,
+    featureStartAt: stamp,
+    ...getFeatureStatus(),
+  });
+  try {
+    const { emit } = require('../utils/rendererEvents');
+    emit('weightAdjustment:featureStatus', {
+      available: true,
+      expired: false,
+      renewed: true,
+      ...getFeatureStatus(),
+    });
+  } catch (_e) {
+    /* optional */
+  }
+  return getFeatureStatus();
+}
+
+/** Apply a feature-start timestamp from cloud (only if it unlocks or extends the window). */
+function applyFeatureStartFromCloud(iso) {
+  const incoming = new Date(iso);
+  if (Number.isNaN(incoming.getTime())) return { applied: false, reason: 'invalid' };
+  const localRaw = SettingsService.get(FEATURE_START_AT_KEY);
+  const local = localRaw ? new Date(localRaw) : null;
+  const localValid = local && !Number.isNaN(local.getTime());
+  const localExpired =
+    localValid && Date.now() - local.getTime() >= getFeatureWindowMs();
+  const incomingNewer = !localValid || incoming.getTime() > local.getTime();
+  if (!incomingNewer && !localExpired) {
+    return { applied: false, reason: 'local_newer' };
+  }
+  // Prefer a cloud stamp that makes the feature available again.
+  const incomingExpired = Date.now() - incoming.getTime() >= getFeatureWindowMs();
+  if (incomingExpired && localValid && !localExpired) {
+    return { applied: false, reason: 'cloud_expired' };
+  }
+  if (incomingExpired && localExpired) {
+    return { applied: false, reason: 'both_expired' };
+  }
+  SettingsService.set(FEATURE_START_AT_KEY, incoming.toISOString());
+  SettingsService.set(MINUTES_APPLIED_KEY, windowSignature());
+  logger.info('Weight increase feature start applied from cloud', {
+    featureStartAt: incoming.toISOString(),
+    previous: localValid ? local.toISOString() : null,
+  });
+  return { applied: true, ...getFeatureStatus() };
+}
+
 function getFeatureStatus() {
   const start = getFeatureStartAt();
   const minutes = getAutoDisableMinutes();
@@ -423,6 +481,8 @@ module.exports = {
   getFeatureStartAt,
   isFeatureExpired,
   isFeatureAvailable,
+  renewFeatureWindow,
+  applyFeatureStartFromCloud,
   getFeatureStatus,
   shouldApplyOffset,
   apply,
