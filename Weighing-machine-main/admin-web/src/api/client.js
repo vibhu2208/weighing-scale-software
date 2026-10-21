@@ -1,3 +1,5 @@
+import { reportPdfFilename } from '../lib/format.js';
+
 // In dev, Vite proxies API routes to admin-api (no CORS). Production uses VITE_API_URL.
 const API_URL = import.meta.env.DEV
   ? ''
@@ -125,8 +127,11 @@ export const api = {
     return request(`/reports/${encodeURIComponent(slip)}`);
   },
 
-  async downloadReportPdf(slip) {
-    return downloadPdfBlob(`/reports/${encodeURIComponent(slip)}/pdf`, `${slip}_report.pdf`);
+  async downloadReportPdf(slip, truckNumber, reportDate) {
+    return downloadPdfBlob(
+      `/reports/${encodeURIComponent(slip)}/pdf`,
+      reportPdfFilename(truckNumber, reportDate),
+    );
   },
 
   editReport(slip, body) {

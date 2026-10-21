@@ -266,7 +266,11 @@ export default function ReportEdit() {
               setPdfBusy(true);
               setError('');
               try {
-                await api.downloadReportPdf(report.slip_number || slip);
+                await api.downloadReportPdf(
+                  report.slip_number || slip,
+                  report.truck_number,
+                  report.timestamp_out || report.timestamp_in,
+                );
               } catch (err) {
                 setError(err.message);
               } finally {

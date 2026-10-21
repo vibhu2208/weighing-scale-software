@@ -18,6 +18,18 @@ export function fmtDate(iso) {
   return d.toLocaleString('en-IN');
 }
 
+export function reportPdfFilename(truckNumber, reportDate) {
+  const compactTruck = String(truckNumber || '').toUpperCase().replace(/[\s-]/g, '');
+  const last4 = compactTruck.match(/(\d{4})$/)?.[1] || 'unknown-vehicle';
+  const date = new Date(reportDate);
+  const datePart = Number.isNaN(date.getTime())
+    ? 'unknown-date'
+    : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+        date.getDate(),
+      ).padStart(2, '0')}`;
+  return `${last4}-${datePart}.pdf`;
+}
+
 function pad(n) {
   return String(n).padStart(2, '0');
 }

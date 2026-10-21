@@ -112,11 +112,9 @@ export function expandMappedAssignments(assignments, photoMapping = {}) {
   const ready = list.filter((a) => a.ready && a.trip && a.parsed);
   const candidates = new Map();
   for (const source of ready) {
-    const destinations = destinationSlotsFor(
-      source.parsed.pass,
-      source.parsed.slot,
-      photoMapping,
-    );
+    const destinations = source.directSlot
+      ? [source.parsed.slot]
+      : destinationSlotsFor(source.parsed.pass, source.parsed.slot, photoMapping);
     for (const slot of destinations) {
       if (isOpenTicket(source.trip.ticket_status) && source.parsed.pass === 'departure') continue;
       const key = `${source.trip.id}:${source.parsed.pass}:${slot}`;
@@ -222,6 +220,7 @@ export function buildPhotoAssignments(files, trips, overrides = {}) {
       return {
         fileId: file.id,
         name: file.name,
+        directSlot: Boolean(file.directSlot),
         parsed,
         trip,
         matches: picked.matches,
@@ -250,6 +249,7 @@ export function buildPhotoAssignments(files, trips, overrides = {}) {
     return {
       fileId: file.id,
       name: file.name,
+      directSlot: Boolean(file.directSlot),
       parsed,
       trip,
       matches: picked.matches,

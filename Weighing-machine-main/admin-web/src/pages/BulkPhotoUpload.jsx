@@ -1,9 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import JSZip from 'jszip';
+import blankPhotoUrl from '../assets/blank-photo.png';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
-import { fmtDate, fmtKg, periodToRange, rangeForLocalDate, ymd } from '../lib/format.js';
+import {
+  fmtDate,
+  fmtKg,
+  periodToRange,
+  rangeForLocalDate,
+  reportPdfFilename,
+  ymd,
+} from '../lib/format.js';
 import { FILL_VEHICLES, samePlate } from '../lib/fillLists.js';
 import {
   buildPhotoAssignments,
@@ -268,7 +276,7 @@ export default function BulkPhotoUpload() {
     setOperator('all');
   }
 
-  function addFiles(list) {
+  function addFiles(list, { directSlot = false } = {}) {
     const incoming = Array.from(list || []).filter(isImageFile);
     if (!incoming.length) return;
     setFiles((prev) => {
@@ -282,6 +290,7 @@ export default function BulkPhotoUpload() {
           id,
           name: file.name,
           file,
+          directSlot,
           preview: URL.createObjectURL(file),
         });
       }
@@ -289,6 +298,29 @@ export default function BulkPhotoUpload() {
     });
     setResults(null);
     setMessage('');
+  }
+
+  async function addBlankPhotoForSlot(trip, slot) {
+    const last4 = vehicleLast4(trip.truck_number);
+    if (!last4) {
+      setError(`Cannot create a camera filename for ${trip.truck_number || 'this vehicle'}.`);
+      return;
+    }
+    try {
+      setError('');
+      const response = await fetch(blankPhotoUrl);
+      if (!response.ok) throw new Error('Could not load the blank image');
+      const file = new File(
+        [await response.blob()],
+        `${last4}-${slot.code}.png`,
+        { type: 'image/png', lastModified: Date.now() },
+      );
+      const id = fileId(file);
+      addFiles([file], { directSlot: true });
+      setOverrides((prev) => ({ ...prev, [id]: trip.id }));
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   function removeFile(id) {
@@ -504,6 +536,7 @@ export default function BulkPhotoUpload() {
       const folderName = zipName(day, customDate);
       const folder = zip.folder(folderName);
       const failed = [];
+      const filenameCounts = new Map();
       await mapPool(zipTrips, 1, async (row) => {
         setProgress((p) => ({
           done: p?.done || 0,
@@ -512,7 +545,17 @@ export default function BulkPhotoUpload() {
         }));
         try {
           const blob = await api.fetchRemoteTripPdfBlob(row.id, { print: 'gross' });
-          folder.file(`${row.slip_number}_report.pdf`, blob);
+          const baseFilename = reportPdfFilename(
+            row.truck_number,
+            row.timestamp_out || row.timestamp_in,
+          );
+          const count = (filenameCounts.get(baseFilename) || 0) + 1;
+          filenameCounts.set(baseFilename, count);
+          const filename =
+            count === 1
+              ? baseFilename
+              : `${baseFilename.slice(0, -4)}-${count}.pdf`;
+          folder.file(filename, blob);
         } catch (err) {
           failed.push(`${row.slip_number}: ${err.message}`);
         }
@@ -724,13 +767,7 @@ export default function BulkPhotoUpload() {
                         const local = incoming && fileById.get(incoming.fileId);
                         const url = local?.preview || tripPhotoUrl(row, slot.pass, slot.slot);
                         return (
-                          <button
-                            key={slot.code}
-                            type="button"
-                            className="text-left"
-                            disabled={!url}
-                            onClick={() => url && setLightbox({ url, label: `${row.slip_number} ${slot.code.toUpperCase()}` })}
-                          >
+                          <div key={slot.code} className="text-left">
                             <div className="text-[10px] text-slate-500 mb-0.5 flex items-center gap-1">
                               {slot.code.toUpperCase()}
                               {incoming ? (
@@ -740,15 +777,36 @@ export default function BulkPhotoUpload() {
                               ) : null}
                             </div>
                             {url ? (
-                              <img
-                                src={url}
-                                alt=""
-                                className="h-16 w-[4.5rem] rounded object-cover bg-slate-800 border border-slate-700"
-                              />
+                              <button
+                                type="button"
+                                className="block"
+                                onClick={() =>
+                                  setLightbox({
+                                    url,
+                                    label: `${row.slip_number} ${slot.code.toUpperCase()}`,
+                                  })
+                                }
+                              >
+                                <img
+                                  src={url}
+                                  alt=""
+                                  className="h-16 w-[4.5rem] rounded object-cover bg-slate-800 border border-slate-700"
+                                />
+                              </button>
                             ) : (
-                              <div className="h-16 w-[4.5rem] rounded bg-slate-800/80 border border-dashed border-slate-700" />
+                              <div className="flex flex-col items-center gap-1">
+                                <div className="h-16 w-[4.5rem] rounded bg-slate-800/80 border border-dashed border-slate-700" />
+                                <button
+                                  type="button"
+                                  className="text-[10px] text-brand-300 hover:text-brand-200 whitespace-nowrap"
+                                  disabled={busy}
+                                  onClick={() => addBlankPhotoForSlot(row, slot)}
+                                >
+                                  Use blank
+                                </button>
+                              </div>
                             )}
-                          </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -882,7 +940,9 @@ export default function BulkPhotoUpload() {
                 const parsed = item.parsed || parseVehiclePhotoName(item.name);
                 const options = item.matches.length ? item.matches : rows;
                 const destinationCodes = parsed
-                  ? destinationSlotsFor(parsed.pass, parsed.slot, photoMapping)
+                  ? entry?.directSlot
+                    ? [parsed.slot].map((slot) => slotCode(parsed.pass, slot).toUpperCase())
+                    : destinationSlotsFor(parsed.pass, parsed.slot, photoMapping)
                       .map((slot) => slotCode(parsed.pass, slot).toUpperCase())
                   : [];
                 return (

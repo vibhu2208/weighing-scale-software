@@ -310,7 +310,11 @@ export default function Reports() {
                         setPdfBusy(row.slip_number);
                         setError('');
                         try {
-                          await api.downloadReportPdf(row.slip_number);
+                          await api.downloadReportPdf(
+                            row.slip_number,
+                            row.truck_number,
+                            row.timestamp_out || row.timestamp_in,
+                          );
                         } catch (err) {
                           setError(err.message);
                         } finally {
