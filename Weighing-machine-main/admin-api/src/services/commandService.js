@@ -123,7 +123,7 @@ async function reassertVehicleFromAppliedEdits({ hours = 72, limit = 100 } = {})
       updated += 1;
       await query(
         `UPDATE remote_trips
-         SET truck_number = $2, updated_at = now()
+         SET truck_number = $2
          WHERE UPPER(slip_number) = $1
            AND UPPER(COALESCE(truck_number, '')) IS DISTINCT FROM $2`,
         [slip, truck],

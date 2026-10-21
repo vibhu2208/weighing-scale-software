@@ -254,6 +254,13 @@ export const api = {
     });
   },
 
+  importRemoteTrips(trips, { dryRun = false } = {}) {
+    return request('/remote-trips/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ trips, dry_run: dryRun }),
+    });
+  },
+
   attachRemoteTripPhotos(id, photoS3Keys) {
     return request(`/remote-trips/${encodeURIComponent(id)}/photos`, {
       method: 'PATCH',
@@ -271,6 +278,16 @@ export const api = {
   getSlipReservations(params = {}) {
     const qs = new URLSearchParams(params).toString();
     return request(`/slip-reservations?${qs}`);
+  },
+
+  getHeldSlipWindows() {
+    return request('/slip-reservations/held-windows');
+  },
+
+  getVehicleTares(trucks, since) {
+    const params = { trucks: trucks.join(',') };
+    if (since) params.since = since;
+    return request(`/slip-reservations/vehicle-tares?${new URLSearchParams(params).toString()}`);
   },
 
   getSlipReservationHint() {

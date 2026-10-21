@@ -5,6 +5,7 @@ const { query, getSiteId } = require('../db');
 const { authMiddleware } = require('../auth');
 const {
   createRemoteTrip,
+  importRemoteTrips,
   listRemoteTrips,
   getRemoteTrip,
   attachPhotos,
@@ -86,6 +87,18 @@ router.get('/:id', async (req, res) => {
     return res.json({ ok: true, trip: await attachTripMedia(row) });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+router.post('/bulk', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const trips = Array.isArray(body) ? body : body.trips;
+    const dryRun = body.dry_run === true || body.dry_run === 'true';
+    const result = await importRemoteTrips(query, trips, { dryRun });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
   }
 });
 

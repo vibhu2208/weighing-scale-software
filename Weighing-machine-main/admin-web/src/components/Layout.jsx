@@ -4,8 +4,10 @@ import { setToken } from '../api/client.js';
 
 const nav = [
   { to: '/reports', label: 'Reports' },
-  { to: '/plan-gaps', label: 'Plan Gaps' },
-  { to: '/remote-trips', label: 'Remote Trips' },
+  { to: '/plan-gaps', label: 'Plan Gaps', end: true },
+  { to: '/plan-gaps/fill', label: 'Fill Blocked Slips' },
+  { to: '/remote-trips', label: 'Remote Trips', end: true },
+  { to: '/remote-trips/import', label: 'Bulk Import' },
   { to: '/settings/advance', label: 'Advance Settings' },
   { to: '/sync', label: 'Sync Status' },
 ];
@@ -30,6 +32,7 @@ export default function Layout() {
             <NavLink
               key={item.to}
               to={item.to}
+              end={item.end}
               className={({ isActive }) =>
                 `block rounded-lg px-3 py-2 text-sm ${
                   isActive
