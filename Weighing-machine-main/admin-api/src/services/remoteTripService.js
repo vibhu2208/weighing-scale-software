@@ -1272,8 +1272,8 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   // If PC already imported the trip before photos were attached, re-queue so
   // RemoteTripSync can download the new S3 keys onto the local ticket.
   // Held future tickets stay hidden until close time.
-  if (row.synced_to_local && !isHeldUntilOutTime(row)) {
-    updates.synced_to_local = false;
+  const heldUntilOutTime = isHeldUntilOutTime(row);
+  if (row.synced_to_local && !heldUntilOutTime) {
     updates.synced_at = null;
   }
 
@@ -1281,7 +1281,7 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   // Re-queue photo download even if trip data already imported locally.
   const sets = [
     ...cols.map((c, i) => `${c} = $${i + 2}`),
-    'synced_to_local = false',
+    ...(!heldUntilOutTime ? ['synced_to_local = false'] : []),
   ];
   const values = cols.map((c) => updates[c]);
 
