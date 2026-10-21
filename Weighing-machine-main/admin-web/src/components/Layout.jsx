@@ -8,6 +8,7 @@ const nav = [
   { to: '/plan-gaps/fill', label: 'Fill Blocked Slips' },
   { to: '/remote-trips', label: 'Remote Trips', end: true },
   { to: '/remote-trips/import', label: 'Bulk Import' },
+  { to: '/bulk-photos', label: 'Bulk Photos' },
   { to: '/settings/advance', label: 'Advance Settings' },
   { to: '/sync', label: 'Sync Status' },
 ];

@@ -6,23 +6,8 @@ import CreatedTripsSync from '../components/CreatedTripsSync.jsx';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 import { generateFillTimes } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
+import { FILL_VEHICLES as VEHICLES } from '../lib/fillLists.js';
 
-const VEHICLES = [
-  'HR65A7668',
-  'HR58D8715',
-  'HR58E3515',
-  'HR69E3748',
-  'HR69D5649',
-  'HR58C6215',
-  'UP12BT4968',
-  'HR58E3696',
-  'HR58E8815',
-  'HR38AB3093',
-  'HR58E7930',
-  'HR58E5799',
-  'PB13BE9786',
-  'UP14HT5656',
-];
 const OPERATORS = ['KARAMVEER', 'RONAK', 'MUNESH', 'CANCEL', 'SUMIT', 'PAWAN', 'MANISH'];
 const FIXED = {
   material: 'RDF',
@@ -378,7 +363,7 @@ export default function FillBlockedSlips() {
         setRefreshKey((k) => k + 1);
         setMessage(
           `Created ${data.summary.created} trip(s). The weighbridge PC picks them up on its next pull` +
-            ' (out times in the future wait until that time).',
+            ' (out times in the future wait until that time). Attach vehicle photos from Bulk Photos.',
         );
         await load();
       }
@@ -401,6 +386,10 @@ export default function FillBlockedSlips() {
           times can be edited before creating.{' '}
           <Link to="/plan-gaps" className="text-brand-300 hover:underline">
             Back to Plan Gaps
+          </Link>
+          {' · '}
+          <Link to="/bulk-photos" className="text-brand-300 hover:underline">
+            Bulk vehicle photos
           </Link>
         </p>
       </div>

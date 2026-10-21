@@ -70,6 +70,13 @@ export function periodToRange(period) {
     case 'today':
       from = startOfDay(now);
       break;
+    case 'tomorrow': {
+      const t = new Date(now);
+      t.setDate(t.getDate() + 1);
+      from = startOfDay(t);
+      to = endOfDay(t);
+      break;
+    }
     case 'yesterday': {
       const y = new Date(now);
       y.setDate(y.getDate() - 1);
@@ -96,5 +103,22 @@ export function periodToRange(period) {
       from = startOfDay(new Date(now.getTime() - 6 * 86400000));
   }
 
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
+export function ymd(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Inclusive local calendar day, e.g. 2026-10-21. */
+export function rangeForLocalDate(ymdStr) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymdStr || ''));
+  if (!match) return periodToRange('today');
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const from = new Date(year, monthIndex, day);
+  const to = new Date(year, monthIndex, day, 23, 59, 59, 999);
   return { from: from.toISOString(), to: to.toISOString() };
 }

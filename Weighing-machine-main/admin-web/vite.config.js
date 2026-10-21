@@ -19,15 +19,26 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    proxy: {
-      '/auth': 'http://127.0.0.1:3001',
-      '/reports': 'http://127.0.0.1:3001',
-      '/settings': 'http://127.0.0.1:3001',
-      '/sync': 'http://127.0.0.1:3001',
-      '/media': 'http://127.0.0.1:3001',
-      '/remote-trips': 'http://127.0.0.1:3001',
-      '/slip-reservations': 'http://127.0.0.1:3001',
-      '/health': 'http://127.0.0.1:3001',
-    },
+    proxy: Object.fromEntries(
+      [
+        '/auth',
+        '/reports',
+        '/settings',
+        '/sync',
+        '/media',
+        '/remote-trips',
+        '/slip-reservations',
+        '/health',
+      ].map((prefix) => [
+        prefix,
+        {
+          target: 'http://127.0.0.1:3001',
+          bypass(req) {
+            if (req.headers.accept?.includes('text/html')) return '/index.html';
+            return undefined;
+          },
+        },
+      ]),
+    ),
   },
 });

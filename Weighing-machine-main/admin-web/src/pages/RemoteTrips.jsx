@@ -785,6 +785,10 @@ export default function RemoteTrips() {
           <Link to="/remote-trips/import" className="text-brand-300 hover:underline">
             Bulk import from JSON
           </Link>
+          {' · '}
+          <Link to="/bulk-photos" className="text-brand-300 hover:underline">
+            Bulk vehicle photos
+          </Link>
           .
         </p>
       </div>

@@ -319,6 +319,9 @@ export default function PlanGaps() {
           <Link to="/plan-gaps/fill" className="btn-ghost">
             Fill blocked slips in bulk
           </Link>
+          <Link to="/bulk-photos" className="btn-ghost">
+            Bulk vehicle photos
+          </Link>
         </div>
       </form>
 

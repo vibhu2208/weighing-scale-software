@@ -11,30 +11,52 @@ const {
   attachPhotos,
 } = require('../services/remoteTripService');
 const { generateTripPdf } = require('../services/reportPdfService');
-const { isConfigured, presignGet } = require('../services/s3Presign');
+const { grossWeightTimestamp } = require('../services/vehicleReportHtml');
+const { isConfigured, presignGet, getObjectBuffer, mirrorReportKey } = require('../services/s3Presign');
 
 const router = express.Router();
 router.use(authMiddleware);
 
+const PHOTO_COLS = [
+  'arrival_photo_1',
+  'arrival_photo_2',
+  'arrival_photo_3',
+  'departure_photo_1',
+  'departure_photo_2',
+  'departure_photo_3',
+];
+
 async function attachTripMedia(row) {
-  if (!row || !isConfigured()) return row;
+  if (!row) return row;
   const out = { ...row };
+  out.has_photos = PHOTO_COLS.some((c) => Boolean(out[c]));
+  if (!isConfigured()) return out;
+
+  const tasks = [];
   if (out.report_s3_key) {
-    try {
-      out.report_url = await presignGet(out.report_s3_key);
-    } catch {
-      out.report_url = null;
-    }
+    tasks.push(
+      presignGet(out.report_s3_key)
+        .then((url) => {
+          out.report_url = url;
+        })
+        .catch(() => {
+          out.report_url = null;
+        }),
+    );
   }
-  const photoCols = [
-    'arrival_photo_1',
-    'arrival_photo_2',
-    'arrival_photo_3',
-    'departure_photo_1',
-    'departure_photo_2',
-    'departure_photo_3',
-  ];
-  out.has_photos = photoCols.some((c) => Boolean(out[c]));
+  for (const col of PHOTO_COLS) {
+    if (!out[col]) continue;
+    tasks.push(
+      presignGet(out[col])
+        .then((url) => {
+          out[`${col}_url`] = url;
+        })
+        .catch(() => {
+          out[`${col}_url`] = null;
+        }),
+    );
+  }
+  if (tasks.length) await Promise.all(tasks);
   return out;
 }
 
@@ -54,27 +76,49 @@ router.get('/:id/pdf', async (req, res) => {
     if (!trip) return res.status(404).json({ ok: false, error: 'Not found' });
 
     const siteId = getSiteId();
-    const built = await generateTripPdf(trip, { siteId, upload: true });
+    const filename = `${trip.slip_number}_report.pdf`;
+    const printGross = String(req.query.print || '') === 'gross';
+    let pdf = null;
 
-    if (built.report_s3_key) {
-      await query(`UPDATE remote_trips SET report_s3_key = $2 WHERE id = $1`, [
-        trip.id,
-        built.report_s3_key,
-      ]);
-      await query(
-        `UPDATE transactions_mirror
-         SET report_s3_key = $3, updated_at = now()
-         WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
-        [siteId, trip.slip_number, built.report_s3_key],
+    if (!printGross) {
+      const existingKeys = [trip.report_s3_key, mirrorReportKey(siteId, trip.slip_number)].filter(
+        Boolean,
       );
+      for (const key of existingKeys) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          pdf = await getObjectBuffer(key);
+        } catch {
+          pdf = null;
+        }
+        if (pdf) break;
+      }
+    }
+
+    if (!pdf) {
+      const built = await generateTripPdf(trip, {
+        siteId,
+        upload: true,
+        printAt: printGross ? grossWeightTimestamp(trip) : undefined,
+      });
+      pdf = built.pdf;
+      if (built.report_s3_key) {
+        await query(`UPDATE remote_trips SET report_s3_key = $2 WHERE id = $1`, [
+          trip.id,
+          built.report_s3_key,
+        ]);
+        await query(
+          `UPDATE transactions_mirror
+           SET report_s3_key = $3, updated_at = now()
+           WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+          [siteId, trip.slip_number, built.report_s3_key],
+        );
+      }
     }
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${built.filename}"`,
-    );
-    return res.send(built.pdf);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(pdf);
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

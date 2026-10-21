@@ -1190,6 +1190,12 @@ function startMirrorReconcileWorker(queryFn, everySec = 60) {
   if (typeof reconcileTimer.unref === 'function') reconcileTimer.unref();
 }
 
+function readIsoBound(value) {
+  if (value == null || value === '') return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 async function listRemoteTrips(queryFn, filters = {}) {
   const clauses = [];
   const params = [];
@@ -1209,8 +1215,22 @@ async function listRemoteTrips(queryFn, filters = {}) {
     idx += 1;
   }
 
+  const from = readIsoBound(filters.from);
+  const to = readIsoBound(filters.to);
+  if (from) {
+    clauses.push(`COALESCE(timestamp_in, created_at) >= $${idx}`);
+    params.push(from);
+    idx += 1;
+  }
+  if (to) {
+    clauses.push(`COALESCE(timestamp_in, created_at) <= $${idx}`);
+    params.push(to);
+    idx += 1;
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 200));
+  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 500));
+  const orderBy = from || to ? 'timestamp_in ASC NULLS LAST, created_at ASC' : 'created_at DESC';
 
   const res = await queryFn(
     `SELECT id, slip_number, truck_number, customer_name, destination, material,
@@ -1220,7 +1240,7 @@ async function listRemoteTrips(queryFn, filters = {}) {
             arrival_photo_1, arrival_photo_2, arrival_photo_3,
             departure_photo_1, departure_photo_2, departure_photo_3
      FROM remote_trips ${where}
-     ORDER BY created_at DESC
+     ORDER BY ${orderBy}
      LIMIT $${idx}`,
     [...params, limit],
   );
