@@ -62,84 +62,99 @@ export function filledPhotoCount(trip) {
 
 const SLOT_NUMS = [1, 2, 3];
 
-export function normalizeShareSlots(slots) {
+function normalizeSlots(slots) {
   return [...new Set((slots || []).map(Number).filter((n) => SLOT_NUMS.includes(n)))].sort(
     (a, b) => a - b,
   );
 }
 
-export function defaultShareConfig() {
-  return { arrival: [], departure: [] };
+export function defaultPhotoMapping() {
+  return {
+    arrival: { 1: [1, 2], 2: [3], 3: [3] },
+    departure: { 1: [1], 2: [2], 3: [3] },
+  };
 }
 
 export function slotCode(pass, slot) {
   return `${pass === 'departure' ? 'dc' : 'ac'}${slot}`;
 }
 
-/** Slots that receive the same photo as `slot` for this pass (includes `slot`). */
-export function sharedSlotsFor(pass, slot, shareConfig) {
-  const group = normalizeShareSlots(shareConfig?.[pass]);
-  if (group.length < 2 || !group.includes(Number(slot))) return [Number(slot)];
-  return group;
+/** Destination slots for an uploaded source camera; missing mappings keep the source slot. */
+export function destinationSlotsFor(pass, slot, photoMapping) {
+  const destinations = photoMapping?.[pass]?.[slot];
+  return Array.isArray(destinations) ? normalizeSlots(destinations) : [Number(slot)];
 }
 
-export function shareConfigLabel(shareConfig) {
+export function photoMappingLabel(photoMapping) {
   const parts = [];
   for (const pass of ['arrival', 'departure']) {
-    const group = normalizeShareSlots(shareConfig?.[pass]);
-    if (group.length < 2) continue;
-    parts.push(group.map((slot) => slotCode(pass, slot).toUpperCase()).join('='));
-  }
-  return parts.join(' · ') || 'Cameras independent';
-}
-
-/**
- * When a share group is set (e.g. AC1=AC2), copy a ready assignment onto empty
- * sibling slots on the same trip. An explicit file for a sibling slot wins.
- */
-export function expandSharedAssignments(assignments, shareConfig = {}) {
-  const list = assignments || [];
-  const ready = list.filter((a) => a.ready && a.trip && a.parsed);
-  const occupied = new Set(ready.map((a) => `${a.trip.id}:${a.parsed.pass}:${a.parsed.slot}`));
-  const extra = [];
-
-  for (const pass of ['arrival', 'departure']) {
-    const group = normalizeShareSlots(shareConfig[pass]);
-    if (group.length < 2) continue;
-
-    const byTrip = new Map();
-    for (const item of ready) {
-      if (item.parsed.pass !== pass || !group.includes(item.parsed.slot)) continue;
-      const bucket = byTrip.get(item.trip.id) || [];
-      bucket.push(item);
-      byTrip.set(item.trip.id, bucket);
-    }
-
-    for (const sources of byTrip.values()) {
-      const source = sources.slice().sort((a, b) => a.parsed.slot - b.parsed.slot)[0];
-      if (isOpenTicket(source.trip.ticket_status) && pass === 'departure') continue;
-      for (const slot of group) {
-        const key = `${source.trip.id}:${pass}:${slot}`;
-        if (occupied.has(key)) continue;
-        occupied.add(key);
-        extra.push({
-          ...source,
-          copiedFrom: source.parsed.code,
-          parsed: {
-            ...source.parsed,
-            slot,
-            code: slotCode(pass, slot),
-          },
-          replace: tripPhotoFilled(source.trip, pass, slot),
-          warning: `Copied from ${source.parsed.code.toUpperCase()} (camera share)`,
-          error: '',
-          ready: true,
-        });
+    for (const source of SLOT_NUMS) {
+      const destinations = destinationSlotsFor(pass, source, photoMapping);
+      if (destinations.length === 1 && destinations[0] === source) continue;
+      if (destinations.length) {
+        parts.push(
+          `${slotCode(pass, source).toUpperCase()} -> ${destinations
+            .map((slot) => slotCode(pass, slot).toUpperCase())
+            .join('+')}`,
+        );
       }
     }
   }
+  return parts.join(' · ') || 'Cameras mapped to themselves';
+}
 
-  return extra.length ? [...list, ...extra] : list;
+/**
+ * Map each ready source image onto its configured destination slots. A direct
+ * image for a destination takes precedence over an image routed into that slot.
+ */
+export function expandMappedAssignments(assignments, photoMapping = {}) {
+  const list = assignments || [];
+  const ready = list.filter((a) => a.ready && a.trip && a.parsed);
+  const candidates = new Map();
+  for (const source of ready) {
+    const destinations = destinationSlotsFor(
+      source.parsed.pass,
+      source.parsed.slot,
+      photoMapping,
+    );
+    for (const slot of destinations) {
+      if (isOpenTicket(source.trip.ticket_status) && source.parsed.pass === 'departure') continue;
+      const key = `${source.trip.id}:${source.parsed.pass}:${slot}`;
+      const bucket = candidates.get(key) || [];
+      bucket.push({ source, slot });
+      candidates.set(key, bucket);
+    }
+  }
+
+  const mapped = [];
+  for (const bucket of candidates.values()) {
+    bucket.sort(
+      (a, b) =>
+        Number(b.source.parsed.slot === b.slot) -
+          Number(a.source.parsed.slot === a.slot) ||
+        a.source.parsed.slot - b.source.parsed.slot,
+    );
+    const { source, slot } = bucket[0];
+    if (source.parsed.slot === slot) {
+      mapped.push(source);
+      continue;
+    }
+    mapped.push({
+      ...source,
+      copiedFrom: source.parsed.code,
+      parsed: {
+        ...source.parsed,
+        slot,
+        code: slotCode(source.parsed.pass, slot),
+      },
+      replace: tripPhotoFilled(source.trip, source.parsed.pass, slot),
+      warning: `Mapped from ${source.parsed.code.toUpperCase()}`,
+      error: '',
+      ready: true,
+    });
+  }
+
+  return [...list.filter((item) => !item.ready), ...mapped];
 }
 
 function tripTime(trip) {
