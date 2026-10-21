@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client.js';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
+import blankPhotoUrl from '../assets/blank-photo.png';
 
 const PHOTO_SLOTS = [1, 2, 3];
 
@@ -31,6 +32,7 @@ function PhotoSlot({
   existingUrl,
   previewUrl,
   onFileChange,
+  onUseBlankImage,
   disabled,
 }) {
   return (
@@ -49,7 +51,17 @@ function PhotoSlot({
         ) : existingUrl ? (
           <img src={existingUrl} alt={title} className="h-full w-full object-cover" />
         ) : (
-          <span className="text-[10px] text-slate-500 px-2 text-center">No photo</span>
+          <div className="flex flex-col items-center gap-2">
+            <span className="text-[10px] text-slate-500 px-2 text-center">No photo</span>
+            <button
+              type="button"
+              className="btn-ghost text-xs"
+              disabled={disabled}
+              onClick={() => onUseBlankImage(pass, slot)}
+            >
+              Use blank image
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -134,6 +146,18 @@ export default function ReportEdit() {
       else delete next[key];
       return next;
     });
+  }
+
+  async function onUseBlankImage(pass, slot) {
+    setError('');
+    try {
+      const response = await fetch(blankPhotoUrl);
+      if (!response.ok) throw new Error('Could not load the blank image');
+      const file = new File([await response.blob()], 'blank-photo.png', { type: 'image/png' });
+      onPhotoFileChange(pass, slot, file);
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   async function uploadPhoto(pass, slot, file) {
@@ -373,6 +397,7 @@ export default function ReportEdit() {
                     existingUrl={report?.[`${columnPrefix}_${slot}_url`]}
                     previewUrl={previews[photoKey(pass, slot)]}
                     onFileChange={onPhotoFileChange}
+                    onUseBlankImage={onUseBlankImage}
                     disabled={saving}
                   />
                 ))}
