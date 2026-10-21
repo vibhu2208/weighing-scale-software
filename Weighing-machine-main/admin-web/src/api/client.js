@@ -59,7 +59,7 @@ function fileToDataUrl(file) {
   });
 }
 
-async function downloadPdfBlob(path, filename) {
+async function fetchPdfBlob(path) {
   const headers = {};
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -86,15 +86,22 @@ async function downloadPdfBlob(path, filename) {
     throw new Error(json.error || `PDF download failed (${res.status})`);
   }
 
-  const blob = await res.blob();
+  return res.blob();
+}
+
+function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = filename || 'report.pdf';
+  a.download = filename || 'download';
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+async function downloadPdfBlob(path, filename) {
+  saveBlob(await fetchPdfBlob(path), filename || 'report.pdf');
 }
 
 export const api = {
@@ -254,6 +261,13 @@ export const api = {
     });
   },
 
+  importRemoteTrips(trips, { dryRun = false } = {}) {
+    return request('/remote-trips/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ trips, dry_run: dryRun }),
+    });
+  },
+
   attachRemoteTripPhotos(id, photoS3Keys) {
     return request(`/remote-trips/${encodeURIComponent(id)}/photos`, {
       method: 'PATCH',
@@ -268,9 +282,27 @@ export const api = {
     );
   },
 
+  fetchRemoteTripPdfBlob(id, params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    const suffix = qs ? `?${qs}` : '';
+    return fetchPdfBlob(`/remote-trips/${encodeURIComponent(id)}/pdf${suffix}`);
+  },
+
+  saveBlob,
+
   getSlipReservations(params = {}) {
     const qs = new URLSearchParams(params).toString();
     return request(`/slip-reservations?${qs}`);
+  },
+
+  getHeldSlipWindows() {
+    return request('/slip-reservations/held-windows');
+  },
+
+  getVehicleTares(trucks, since) {
+    const params = { trucks: trucks.join(',') };
+    if (since) params.since = since;
+    return request(`/slip-reservations/vehicle-tares?${new URLSearchParams(params).toString()}`);
   },
 
   getSlipReservationHint() {

@@ -163,6 +163,7 @@ async function generateTripPdf(row, options = {}) {
       ...row,
       company: row.company || 'DCC',
       ticket_status: row.ticket_status || 'CLOSED',
+      print_at: options.printAt || row.print_at || undefined,
     },
     companySettings(),
     photoDataUrls,

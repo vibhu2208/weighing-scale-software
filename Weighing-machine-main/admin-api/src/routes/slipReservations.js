@@ -7,6 +7,8 @@ const {
   getCounterHint,
   planReservations,
   listReservations,
+  listHeldWithNeighbors,
+  listVehicleTares,
   getSummary,
   releaseReservation,
   fireReservationNow,
@@ -29,6 +31,25 @@ router.get('/hint', async (_req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+router.get('/held-windows', async (_req, res) => {
+  try {
+    const rows = await listHeldWithNeighbors();
+    return res.json({ ok: true, rows });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+router.get('/vehicle-tares', async (req, res) => {
+  try {
+    const rows = await listVehicleTares(req.query.trucks, req.query.since);
+    return res.json({ ok: true, rows });
+  } catch (err) {
+    const status = /Invalid|At most/.test(err.message) ? 400 : 500;
+    return res.status(status).json({ ok: false, error: err.message });
   }
 });
 

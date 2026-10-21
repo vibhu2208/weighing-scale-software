@@ -638,7 +638,7 @@ export default function RemoteTrips() {
     const reservationId = searchParams.get('reservation');
     if (!reservationId || !reservations.length) return;
     const row = reservations.find((r) => r.id === reservationId);
-    if (!row) return;
+    if (!row || row.weighbridge_conflict) return;
     applyReservation(row);
     setSearchParams({}, { replace: true });
   }, [searchParams, reservations, setSearchParams]);
@@ -780,7 +780,16 @@ export default function RemoteTrips() {
           <Link to="/plan-gaps" className="text-brand-300 hover:underline">
             Plan slip gaps
           </Link>{' '}
-          to schedule times; slips block automatically 5 minutes before each planned time.
+          to schedule times; slips block automatically 5 minutes before each planned time. Have
+          many trips?{' '}
+          <Link to="/remote-trips/import" className="text-brand-300 hover:underline">
+            Bulk import from JSON
+          </Link>
+          {' · '}
+          <Link to="/bulk-photos" className="text-brand-300 hover:underline">
+            Bulk vehicle photos
+          </Link>
+          .
         </p>
       </div>
 
@@ -827,9 +836,16 @@ export default function RemoteTrips() {
           >
             <option value="">None — allocate new slip at end of series</option>
             {reservations.map((r) => (
-              <option key={r.id} value={r.id}>
+              <option key={r.id} value={r.id} disabled={!!r.weighbridge_conflict}>
                 {r.slip_number} · planned {fmtDate(r.planned_at)}
                 {r.note ? ` · ${r.note}` : ''}
+                {r.weighbridge_conflict
+                  ? ` · used on weighbridge${
+                      r.weighbridge_conflict.truck_number
+                        ? ` (${r.weighbridge_conflict.truck_number})`
+                        : ''
+                    }`
+                  : ''}
               </option>
             ))}
           </select>

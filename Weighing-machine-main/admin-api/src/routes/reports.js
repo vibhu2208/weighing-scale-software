@@ -296,7 +296,7 @@ router.post('/:slip/edit', async (req, res) => {
         if (truckNumber) {
           await query(
             `UPDATE remote_trips
-             SET truck_number = $2, updated_at = now()
+             SET truck_number = $2
              WHERE id = $1`,
             [rt.rows[0].id, truckNumber],
           );

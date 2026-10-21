@@ -8,7 +8,10 @@ import ReportEdit from './pages/ReportEdit.jsx';
 import AdvanceSettings from './pages/AdvanceSettings.jsx';
 import SyncStatus from './pages/SyncStatus.jsx';
 import RemoteTrips from './pages/RemoteTrips.jsx';
+import RemoteTripsImport from './pages/RemoteTripsImport.jsx';
 import PlanGaps from './pages/PlanGaps.jsx';
+import FillBlockedSlips from './pages/FillBlockedSlips.jsx';
+import BulkPhotoUpload from './pages/BulkPhotoUpload.jsx';
 
 function PrivateRoute({ children }) {
   if (!isLoggedIn()) return <Navigate to="/login" replace />;
@@ -32,7 +35,10 @@ export default function App() {
           <Route path="reports" element={<Reports />} />
           <Route path="reports/:slip/edit" element={<ReportEdit />} />
           <Route path="remote-trips" element={<RemoteTrips />} />
+          <Route path="remote-trips/import" element={<RemoteTripsImport />} />
+          <Route path="bulk-photos" element={<BulkPhotoUpload />} />
           <Route path="plan-gaps" element={<PlanGaps />} />
+          <Route path="plan-gaps/fill" element={<FillBlockedSlips />} />
           <Route path="settings/advance" element={<AdvanceSettings />} />
           <Route path="sync" element={<SyncStatus />} />
         </Route>

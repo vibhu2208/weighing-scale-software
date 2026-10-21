@@ -39,6 +39,11 @@ function netWeightTimestamp(row) {
   return row.timestamp_out || null;
 }
 
+function printTimestamp(row) {
+  if (row?.print_at) return row.print_at;
+  return grossWeightTimestamp(row) || new Date();
+}
+
 function toDisplay(value) {
   if (!value) return '—';
   const d = value instanceof Date ? value : new Date(value);
@@ -248,7 +253,7 @@ function buildVehicleReportPage(row, company = {}, photoDataUrls = {}) {
         <div class="site-name">${escapeHtml(siteName)}</div>
         <div class="weighbridge-id">${escapeHtml(weighbridgeId)}</div>
       </div>
-      <div class="print-date">Print Date : ${escapeHtml(toDisplay(new Date()))}</div>
+      <div class="print-date">Print Date : ${escapeHtml(toDisplay(printTimestamp(row)))}</div>
     </div>
 
     <div class="details-grid">
@@ -293,4 +298,5 @@ module.exports = {
   fileToDataUrl,
   bufferToDataUrl,
   brandCompanyForTicket,
+  grossWeightTimestamp,
 };

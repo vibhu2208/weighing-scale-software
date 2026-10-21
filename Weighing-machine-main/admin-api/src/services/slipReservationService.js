@@ -1,6 +1,6 @@
 'use strict';
 
-const { getPool, query } = require('../db');
+const { getPool, query, getSiteId } = require('../db');
 
 const FIRE_EARLY_MINUTES = 5;
 const MISS_AFTER_MINUTES = 30;
@@ -424,19 +424,56 @@ function stopFireWorker() {
   }
 }
 
+/**
+ * When the weighbridge can't reach RDS it numbers tickets from its local
+ * counter, which knows nothing about held slips — so a held slip can already
+ * belong to a real local ticket. Rows owned by a remote trip are ours, not a clash.
+ * Expects the reservation aliased as `r`.
+ */
+function weighbridgeTicketOnSlipSql(siteParam) {
+  return `FROM transactions_mirror m
+    WHERE m.site_id = ${siteParam}
+      AND m.slip_number = r.slip_number
+      AND NOT EXISTS (SELECT 1 FROM remote_trips rt WHERE rt.slip_number = m.slip_number)`;
+}
+
+async function findWeighbridgeConflict(slipNumber, queryFn = query) {
+  const slip = String(slipNumber || '').trim().toUpperCase();
+  if (!slip) return null;
+  const res = await queryFn(
+    `SELECT m.truck_number, m.timestamp_in, m.ticket_status
+     FROM transactions_mirror m
+     WHERE m.site_id = $1
+       AND m.slip_number = $2
+       AND NOT EXISTS (SELECT 1 FROM remote_trips rt WHERE rt.slip_number = m.slip_number)
+     LIMIT 1`,
+    [getSiteId(), slip],
+  );
+  return res.rows[0] || null;
+}
+
 async function getSummary() {
   await ensureSchema();
-  const res = await query(
-    `SELECT status, COUNT(*)::int AS count
-     FROM slip_reservations
-     GROUP BY status`,
-  );
+  const [res, conflicts] = await Promise.all([
+    query(
+      `SELECT status, COUNT(*)::int AS count
+       FROM slip_reservations
+       GROUP BY status`,
+    ),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM slip_reservations r
+       WHERE r.status = 'held' AND EXISTS (SELECT 1 ${weighbridgeTicketOnSlipSql('$1')})`,
+      [getSiteId()],
+    ),
+  ]);
   const summary = {
     scheduled: 0,
     held: 0,
     used: 0,
     released: 0,
     missed: 0,
+    conflict: Number(conflicts.rows[0]?.count) || 0,
   };
   for (const row of res.rows || []) {
     if (Object.prototype.hasOwnProperty.call(summary, row.status)) {
@@ -449,12 +486,14 @@ async function getSummary() {
 async function listReservations(filters = {}) {
   await ensureSchema();
   const clauses = [];
-  const params = [];
-  let idx = 1;
+  const params = [getSiteId()];
+  let idx = 2;
 
   const statusFilter = String(filters.status || '').trim();
   if (statusFilter === 'active') {
     clauses.push(`status IN ('scheduled', 'held', 'missed')`);
+  } else if (statusFilter === 'conflict') {
+    clauses.push(`status = 'held' AND EXISTS (SELECT 1 ${weighbridgeTicketOnSlipSql('$1')})`);
   } else if (statusFilter && statusFilter !== 'all') {
     clauses.push(`status = $${idx}`);
     params.push(statusFilter);
@@ -469,8 +508,17 @@ async function listReservations(filters = {}) {
   const limit = Math.max(1, Math.min(Number(filters.limit) || 100, 300));
 
   const res = await query(
-    `SELECT *
-     FROM slip_reservations
+    `SELECT r.*,
+       (SELECT json_build_object(
+           'truck_number', m.truck_number,
+           'timestamp_in', m.timestamp_in,
+           'ticket_status', m.ticket_status
+         )
+         ${weighbridgeTicketOnSlipSql('$1')}
+           AND r.status = 'held'
+         LIMIT 1
+       ) AS weighbridge_conflict
+     FROM slip_reservations r
      ${where}
      ORDER BY
        CASE status
@@ -486,6 +534,117 @@ async function listReservations(filters = {}) {
     [...params, limit],
   );
   return res.rows || [];
+}
+
+/** Neighbours further than this many slip numbers away are ignored (keeps the ticket scan small). */
+const NEIGHBOR_SLIP_RANGE = 1000;
+
+/**
+ * Blocked (held, unfilled) slips with the nearest real ticket below and above
+ * each one, so a fill can place its first-weigh time between them. Held slips
+ * have no ticket yet, so runs of consecutive blocked slips share neighbours.
+ */
+async function listHeldWithNeighbors() {
+  await ensureSchema();
+  const res = await query(
+    `WITH held AS (
+       SELECT r.id, r.slip_number, r.planned_at, r.note, r.blocked_at,
+              CAST(substring(r.slip_number from '[0-9]+$') AS bigint) AS n
+       FROM slip_reservations r
+       WHERE r.status = 'held'
+         AND r.slip_number ~* '^WB[0-9]+$'
+         AND NOT EXISTS (SELECT 1 ${weighbridgeTicketOnSlipSql('$1')})
+     ),
+     bounds AS (
+       SELECT MIN(n) - $2 AS lo, MAX(n) + $2 AS hi FROM held
+     ),
+     tickets AS (
+       SELECT t.slip_number, t.timestamp_in, t.operator_name, t.n
+       FROM (
+         SELECT UPPER(m.slip_number) AS slip_number, m.timestamp_in, m.operator_name,
+                CAST(substring(m.slip_number from '[0-9]+$') AS bigint) AS n
+         FROM transactions_mirror m
+         WHERE m.site_id = $1 AND m.slip_number ~* '^WB[0-9]+$' AND m.timestamp_in IS NOT NULL
+         UNION
+         SELECT UPPER(rt.slip_number), rt.timestamp_in, rt.operator_name,
+                CAST(substring(rt.slip_number from '[0-9]+$') AS bigint)
+         FROM remote_trips rt
+         WHERE rt.slip_number ~* '^WB[0-9]+$' AND rt.timestamp_in IS NOT NULL
+       ) t, bounds b
+       WHERE t.n BETWEEN b.lo AND b.hi
+     )
+     SELECT h.id, h.slip_number, h.planned_at, h.note, h.blocked_at,
+            p.slip_number AS prev_slip, p.timestamp_in AS prev_in, p.operator_name AS prev_operator,
+            x.slip_number AS next_slip, x.timestamp_in AS next_in, x.operator_name AS next_operator
+     FROM held h
+     LEFT JOIN LATERAL (
+       SELECT slip_number, timestamp_in, operator_name FROM tickets t
+       WHERE t.n < h.n
+       ORDER BY t.n DESC, (t.operator_name IS NULL OR t.operator_name = ''), t.timestamp_in DESC
+       LIMIT 1
+     ) p ON true
+     LEFT JOIN LATERAL (
+       SELECT slip_number, timestamp_in, operator_name FROM tickets t
+       WHERE t.n > h.n
+       ORDER BY t.n ASC, (t.operator_name IS NULL OR t.operator_name = ''), t.timestamp_in ASC
+       LIMIT 1
+     ) x ON true
+     ORDER BY h.n ASC`,
+    [getSiteId(), NEIGHBOR_SLIP_RANGE],
+  );
+  return (res.rows || []).map((r) => ({
+    id: r.id,
+    slip_number: r.slip_number,
+    planned_at: r.planned_at,
+    note: r.note,
+    blocked_at: r.blocked_at,
+    prev: r.prev_slip
+      ? { slip_number: r.prev_slip, timestamp_in: r.prev_in, operator_name: r.prev_operator || null }
+      : null,
+    next: r.next_slip
+      ? { slip_number: r.next_slip, timestamp_in: r.next_in, operator_name: r.next_operator || null }
+      : null,
+  }));
+}
+
+const MAX_TARE_TRUCKS = 50;
+
+/** Recent tare weights for the given vehicles (newest first), used to seed fill weights. */
+async function listVehicleTares(trucks = [], since = null) {
+  const plates = [
+    ...new Set(
+      (Array.isArray(trucks) ? trucks : String(trucks || '').split(','))
+        .map((t) => String(t || '').toUpperCase().replace(/[\s-]/g, ''))
+        .filter(Boolean),
+    ),
+  ];
+  if (!plates.length) return [];
+  if (plates.length > MAX_TARE_TRUCKS) {
+    throw new Error(`At most ${MAX_TARE_TRUCKS} vehicles per request`);
+  }
+  let sinceIso = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
+  if (since) {
+    const parsed = new Date(since);
+    if (Number.isNaN(parsed.getTime())) throw new Error('Invalid since');
+    sinceIso = parsed.toISOString();
+  }
+  const res = await query(
+    `SELECT UPPER(REPLACE(REPLACE(truck_number, ' ', ''), '-', '')) AS truck_number,
+            slip_number, tare_weight, timestamp_in
+     FROM transactions_mirror
+     WHERE site_id = $1
+       AND UPPER(REPLACE(REPLACE(truck_number, ' ', ''), '-', '')) = ANY($2)
+       AND tare_weight > 0
+       AND timestamp_in >= $3
+     ORDER BY timestamp_in DESC`,
+    [getSiteId(), plates, sinceIso],
+  );
+  return (res.rows || []).map((r) => ({
+    truck_number: r.truck_number,
+    slip_number: r.slip_number,
+    tare_weight: Number(r.tare_weight),
+    timestamp_in: r.timestamp_in,
+  }));
 }
 
 async function getReservation(id) {
@@ -547,9 +706,12 @@ module.exports = {
   getCounterHint,
   planReservations,
   listReservations,
+  listHeldWithNeighbors,
+  listVehicleTares,
   getSummary,
   getReservation,
   getHeldBySlip,
+  findWeighbridgeConflict,
   releaseReservation,
   markReservationUsed,
   fireDueReservations,

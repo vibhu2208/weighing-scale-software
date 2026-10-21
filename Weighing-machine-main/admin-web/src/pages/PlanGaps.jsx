@@ -31,7 +31,8 @@ function fireAtIso(plannedAt) {
   return new Date(d.getTime() - FIRE_EARLY_MS).toISOString();
 }
 
-function statusTone(status) {
+function statusTone(status, conflict) {
+  if (conflict) return 'danger';
   if (status === 'held') return 'warning';
   if (status === 'used') return 'success';
   if (status === 'scheduled') return 'info';
@@ -40,7 +41,8 @@ function statusTone(status) {
   return 'default';
 }
 
-function statusLabel(status) {
+function statusLabel(status, conflict) {
+  if (conflict) return 'used by weighbridge';
   if (status === 'held') return 'blocked';
   if (status === 'used') return 'filled';
   return status;
@@ -58,6 +60,7 @@ export default function PlanGaps() {
     used: 0,
     released: 0,
     missed: 0,
+    conflict: 0,
   });
   const [filter, setFilter] = useState('active');
   const [loading, setLoading] = useState(false);
@@ -219,6 +222,7 @@ export default function PlanGaps() {
         {[
           { key: 'scheduled', label: 'Scheduled' },
           { key: 'held', label: 'Blocked (unfilled)' },
+          { key: 'conflict', label: 'Used by weighbridge' },
           { key: 'used', label: 'Filled' },
           { key: 'missed', label: 'Missed' },
           { key: 'released', label: 'Released' },
@@ -312,6 +316,12 @@ export default function PlanGaps() {
           <Link to="/remote-trips" className="btn-ghost">
             Go to Remote Trips
           </Link>
+          <Link to="/plan-gaps/fill" className="btn-ghost">
+            Fill blocked slips in bulk
+          </Link>
+          <Link to="/bulk-photos" className="btn-ghost">
+            Bulk vehicle photos
+          </Link>
         </div>
       </form>
 
@@ -327,6 +337,7 @@ export default function PlanGaps() {
               <option value="active">Active (scheduled + blocked + missed)</option>
               <option value="scheduled">Scheduled</option>
               <option value="held">Blocked (unfilled)</option>
+              <option value="conflict">Used by weighbridge</option>
               <option value="used">Filled</option>
               <option value="missed">Missed</option>
               <option value="released">Released</option>
@@ -358,7 +369,18 @@ export default function PlanGaps() {
                   <td className="p-3 text-xs text-slate-400">{fmtDate(fireAtIso(row.planned_at))}</td>
                   <td className="p-3 font-mono text-xs">{row.slip_number || '—'}</td>
                   <td className="p-3">
-                    <Badge tone={statusTone(row.status)}>{statusLabel(row.status)}</Badge>
+                    <Badge tone={statusTone(row.status, row.weighbridge_conflict)}>
+                      {statusLabel(row.status, row.weighbridge_conflict)}
+                    </Badge>
+                    {row.weighbridge_conflict && (
+                      <p className="text-[11px] text-red-300/90 mt-1 max-w-[14rem]">
+                        Weighbridge ticket
+                        {row.weighbridge_conflict.truck_number
+                          ? ` ${row.weighbridge_conflict.truck_number}`
+                          : ''}{' '}
+                        · in {fmtDate(row.weighbridge_conflict.timestamp_in)}. Release this gap.
+                      </p>
+                    )}
                     {row.fire_error && (
                       <p className="text-[11px] text-red-300/90 mt-1 max-w-[14rem]">{row.fire_error}</p>
                     )}
@@ -376,7 +398,7 @@ export default function PlanGaps() {
                           Block now
                         </button>
                       )}
-                      {row.status === 'held' && (
+                      {row.status === 'held' && !row.weighbridge_conflict && (
                         <Link
                           className="btn-ghost text-xs"
                           to={`/remote-trips?reservation=${encodeURIComponent(row.id)}`}

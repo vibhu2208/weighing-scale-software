@@ -1,8 +1,8 @@
 'use strict';
 
-const { markReservationUsed } = require('./slipReservationService');
+const { markReservationUsed, findWeighbridgeConflict } = require('./slipReservationService');
 const { getList } = require('./settingsService');
-const { getSiteId } = require('../db');
+const { getSiteId, getPool } = require('../db');
 
 const ALLOWED_VEHICLE_TYPES = ['HYWA', 'TRUCK', 'TANKER', 'CONTAINER'];
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
@@ -336,6 +336,18 @@ function buildCreatePayload(body = {}, lists = {}) {
 }
 
 /**
+ * The weighbridge marks a remote trip synced before its CloudAdminSync push
+ * lands in transactions_mirror (minutes when RDS is slow). A missing mirror
+ * row inside this window means "not pushed yet", not "stale".
+ */
+const MIRROR_PUSH_GRACE_MS = 30 * 60 * 1000;
+
+function syncedWithinMirrorGrace(row) {
+  const at = row?.synced_at ? new Date(row.synced_at).getTime() : NaN;
+  return Number.isFinite(at) && Date.now() - at < MIRROR_PUSH_GRACE_MS;
+}
+
+/**
  * If this slip still sits on remote_trips but the weighbridge remapped the
  * ticket locally (mirror has the same local_id under a different slip), move
  * the remote row to the local slip — or delete the stale remote row — so the
@@ -423,7 +435,7 @@ async function releaseSlipIfLocallyRemapped(queryFn, slipNumber, siteId = getSit
   }
 
   // Synced remote trip, but slip no longer exists in mirror at all → stale blocker.
-  if (existing.synced_to_local) {
+  if (existing.synced_to_local && !syncedWithinMirrorGrace(existing)) {
     const mirrorBySlip = await queryFn(
       `SELECT local_id FROM transactions_mirror
        WHERE site_id = $1 AND UPPER(slip_number) = $2
@@ -475,20 +487,63 @@ async function forceReleaseSlip(queryFn, slipNumber, siteId = getSiteId()) {
   };
 }
 
-async function ensureReleaseColumn(queryFn) {
-  await queryFn(
-    `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS release_at TIMESTAMPTZ`,
+async function loadRemoteTripColumns(queryFn) {
+  const res = await queryFn(
+    `SELECT column_name, is_nullable FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'remote_trips'`,
   );
+  return new Map((res.rows || []).map((r) => [r.column_name, r.is_nullable === 'YES']));
 }
 
+/**
+ * ALTER TABLE needs an exclusive lock: while it waits, every other query on
+ * remote_trips queues behind it and the pool runs dry. Only run DDL that is
+ * actually missing, and give up quickly if the table is busy.
+ */
+async function runRemoteTripDdl(statements) {
+  if (!statements.length) return;
+  const client = await getPool().connect();
+  try {
+    await client.query(`SET lock_timeout = '3s'`);
+    for (const sql of statements) {
+      await client.query(sql);
+    }
+  } finally {
+    await client.query('RESET lock_timeout').catch(() => {});
+    client.release();
+  }
+}
+
+let releaseColumnReady = false;
+async function ensureReleaseColumn(queryFn) {
+  if (releaseColumnReady) return;
+  const cols = await loadRemoteTripColumns(queryFn);
+  if (!cols.has('release_at')) {
+    await runRemoteTripDdl([
+      `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS release_at TIMESTAMPTZ`,
+    ]);
+  }
+  releaseColumnReady = true;
+}
+
+let openTicketColumnsReady = false;
 /** Open tickets store only the first weigh, so the second weight and close time may be null. */
 async function ensureOpenTicketColumns(queryFn) {
-  await queryFn(`ALTER TABLE remote_trips ALTER COLUMN tare_weight DROP NOT NULL`);
-  await queryFn(`ALTER TABLE remote_trips ALTER COLUMN gross_weight DROP NOT NULL`);
-  await queryFn(`ALTER TABLE remote_trips ALTER COLUMN timestamp_out DROP NOT NULL`);
-  await queryFn(
-    `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS ticket_status TEXT NOT NULL DEFAULT 'CLOSED'`,
-  );
+  if (openTicketColumnsReady) return;
+  const cols = await loadRemoteTripColumns(queryFn);
+  const ddl = [];
+  for (const col of ['tare_weight', 'gross_weight', 'timestamp_out']) {
+    if (cols.get(col) === false) {
+      ddl.push(`ALTER TABLE remote_trips ALTER COLUMN ${col} DROP NOT NULL`);
+    }
+  }
+  if (!cols.has('ticket_status')) {
+    ddl.push(
+      `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS ticket_status TEXT NOT NULL DEFAULT 'CLOSED'`,
+    );
+  }
+  await runRemoteTripDdl(ddl);
+  openTicketColumnsReady = true;
 }
 
 function isHeldUntilOutTime(row) {
@@ -558,10 +613,10 @@ function startOutTimeReleaseWorker(queryFn, intervalMs = 15000) {
   if (typeof outTimeTimer.unref === 'function') outTimeTimer.unref();
 }
 
-async function createRemoteTrip(queryFn, body = {}) {
+async function createRemoteTrip(queryFn, body = {}, options = {}) {
   await ensureReleaseColumn(queryFn);
   await ensureOpenTicketColumns(queryFn);
-  const lists = await loadMasterLists();
+  const lists = options.lists || (await loadMasterLists());
   const data = buildCreatePayload(body, lists);
   const forceReplace = Boolean(body.replace_existing || body.force_replace);
 
@@ -582,15 +637,25 @@ async function createRemoteTrip(queryFn, body = {}) {
     if (row.status !== 'held' || !row.slip_number) {
       throw new Error('Reserved slip not found or already used/released');
     }
+    const clash = await findWeighbridgeConflict(row.slip_number, queryFn);
+    if (clash) {
+      throw new Error(
+        `Slip ${row.slip_number} is already used on the weighbridge` +
+          (clash.truck_number ? ` (truck ${clash.truck_number})` : '') +
+          '. Release this gap and pick another slip.',
+      );
+    }
     data.slip_number = String(row.slip_number).toUpperCase();
   }
 
   if (data.slip_number) {
     // Refresh all synced remote_trips from local mirror before claiming this slip.
-    try {
-      await reconcileRemoteTripsFromMirror(queryFn);
-    } catch (err) {
-      console.warn('[remoteTrip] pre-create reconcile from mirror failed', err.message);
+    if (!options.skipReconcile) {
+      try {
+        await reconcileRemoteTripsFromMirror(queryFn);
+      } catch (err) {
+        console.warn('[remoteTrip] pre-create reconcile from mirror failed', err.message);
+      }
     }
 
     if (forceReplace) {
@@ -655,6 +720,144 @@ async function createRemoteTrip(queryFn, body = {}) {
   }
 
   return trip;
+}
+
+const BULK_MAX_TRIPS = 500;
+
+function bulkRowLabel(body) {
+  const src = body && typeof body === 'object' ? body : {};
+  return {
+    slip_number: src.slip_number ? compactToken(src.slip_number) : null,
+    truck_number: src.truck_number ? compactToken(src.truck_number) : null,
+  };
+}
+
+/**
+ * Validate (and unless dryRun, create) many remote trips. Rows are created one
+ * at a time so auto-assigned slips stay sequential; a failing row does not stop
+ * the rest.
+ */
+async function importRemoteTrips(queryFn, trips, { dryRun = false } = {}) {
+  if (!Array.isArray(trips) || !trips.length) {
+    throw new Error('Send a non-empty "trips" array');
+  }
+  if (trips.length > BULK_MAX_TRIPS) {
+    throw new Error(`At most ${BULK_MAX_TRIPS} trips per import (got ${trips.length})`);
+  }
+
+  await ensureReleaseColumn(queryFn);
+  await ensureOpenTicketColumns(queryFn);
+  const lists = await loadMasterLists();
+
+  const slipRows = new Map();
+  const results = trips.map((body, index) => {
+    const row = { index, ...bulkRowLabel(body), status: 'valid', errors: [], warnings: [] };
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      row.status = 'invalid';
+      row.errors.push('Row must be a JSON object');
+      return row;
+    }
+    const { errors, values } = validateRemoteTripFields(body, lists);
+    const messages = Object.values(errors).filter(Boolean);
+    if (messages.length) {
+      row.status = 'invalid';
+      row.errors.push(...messages);
+    }
+    if (values.slip_number) {
+      row.slip_number = values.slip_number;
+      if (!slipRows.has(values.slip_number)) slipRows.set(values.slip_number, []);
+      slipRows.get(values.slip_number).push(index);
+    }
+    return row;
+  });
+
+  for (const [slip, indexes] of slipRows) {
+    if (indexes.length < 2) continue;
+    for (const i of indexes) {
+      results[i].status = 'invalid';
+      results[i].errors.push(
+        `Slip ${slip} appears ${indexes.length} times in this file (rows ${indexes.map((n) => n + 1).join(', ')})`,
+      );
+    }
+  }
+
+  const explicitSlips = [...slipRows.keys()];
+  if (explicitSlips.length) {
+    const [remoteRes, localRes] = await Promise.all([
+      queryFn(
+        `SELECT UPPER(slip_number) AS slip, truck_number FROM remote_trips
+         WHERE UPPER(slip_number) = ANY($1)`,
+        [explicitSlips],
+      ),
+      queryFn(
+        `SELECT UPPER(m.slip_number) AS slip, m.truck_number FROM transactions_mirror m
+         WHERE m.site_id = $1 AND UPPER(m.slip_number) = ANY($2)
+           AND NOT EXISTS (
+             SELECT 1 FROM remote_trips rt WHERE UPPER(rt.slip_number) = UPPER(m.slip_number)
+           )`,
+        [getSiteId(), explicitSlips],
+      ),
+    ]);
+    const inRemote = new Map((remoteRes.rows || []).map((r) => [r.slip, r.truck_number]));
+    const onWeighbridge = new Map((localRes.rows || []).map((r) => [r.slip, r.truck_number]));
+    for (const row of results) {
+      if (!row.slip_number || row.status !== 'valid') continue;
+      const replace = Boolean(trips[row.index].replace_existing || trips[row.index].force_replace);
+      if (inRemote.has(row.slip_number) && !replace) {
+        const truck = inRemote.get(row.slip_number);
+        row.warnings.push(
+          `Slip ${row.slip_number} already exists in remote trips${truck ? ` (truck ${truck})` : ''}; ` +
+            'import fails unless that row is stale or replace_existing is true',
+        );
+      }
+      if (onWeighbridge.has(row.slip_number)) {
+        const truck = onWeighbridge.get(row.slip_number);
+        row.warnings.push(
+          `Slip ${row.slip_number} is already used on the weighbridge${truck ? ` (truck ${truck})` : ''}`,
+        );
+      }
+    }
+  }
+
+  if (!dryRun) {
+    if (explicitSlips.length) {
+      try {
+        await reconcileRemoteTripsFromMirror(queryFn);
+      } catch (err) {
+        console.warn('[remoteTrip] bulk pre-import reconcile from mirror failed', err.message);
+      }
+    }
+    for (const row of results) {
+      if (row.status !== 'valid') continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const trip = await createRemoteTrip(queryFn, trips[row.index], {
+          lists,
+          skipReconcile: true,
+        });
+        row.status = 'created';
+        row.id = trip.id;
+        row.slip_number = trip.slip_number;
+      } catch (err) {
+        row.status = 'failed';
+        row.errors.push(err.message);
+      }
+    }
+  }
+
+  const count = (status) => results.filter((r) => r.status === status).length;
+  return {
+    dry_run: Boolean(dryRun),
+    summary: {
+      total: results.length,
+      valid: count('valid'),
+      invalid: count('invalid'),
+      created: count('created'),
+      failed: count('failed'),
+      warnings: results.filter((r) => r.warnings.length).length,
+    },
+    results,
+  };
 }
 
 /**
@@ -814,6 +1017,7 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
       }
 
       if (!mirror) {
+        if (syncedWithinMirrorGrace(rt)) continue;
         await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [rt.id]);
         deleted += 1;
         console.log('[remoteTrip] removed stale remote_trips row (not in local mirror)', {
@@ -986,6 +1190,12 @@ function startMirrorReconcileWorker(queryFn, everySec = 60) {
   if (typeof reconcileTimer.unref === 'function') reconcileTimer.unref();
 }
 
+function readIsoBound(value) {
+  if (value == null || value === '') return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 async function listRemoteTrips(queryFn, filters = {}) {
   const clauses = [];
   const params = [];
@@ -1005,8 +1215,22 @@ async function listRemoteTrips(queryFn, filters = {}) {
     idx += 1;
   }
 
+  const from = readIsoBound(filters.from);
+  const to = readIsoBound(filters.to);
+  if (from) {
+    clauses.push(`COALESCE(timestamp_in, created_at) >= $${idx}`);
+    params.push(from);
+    idx += 1;
+  }
+  if (to) {
+    clauses.push(`COALESCE(timestamp_in, created_at) <= $${idx}`);
+    params.push(to);
+    idx += 1;
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 200));
+  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 500));
+  const orderBy = from || to ? 'timestamp_in ASC NULLS LAST, created_at ASC' : 'created_at DESC';
 
   const res = await queryFn(
     `SELECT id, slip_number, truck_number, customer_name, destination, material,
@@ -1016,7 +1240,7 @@ async function listRemoteTrips(queryFn, filters = {}) {
             arrival_photo_1, arrival_photo_2, arrival_photo_3,
             departure_photo_1, departure_photo_2, departure_photo_3
      FROM remote_trips ${where}
-     ORDER BY created_at DESC
+     ORDER BY ${orderBy}
      LIMIT $${idx}`,
     [...params, limit],
   );
@@ -1088,6 +1312,8 @@ module.exports = {
   buildCreatePayload,
   validateRemoteTripFields,
   createRemoteTrip,
+  importRemoteTrips,
+  BULK_MAX_TRIPS,
   listRemoteTrips,
   getRemoteTrip,
   attachPhotos,
