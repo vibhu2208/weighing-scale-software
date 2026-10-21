@@ -12,7 +12,7 @@ import {
   ticketStatusVariant,
 } from '../lib/ticketStatus.js';
 import { mcgStatusLabel, mcgStatusTitle, mcgStatusVariant } from '../lib/mcgStatus.js';
-import { getPeriodRange, todayISO, toFilterTimestamps } from '../lib/reportDates.js';
+import { getPeriodRange, listRecentMonths, todayISO, toFilterTimestamps } from '../lib/reportDates.js';
 import { listTripCameraImages } from '../lib/tripPhotos.js';
 
 const PAGE_SIZE = 50;
@@ -103,6 +103,7 @@ export default function Reports() {
   const [previewTicket, setPreviewTicket] = useState(null);
   const [galleryTicket, setGalleryTicket] = useState(null);
   const [calendarOpen, setCalendarOpen] = useState(false);
+  const recentMonths = useMemo(() => listRecentMonths(4), []);
 
   useEffect(() => {
     const range = getPeriodRange(period, from, to);
@@ -480,6 +481,12 @@ export default function Reports() {
               <option value="last_week">Last Week</option>
               <option value="this_month">This Month</option>
               <option value="last_month">Last Month</option>
+              <option value="last_4_months">Last 4 Months</option>
+              <optgroup label="Month wise">
+                {recentMonths.map((m) => (
+                  <option key={m.id} value={m.id}>{m.label}</option>
+                ))}
+              </optgroup>
               <option value="custom">Custom Range</option>
             </select>
           </label>

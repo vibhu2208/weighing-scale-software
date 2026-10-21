@@ -18,11 +18,50 @@ export function fmtDate(iso) {
   return d.toLocaleString('en-IN');
 }
 
+function pad(n) {
+  return String(n).padStart(2, '0');
+}
+
+/** Last N calendar months (newest first), for month-wise report filters. */
+export function listRecentMonths(count = 4) {
+  const now = new Date();
+  const months = [];
+  for (let i = 0; i < count; i += 1) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({
+      id: `month:${d.getFullYear()}-${pad(d.getMonth() + 1)}`,
+      label: d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+    });
+  }
+  return months;
+}
+
+function parseMonthPeriod(period) {
+  if (!period || !String(period).startsWith('month:')) return null;
+  const match = /^month:(\d{4})-(\d{2})$/.exec(period);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (!Number.isFinite(year) || monthIndex < 0 || monthIndex > 11) return null;
+  return { year, monthIndex };
+}
+
 export function periodToRange(period) {
   const now = new Date();
   const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const endOfDay = (d) =>
     new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+
+  const monthPeriod = parseMonthPeriod(period);
+  if (monthPeriod) {
+    const from = new Date(monthPeriod.year, monthPeriod.monthIndex, 1);
+    const isCurrent =
+      monthPeriod.year === now.getFullYear() && monthPeriod.monthIndex === now.getMonth();
+    const to = isCurrent
+      ? endOfDay(now)
+      : new Date(monthPeriod.year, monthPeriod.monthIndex + 1, 0, 23, 59, 59, 999);
+    return { from: from.toISOString(), to: to.toISOString() };
+  }
 
   let from;
   let to = endOfDay(now);
@@ -50,6 +89,9 @@ export function periodToRange(period) {
       to = new Date(prev.getFullYear(), prev.getMonth() + 1, 0, 23, 59, 59, 999);
       break;
     }
+    case 'last_4_months':
+      from = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+      break;
     default:
       from = startOfDay(new Date(now.getTime() - 6 * 86400000));
   }

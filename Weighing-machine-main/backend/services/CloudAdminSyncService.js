@@ -42,11 +42,6 @@ const REMOTE_SAFE_KEYS = new Set([
   'companies_list',
 ]);
 
-/** Local-owned keys — pulled from cloud must not overwrite the site clock. */
-const LOCAL_AUTHORITATIVE_KEYS = new Set([
-  'WEIGHT_ADJUSTMENT_FEATURE_START_AT',
-]);
-
 function intervalSeconds() {
   return Math.max(15, parseInt(process.env.ADMIN_SYNC_INTERVAL_SECONDS || '30', 10));
 }
@@ -509,7 +504,23 @@ async function pullSettings() {
   ]);
   for (const row of res.rows || []) {
     if (!REMOTE_SAFE_KEYS.has(row.key)) continue;
-    if (LOCAL_AUTHORITATIVE_KEYS.has(row.key)) continue;
+
+    if (row.key === 'WEIGHT_ADJUSTMENT_FEATURE_START_AT') {
+      try {
+        const WeightAdjustmentService = require('./WeightAdjustmentService');
+        const result = WeightAdjustmentService.applyFeatureStartFromCloud(row.value);
+        if (result.applied) {
+          logger.info('CloudAdminSync applied weight feature renew', {
+            featureStartAt: row.value,
+            available: result.available,
+          });
+        }
+      } catch (_e) {
+        /* optional */
+      }
+      continue;
+    }
+
     if (SettingsService.get(row.key) !== row.value) {
       if (row.key === 'WEIGHT_ADJUSTMENT_ENABLED' || row.key === 'WEIGHT_OFFSET_KG') {
         try {
@@ -543,6 +554,11 @@ async function pullSettings() {
 async function pushWeightFeatureMeta() {
   try {
     const WeightAdjustmentService = require('./WeightAdjustmentService');
+    // Never push an expired clock — that would overwrite a cloud unlock.
+    if (!WeightAdjustmentService.isFeatureAvailable()) {
+      logger.info('CloudAdminSync skipped weight feature meta push — local window expired');
+      return;
+    }
     const start = WeightAdjustmentService.getFeatureStartAt().toISOString();
     const days = String(WeightAdjustmentService.getAutoDisableDays());
     const minutes = WeightAdjustmentService.getAutoDisableMinutes();
@@ -591,8 +607,9 @@ async function processNow() {
       await processPushQueue();
       // Keep open tickets mirrored even when the catch-up job is busy with closed slips.
       await pushAllOpenTickets();
-      await pushWeightFeatureMeta();
+      // Pull first so a cloud unlock of the weight-increase window is not overwritten.
       await pullSettings();
+      await pushWeightFeatureMeta();
       await pg.query('UPDATE sites SET last_push_at = now() WHERE id = $1', [getSiteId()]);
     } while (rerunRequested && passes < 3);
     return { ok: true };

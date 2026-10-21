@@ -65,17 +65,35 @@ async function getAdvanceSettings() {
   return map;
 }
 
+async function renewWeightFeatureWindow(updatedBy) {
+  const siteId = getSiteId();
+  const stamp = new Date().toISOString();
+  await query(
+    `INSERT INTO site_settings (site_id, key, value, updated_at, updated_by)
+     VALUES ($1, $2, $3, now(), $4)
+     ON CONFLICT (site_id, key) DO UPDATE SET
+       value = EXCLUDED.value,
+       updated_at = now(),
+       updated_by = EXCLUDED.updated_by`,
+    [siteId, 'WEIGHT_ADJUSTMENT_FEATURE_START_AT', stamp, updatedBy || null],
+  );
+  return getWeightFeatureStatus();
+}
+
 async function putAdvanceSettings(values = {}, updatedBy) {
   const siteId = getSiteId();
   const keys = Object.keys(values);
   if (!keys.length) throw new Error('No settings provided');
 
-  const feature = await getWeightFeatureStatus();
+  let feature = await getWeightFeatureStatus();
+  const touchesWeightUi = keys.some((key) => WEIGHT_UI_KEYS.has(key));
+  if (touchesWeightUi && !feature.available) {
+    feature = await renewWeightFeatureWindow(updatedBy);
+  }
+
   for (const key of keys) {
     if (key === 'WEIGHT_ADJUSTMENT_FEATURE_AVAILABLE') continue;
-    if (key === 'WEIGHT_ADJUSTMENT_FEATURE_START_AT') {
-      throw new Error('Feature start time cannot be changed remotely');
-    }
+    if (key === 'WEIGHT_ADJUSTMENT_FEATURE_START_AT') continue;
     assertRemoteKey(key);
     if (WEIGHT_UI_KEYS.has(key) && !feature.available) {
       throw new Error('Technical error: WEIGHT_ADJUSTMENT-error');
@@ -124,6 +142,8 @@ async function putList(name, items, updatedBy) {
 module.exports = {
   getAdvanceSettings,
   putAdvanceSettings,
+  renewWeightFeatureWindow,
+  getWeightFeatureStatus,
   getList,
   putList,
 };

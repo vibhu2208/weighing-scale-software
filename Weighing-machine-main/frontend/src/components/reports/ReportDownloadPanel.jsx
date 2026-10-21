@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
-import { getPeriodRange, todayISO, toFilterTimestamps } from '../../lib/reportDates.js';
+import React, { useMemo, useState } from 'react';
+import { getPeriodRange, listRecentMonths, todayISO, toFilterTimestamps } from '../../lib/reportDates.js';
 
-const DATE_PRESETS = [
+const BASE_DATE_PRESETS = [
   { id: 'today', label: 'Today' },
   { id: 'yesterday', label: 'Yesterday' },
   { id: 'last_3_days', label: '3 Days' },
   { id: 'last_7_days', label: '7 Days' },
   { id: 'this_month', label: 'This Month' },
+  { id: 'last_4_months', label: '4 Months' },
   { id: 'custom', label: 'Custom' },
 ];
 
@@ -30,6 +31,13 @@ export default function ReportDownloadPanel({ onExport, busy }) {
   const [preset, setPreset] = useState('today');
   const [customFrom, setCustomFrom] = useState(todayISO());
   const [customTo, setCustomTo] = useState(todayISO());
+  const datePresets = useMemo(() => {
+    const months = listRecentMonths(4).map((m) => ({
+      id: m.id,
+      label: new Date(m.year, m.monthIndex, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }),
+    }));
+    return [...BASE_DATE_PRESETS.slice(0, -1), ...months, BASE_DATE_PRESETS[BASE_DATE_PRESETS.length - 1]];
+  }, []);
 
   const range = preset === 'custom'
     ? getPeriodRange('custom', customFrom, customTo)
@@ -51,7 +59,7 @@ export default function ReportDownloadPanel({ onExport, busy }) {
         <div>
           <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">Date Range</p>
           <div className="flex flex-wrap gap-2">
-            {DATE_PRESETS.map((p) => (
+            {datePresets.map((p) => (
               <PresetChip key={p.id} active={preset === p.id} onClick={() => setPreset(p.id)}>
                 {p.label}
               </PresetChip>

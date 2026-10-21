@@ -39,8 +39,54 @@ function endOfMonth(d) {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0);
 }
 
+function monthKey(year, monthIndex) {
+  return `month:${year}-${pad(monthIndex + 1)}`;
+}
+
+function parseMonthPeriod(period) {
+  if (!period || !String(period).startsWith('month:')) return null;
+  const match = /^month:(\d{4})-(\d{2})$/.exec(period);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (!Number.isFinite(year) || monthIndex < 0 || monthIndex > 11) return null;
+  return { year, monthIndex };
+}
+
+/** Last N calendar months (newest first), for month-wise report filters. */
+export function listRecentMonths(count = 4) {
+  const now = new Date();
+  const months = [];
+  for (let i = 0; i < count; i += 1) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const year = d.getFullYear();
+    const monthIndex = d.getMonth();
+    months.push({
+      id: monthKey(year, monthIndex),
+      label: d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+      year,
+      monthIndex,
+    });
+  }
+  return months;
+}
+
+function rangeForMonth(year, monthIndex, now = new Date()) {
+  const start = new Date(year, monthIndex, 1);
+  const end =
+    year === now.getFullYear() && monthIndex === now.getMonth()
+      ? now
+      : endOfMonth(start);
+  const label = start.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  return { from: toIsoDate(start), to: toIsoDate(end), label };
+}
+
 export function getPeriodRange(period, customFrom, customTo) {
   const now = new Date();
+  const monthPeriod = parseMonthPeriod(period);
+  if (monthPeriod) {
+    return rangeForMonth(monthPeriod.year, monthPeriod.monthIndex, now);
+  }
 
   switch (period) {
     case 'today':
@@ -70,6 +116,10 @@ export function getPeriodRange(period, customFrom, customTo) {
       const start = startOfMonth(prev);
       const end = endOfMonth(prev);
       return { from: toIsoDate(start), to: toIsoDate(end), label: 'Last Month' };
+    }
+    case 'last_4_months': {
+      const start = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 3, 1));
+      return { from: toIsoDate(start), to: toIsoDate(now), label: 'Last 4 Months' };
     }
     case 'last_3_days': {
       const start = new Date(now);
