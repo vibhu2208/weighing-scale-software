@@ -60,6 +60,88 @@ export function filledPhotoCount(trip) {
   return expectedPhotoSlots(trip).filter((s) => tripPhotoFilled(trip, s.pass, s.slot)).length;
 }
 
+const SLOT_NUMS = [1, 2, 3];
+
+export function normalizeShareSlots(slots) {
+  return [...new Set((slots || []).map(Number).filter((n) => SLOT_NUMS.includes(n)))].sort(
+    (a, b) => a - b,
+  );
+}
+
+export function defaultShareConfig() {
+  return { arrival: [], departure: [] };
+}
+
+export function slotCode(pass, slot) {
+  return `${pass === 'departure' ? 'dc' : 'ac'}${slot}`;
+}
+
+/** Slots that receive the same photo as `slot` for this pass (includes `slot`). */
+export function sharedSlotsFor(pass, slot, shareConfig) {
+  const group = normalizeShareSlots(shareConfig?.[pass]);
+  if (group.length < 2 || !group.includes(Number(slot))) return [Number(slot)];
+  return group;
+}
+
+export function shareConfigLabel(shareConfig) {
+  const parts = [];
+  for (const pass of ['arrival', 'departure']) {
+    const group = normalizeShareSlots(shareConfig?.[pass]);
+    if (group.length < 2) continue;
+    parts.push(group.map((slot) => slotCode(pass, slot).toUpperCase()).join('='));
+  }
+  return parts.join(' · ') || 'Cameras independent';
+}
+
+/**
+ * When a share group is set (e.g. AC1=AC2), copy a ready assignment onto empty
+ * sibling slots on the same trip. An explicit file for a sibling slot wins.
+ */
+export function expandSharedAssignments(assignments, shareConfig = {}) {
+  const list = assignments || [];
+  const ready = list.filter((a) => a.ready && a.trip && a.parsed);
+  const occupied = new Set(ready.map((a) => `${a.trip.id}:${a.parsed.pass}:${a.parsed.slot}`));
+  const extra = [];
+
+  for (const pass of ['arrival', 'departure']) {
+    const group = normalizeShareSlots(shareConfig[pass]);
+    if (group.length < 2) continue;
+
+    const byTrip = new Map();
+    for (const item of ready) {
+      if (item.parsed.pass !== pass || !group.includes(item.parsed.slot)) continue;
+      const bucket = byTrip.get(item.trip.id) || [];
+      bucket.push(item);
+      byTrip.set(item.trip.id, bucket);
+    }
+
+    for (const sources of byTrip.values()) {
+      const source = sources.slice().sort((a, b) => a.parsed.slot - b.parsed.slot)[0];
+      if (isOpenTicket(source.trip.ticket_status) && pass === 'departure') continue;
+      for (const slot of group) {
+        const key = `${source.trip.id}:${pass}:${slot}`;
+        if (occupied.has(key)) continue;
+        occupied.add(key);
+        extra.push({
+          ...source,
+          copiedFrom: source.parsed.code,
+          parsed: {
+            ...source.parsed,
+            slot,
+            code: slotCode(pass, slot),
+          },
+          replace: tripPhotoFilled(source.trip, pass, slot),
+          warning: `Copied from ${source.parsed.code.toUpperCase()} (camera share)`,
+          error: '',
+          ready: true,
+        });
+      }
+    }
+  }
+
+  return extra.length ? [...list, ...extra] : list;
+}
+
 function tripTime(trip) {
   const t = new Date(trip?.timestamp_in || trip?.created_at || 0).getTime();
   return Number.isFinite(t) ? t : 0;

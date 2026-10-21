@@ -7,10 +7,15 @@ import { fmtDate, fmtKg, periodToRange, rangeForLocalDate, ymd } from '../lib/fo
 import { FILL_VEHICLES, samePlate } from '../lib/fillLists.js';
 import {
   buildPhotoAssignments,
+  defaultShareConfig,
+  expandSharedAssignments,
   expectedPhotoSlots,
   filledPhotoCount,
   isOpenTicket,
   parseVehiclePhotoName,
+  shareConfigLabel,
+  sharedSlotsFor,
+  slotCode,
   tripPhotoUrl,
   vehicleLast4,
 } from '../lib/bulkVehiclePhotos.js';
@@ -72,6 +77,39 @@ function zipName(day, customDate) {
   return `remote-reports-${stamp}`;
 }
 
+const SHARE_STORAGE_KEY = 'wb_bulk_photo_share';
+const SHARE_PRESETS = [
+  { label: 'Independent', slots: [] },
+  { label: '1 = 2', slots: [1, 2] },
+  { label: '2 = 3', slots: [2, 3] },
+  { label: '1 = 3', slots: [1, 3] },
+  { label: 'All three', slots: [1, 2, 3] },
+];
+
+function loadShareConfig() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SHARE_STORAGE_KEY) || '');
+    return {
+      arrival: Array.isArray(raw?.arrival) ? raw.arrival.map(Number).filter((n) => n >= 1 && n <= 3) : [],
+      departure: Array.isArray(raw?.departure)
+        ? raw.departure.map(Number).filter((n) => n >= 1 && n <= 3)
+        : [],
+    };
+  } catch {
+    return defaultShareConfig();
+  }
+}
+
+function saveShareConfig(config) {
+  localStorage.setItem(SHARE_STORAGE_KEY, JSON.stringify(config));
+}
+
+function sameSlots(a, b) {
+  const left = [...(a || [])].sort().join(',');
+  const right = [...(b || [])].sort().join(',');
+  return left === right;
+}
+
 export default function BulkPhotoUpload() {
   const [day, setDay] = useState('today');
   const [customDate, setCustomDate] = useState(ymd());
@@ -95,6 +133,9 @@ export default function BulkPhotoUpload() {
   const [zipOpen, setZipOpen] = useState(false);
   const [zipVehicles, setZipVehicles] = useState([]);
   const [lightbox, setLightbox] = useState(null);
+  const [shareConfig, setShareConfig] = useState(loadShareConfig);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [draftShare, setDraftShare] = useState(defaultShareConfig);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -168,9 +209,13 @@ export default function BulkPhotoUpload() {
     () => buildPhotoAssignments(files, rows, overrides),
     [files, rows, overrides],
   );
+  const expandedAssignments = useMemo(
+    () => expandSharedAssignments(assignments, shareConfig),
+    [assignments, shareConfig],
+  );
   const fileById = useMemo(() => new Map(files.map((f) => [f.id, f])), [files]);
-  const ready = assignments.filter((a) => a.ready);
-  const problemCount = assignments.length - ready.length;
+  const ready = expandedAssignments.filter((a) => a.ready);
+  const problemCount = assignments.filter((a) => !a.ready).length;
   const tripIds = [...new Set(ready.map((a) => a.trip.id))];
   const incomingByTrip = useMemo(() => {
     const map = new Map();
@@ -259,6 +304,33 @@ export default function BulkPhotoUpload() {
   function setTripOverride(fileIdValue, tripId) {
     setOverrides((prev) => ({ ...prev, [fileIdValue]: tripId }));
     setResults(null);
+  }
+
+  function openShareConfig() {
+    setDraftShare({
+      arrival: [...(shareConfig.arrival || [])],
+      departure: [...(shareConfig.departure || [])],
+    });
+    setConfigOpen(true);
+  }
+
+  function toggleDraftSlot(pass, slot) {
+    setDraftShare((prev) => {
+      const current = new Set(prev[pass] || []);
+      if (current.has(slot)) current.delete(slot);
+      else current.add(slot);
+      return { ...prev, [pass]: [...current].sort((a, b) => a - b) };
+    });
+  }
+
+  function applyShareConfig() {
+    const next = {
+      arrival: (draftShare.arrival || []).filter((n) => n >= 1 && n <= 3),
+      departure: (draftShare.departure || []).filter((n) => n >= 1 && n <= 3),
+    };
+    setShareConfig(next);
+    saveShareConfig(next);
+    setConfigOpen(false);
   }
 
   async function uploadAll() {
@@ -644,7 +716,11 @@ export default function BulkPhotoUpload() {
                           >
                             <div className="text-[10px] text-slate-500 mb-0.5 flex items-center gap-1">
                               {slot.code.toUpperCase()}
-                              {incoming ? <span className="text-brand-300">new</span> : null}
+                              {incoming ? (
+                                <span className="text-brand-300">
+                                  {incoming.copiedFrom ? 'copy' : 'new'}
+                                </span>
+                              ) : null}
                             </div>
                             {url ? (
                               <img
@@ -722,13 +798,28 @@ export default function BulkPhotoUpload() {
               }}
             />
           </label>
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            disabled={busy}
+            onClick={openShareConfig}
+          >
+            Configuration
+          </button>
           {files.length > 0 && (
-            <button type="button" className="btn-ghost text-xs" onClick={clearFiles} disabled={busy}>
-              Clear {files.length} file{files.length === 1 ? '' : 's'}
+            <button
+              type="button"
+              className="btn-ghost text-xs text-red-300 hover:text-red-200"
+              onClick={clearFiles}
+              disabled={busy}
+            >
+              Clear all
             </button>
           )}
           <span className="text-xs text-slate-500">
             Drop images here · names like 8715-ac1.jpg / 4968-dc2.jpg
+            {' · '}
+            {shareConfigLabel(shareConfig)}
           </span>
         </div>
         {!files.length && (
@@ -741,6 +832,22 @@ export default function BulkPhotoUpload() {
 
       {files.length > 0 && (
         <div className="card overflow-x-auto">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 pt-3">
+            <p className="text-xs text-slate-400">
+              {files.length} selected image{files.length === 1 ? '' : 's'}
+              {ready.length !== assignments.filter((a) => a.ready).length
+                ? ` · ${ready.length} slot(s) after camera share`
+                : ''}
+            </p>
+            <button
+              type="button"
+              className="btn-ghost text-xs text-red-300 hover:text-red-200"
+              onClick={clearFiles}
+              disabled={busy}
+            >
+              Clear all
+            </button>
+          </div>
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-slate-400 border-b border-slate-800">
@@ -757,6 +864,11 @@ export default function BulkPhotoUpload() {
                 const entry = fileById.get(item.fileId);
                 const parsed = item.parsed || parseVehiclePhotoName(item.name);
                 const options = item.matches.length ? item.matches : rows;
+                const alsoCodes = parsed
+                  ? sharedSlotsFor(parsed.pass, parsed.slot, shareConfig)
+                      .filter((slot) => slot !== parsed.slot)
+                      .map((slot) => slotCode(parsed.pass, slot).toUpperCase())
+                  : [];
                 return (
                   <tr key={item.fileId} className="border-b border-slate-800/60 align-top">
                     <td className="p-3">
@@ -778,6 +890,9 @@ export default function BulkPhotoUpload() {
                           <div className="text-slate-500">
                             {parsed.pass} cam {parsed.slot}
                           </div>
+                          {item.ready && alsoCodes.length > 0 && (
+                            <div className="text-brand-300">also {alsoCodes.join(', ')}</div>
+                          )}
                         </>
                       ) : (
                         <span className="text-slate-500">—</span>
@@ -866,10 +981,18 @@ export default function BulkPhotoUpload() {
             </thead>
             <tbody>
               {results.map((r) => (
-                <tr key={r.fileId} className="border-b border-slate-800/60">
+                <tr
+                  key={`${r.fileId}:${r.parsed?.pass || ''}:${r.parsed?.slot || ''}`}
+                  className="border-b border-slate-800/60"
+                >
                   <td className="p-3 font-mono text-xs">{r.name}</td>
                   <td className="p-3 font-mono text-xs">{r.trip?.slip_number}</td>
-                  <td className="p-3 text-xs">{r.parsed?.code?.toUpperCase()}</td>
+                  <td className="p-3 text-xs">
+                    {r.parsed?.code?.toUpperCase()}
+                    {r.copiedFrom ? (
+                      <span className="text-slate-500"> · copy of {r.copiedFrom.toUpperCase()}</span>
+                    ) : null}
+                  </td>
                   <td className="p-3 text-xs">
                     {r.status === 'attached' ? (
                       <span className="text-emerald-400">Attached</span>
@@ -962,6 +1085,80 @@ export default function BulkPhotoUpload() {
                 {zipBusy
                   ? 'Zipping…'
                   : `Download ${zipTrips.length} report${zipTrips.length === 1 ? '' : 's'} zip`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {configOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="card max-w-lg w-full p-5 space-y-4 max-h-[90vh] overflow-auto">
+            <div>
+              <h3 className="text-base font-semibold">Camera share</h3>
+              <p className="text-xs text-slate-400 mt-1">
+                Tick two or three cameras in a group so one uploaded photo fills the others. Arrival
+                and departure are configured separately. An explicit file for a slot still wins.
+              </p>
+            </div>
+            {[
+              { pass: 'arrival', title: 'Arrival (AC)', prefix: 'AC' },
+              { pass: 'departure', title: 'Departure (DC)', prefix: 'DC' },
+            ].map((group) => (
+              <div key={group.pass} className="space-y-2">
+                <p className="text-sm font-medium">{group.title}</p>
+                <div className="flex flex-wrap gap-2">
+                  {[1, 2, 3].map((slot) => {
+                    const checked = (draftShare[group.pass] || []).includes(slot);
+                    return (
+                      <label
+                        key={slot}
+                        className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-sm cursor-pointer ${
+                          checked
+                            ? 'border-brand-500 bg-brand-900/30 text-brand-100'
+                            : 'border-slate-700 text-slate-300'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleDraftSlot(group.pass, slot)}
+                        />
+                        {group.prefix}
+                        {slot}
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {SHARE_PRESETS.map((preset) => (
+                    <button
+                      key={`${group.pass}-${preset.label}`}
+                      type="button"
+                      className={`text-xs px-2 py-1 rounded border ${
+                        sameSlots(draftShare[group.pass], preset.slots)
+                          ? 'border-brand-500 text-brand-200'
+                          : 'border-slate-700 text-slate-400 hover:text-slate-200'
+                      }`}
+                      onClick={() =>
+                        setDraftShare((prev) => ({ ...prev, [group.pass]: [...preset.slots] }))
+                      }
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <p className="text-xs text-slate-400">
+              Example: AC1=AC2 means uploading 8715-ac1.jpg also fills AC2. Same for DC.
+            </p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button type="button" className="btn-ghost" onClick={() => setConfigOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={applyShareConfig}>
+                Save
               </button>
             </div>
           </div>
