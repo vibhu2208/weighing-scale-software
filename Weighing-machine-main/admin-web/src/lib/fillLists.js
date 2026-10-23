@@ -1,3 +1,27 @@
+/** Operators used on weighbridge slips. Shared with Fill Blocked Slips. */
+export const FILL_OPERATORS = [
+  'ABHISHEK',
+  'ANIL',
+  'BRIJESH',
+  'CANCEL',
+  'HANUMAN',
+  'JITENDER',
+  'KARAMVEER',
+  'MANENDER',
+  'MANINDER',
+  'MANISH',
+  'MUNESH',
+  'PARDEEP',
+  'PARVESH',
+  'PAWAN',
+  'RONAK',
+  'SHUBHAM',
+  'SUMIT',
+  'SUNNY',
+  'UMESH',
+  'YATIN',
+];
+
 /** Shared with Fill Blocked Slips and Bulk Photos. */
 export const FILL_VEHICLES = [
   'HR65A7668',

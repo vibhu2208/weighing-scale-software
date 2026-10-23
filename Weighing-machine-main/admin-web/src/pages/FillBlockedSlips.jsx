@@ -6,9 +6,8 @@ import CreatedTripsSync from '../components/CreatedTripsSync.jsx';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 import { generateFillTimes } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
-import { FILL_VEHICLES as VEHICLES } from '../lib/fillLists.js';
+import { FILL_OPERATORS as OPERATORS, FILL_VEHICLES as VEHICLES } from '../lib/fillLists.js';
 
-const OPERATORS = ['KARAMVEER', 'RONAK', 'MUNESH', 'CANCEL', 'SUMIT', 'PAWAN', 'MANISH'];
 const FIXED = {
   material: 'RDF',
   customer_name: 'MCG',
@@ -68,13 +67,18 @@ function nearbyOperator(row, timestampIn) {
   }
   const name = String(hit.operator_name).trim();
   const match = OPERATORS.find((o) => o.toLowerCase() === name.toLowerCase());
-  if (!match) {
-    return {
-      operator_name: '',
-      operatorNote: `Nearby slip ${hit.slip_number} has operator "${name}", which is not in the operator list; pick one`,
-    };
+  return {
+    operator_name: match || name,
+    operatorNote: `Operator from ${hit.slip_number} (same day, nearest in time)`,
+  };
+}
+
+function operatorChoices(entry) {
+  const extra = String(entry?.operator_name || '').trim();
+  if (extra && !OPERATORS.some((o) => o.toLowerCase() === extra.toLowerCase())) {
+    return [...OPERATORS, extra];
   }
-  return { operator_name: match, operatorNote: `Operator from ${hit.slip_number} (same day, nearest in time)` };
+  return OPERATORS;
 }
 
 /** Re-pick the operator from neighbours unless the user chose one by hand. */
@@ -550,7 +554,7 @@ export default function FillBlockedSlips() {
                         }
                       >
                         <option value="">Select…</option>
-                        {OPERATORS.map((o) => (
+                        {operatorChoices(entry).map((o) => (
                           <option key={o} value={o}>
                             {o}
                           </option>
