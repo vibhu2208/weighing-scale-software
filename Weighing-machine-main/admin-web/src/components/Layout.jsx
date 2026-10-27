@@ -9,6 +9,7 @@ const nav = [
   { to: '/remote-trips', label: 'Remote Trips', end: true },
   { to: '/remote-trips/import', label: 'Bulk Import' },
   { to: '/bulk-photos', label: 'Bulk Photos' },
+  { to: '/admin-builder', label: 'Admin Builder' },
   { to: '/settings/advance', label: 'Advance Settings' },
   { to: '/sync', label: 'Sync Status' },
 ];

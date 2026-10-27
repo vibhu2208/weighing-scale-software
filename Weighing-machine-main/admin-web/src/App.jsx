@@ -12,6 +12,7 @@ import RemoteTripsImport from './pages/RemoteTripsImport.jsx';
 import PlanGaps from './pages/PlanGaps.jsx';
 import FillBlockedSlips from './pages/FillBlockedSlips.jsx';
 import BulkPhotoUpload from './pages/BulkPhotoUpload.jsx';
+import AdminBuilder from './pages/AdminBuilder.jsx';
 
 function PrivateRoute({ children }) {
   if (!isLoggedIn()) return <Navigate to="/login" replace />;
@@ -37,6 +38,7 @@ export default function App() {
           <Route path="remote-trips" element={<RemoteTrips />} />
           <Route path="remote-trips/import" element={<RemoteTripsImport />} />
           <Route path="bulk-photos" element={<BulkPhotoUpload />} />
+          <Route path="admin-builder" element={<AdminBuilder />} />
           <Route path="plan-gaps" element={<PlanGaps />} />
           <Route path="plan-gaps/fill" element={<FillBlockedSlips />} />
           <Route path="settings/advance" element={<AdvanceSettings />} />

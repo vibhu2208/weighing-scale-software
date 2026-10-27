@@ -1,0 +1,4 @@
+filename,datetime_local,profile_id,lighting_mode
+frame_001.jpg,2026-10-21T03:15:00,camera_a_demo,auto
+frame_002.jpg,2026-10-21T10:30:00,camera_a_demo,day
+frame_003.png,2026-10-21T18:05:00,camera_a_demo,dusk

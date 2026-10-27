@@ -1,0 +1,34 @@
+---
+description: Admin Builder scope, image integrity, and approval gates
+alwaysApply: true
+---
+
+# Admin Builder Project Rules
+
+- The product direction is an admin dashboard module, not a standalone
+  Streamlit app. The current processor is an isolated prototype only.
+- Restrict initial work to the `Admin Builder` directory. Do not modify
+  admin-web, API production code, normal uploads, reporting, weighing logic,
+  databases, original images, or environment files without explicit approval.
+- Do not expose the prototype over a network or treat UI login checks as
+  server-side authorization.
+- Before production API integration, enforce admin role and resource access
+  server-side on every operation, including previews and downloads.
+- Preserve original bytes and capture metadata. Export only separate, clearly
+  labeled edited derivatives with a visible `EDITED DERIVATIVE - NOT ORIGINAL
+  CCTV` banner, hashes, and manifests.
+- Never imply a requested overlay timestamp verifies when the camera captured
+  the image.
+- Do not regenerate a scene, alter objects, or invent missing image content.
+  Require a verified reference patch or validated mask for overlay recovery;
+  otherwise fail safely.
+- Preserve truck, raised weighbridge, yellow rod, framing, and clutter. Human
+  review is mandatory for scene-specific preservation.
+- `lighting=none` is an identity transform before encoding. Lighting presets
+  are approximations; do not synthesize lamps, weather, sun rays, or
+  headlights.
+- No upscaling, sharpening, denoising, or hidden edits.
+- Keep engine code independent from UI/API/storage. Use synthetic fixtures,
+  explicit validation, and reproducible tests.
+- Do not proceed outside the approved phase. Present exact integration files
+  and wait for approval.

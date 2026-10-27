@@ -1,0 +1,21 @@
+{
+  "name": "admin-builder-image-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated image-processing prototype for the Admin Builder module",
+  "type": "module",
+  "exports": "./src/index.js",
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "ui": "node src/server.js"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5"
+  }
+}

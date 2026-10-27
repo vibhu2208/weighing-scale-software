@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Admin Builder — CCTV Image Editor</title>
+    <style>
+      :root { color-scheme: light; font-family: system-ui, sans-serif; background: #f4f6fa; color: #172033; }
+      body { margin: 0; }
+      main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 56px; }
+      h1 { margin: 0 0 8px; color: #10254a; }
+      h2 { margin-top: 0; color: #18345f; }
+      p { color: #526078; line-height: 1.55; }
+      .notice { border-left: 4px solid #c47b08; background: #fff8e8; border-radius: 6px; padding: 12px 16px; }
+      .card { background: white; border: 1px solid #dce2eb; border-radius: 10px; padding: 20px; margin: 18px 0; box-shadow: 0 2px 8px #14213d0a; }
+      label { display: block; font-weight: 600; margin: 14px 0 6px; }
+      input, select, button { font: inherit; }
+      input:not([type="checkbox"]):not([type="file"]), select { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #aab5c5; border-radius: 6px; background: white; color: #172033; }
+      input[type="file"] { display: block; width: 100%; margin: 8px 0; }
+      input[type="checkbox"] { margin-right: 8px; }
+      button, .download { display: inline-block; margin-top: 16px; padding: 11px 18px; border: 0; border-radius: 6px; background: #1559b7; color: white; font-weight: 700; cursor: pointer; text-decoration: none; }
+      button:disabled { opacity: .55; cursor: wait; }
+      .secondary { background: #40516a; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
+      .status { min-height: 24px; margin-top: 10px; white-space: pre-wrap; }
+      .error { color: #aa1e2d; }
+      .success { color: #176a3a; }
+      .preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+      .preview-grid img, #referencePreview { display: block; width: 100%; height: auto; border: 1px solid #cbd3df; background: #eef1f5; }
+      .preview-grid h3 { color: #31415c; }
+      .download { background: #167343; }
+      details { border-top: 1px solid #e1e6ee; margin-top: 18px; padding-top: 14px; }
+      summary { cursor: pointer; font-weight: 700; color: #18345f; }
+      small { color: #5c6879; line-height: 1.5; }
+      .roi-stage { max-width: 100%; margin-top: 12px; overflow: auto; border: 1px solid #cbd3df; background: #101828; }
+      #roiCanvas { display: block; max-width: 100%; height: auto; cursor: crosshair; touch-action: none; }
+      .inline { display: flex; align-items: center; gap: 8px; }
+      .roi-grid { display: grid; grid-template-columns: repeat(4, minmax(80px, 1fr)); gap: 8px; }
+      .roi-grid label { font-size: .85rem; }
+      .result-meta { color: #536176; font-size: .9rem; }
+      .saved-item { border: 1px solid #dce2eb; border-radius: 8px; padding: 14px; margin: 14px 0; }
+      .saved-item img { display: block; max-width: 100%; height: auto; margin: 10px 0; border: 1px solid #cbd3df; }
+      .report-slot { width: min(100%, 520px); aspect-ratio: 5 / 3; overflow: hidden; border: 1px solid #aab5c5; background: #111827; }
+      .report-slot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      [hidden] { display: none !important; }
+      @media (max-width: 600px) { main { padding: 18px 12px 40px; } .card { padding: 15px; } .roi-grid { grid-template-columns: repeat(2, minmax(80px, 1fr)); } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Admin Builder</h1>
+      <p class="notice">
+        Local prototype only; it is not connected to admin authentication. The uploaded original is never changed.
+        Processing keeps the camera timestamp, adds a labeled simulated display time, and applies a conservative lighting grade.
+        Original file metadata stays with the source.
+      </p>
+
+      <section class="card" aria-labelledby="editorHeading">
+        <h2 id="editorHeading">Edit a CCTV image</h2>
+        <label for="source">1. Upload CCTV image (JPG or PNG)</label>
+        <input id="source" type="file" accept="image/jpeg,image/png">
+        <div id="sourceInfo" class="result-meta">Choose an image to begin.</div>
+
+        <div class="grid">
+          <div>
+            <label>Editing operation</label>
+            <div class="result-meta">Timestamp + Automatic Lighting</div>
+          </div>
+          <div>
+            <label for="datetime">Desired local date and time</label>
+            <input id="datetime" type="datetime-local" step="1">
+          </div>
+        </div>
+        <button id="process">Process Image</button>
+        <div id="processStatus" class="status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="result" class="card" hidden aria-labelledby="resultHeading">
+        <h2 id="resultHeading">Compare original and edited derivative</h2>
+        <p id="resultSummary"></p>
+        <div class="preview-grid">
+          <div><h3>Original — unchanged</h3><img id="sourcePreview" alt="Uploaded original CCTV image"></div>
+          <div><h3>Edited derivative — visibly labeled</h3><img id="outputPreview" alt="Watermarked edited derivative"></div>
+        </div>
+        <h3>Report-slot preview — 3+3 photo cell</h3>
+        <p class="result-meta">The report cell is approximately 200 × 120 CSS px and uses a centered 5:3 cover crop. This is a preview only; the full-size derivative remains separate.</p>
+        <div class="report-slot"><img id="reportSlotPreview" alt="Centered report-slot crop preview"></div>
+        <p id="reportSlotInfo" class="result-meta"></p>
+        <a id="download" class="download" hidden>Download Edited Image</a>
+        <button id="saveEdited" type="button" hidden>Save Edited Copy</button>
+        <div id="saveStatus" class="status" role="status" aria-live="polite"></div>
+        <details>
+          <summary>Processing and review details</summary>
+          <p id="reviewDetails"></p>
+          <p id="sourceHash" class="result-meta"></p>
+        </details>
+      </section>
+
+      <section class="card" aria-labelledby="savedHeading">
+        <h2 id="savedHeading">Saved edited images</h2>
+        <button id="viewSaved" type="button" class="secondary">View Saved Images</button>
+        <div id="savedStatus" class="status" role="status" aria-live="polite"></div>
+        <div id="savedImages" hidden></div>
+      </section>
+
+      <section class="card">
+        <details id="advanced">
+          <summary>Advanced Settings / Camera Setup</summary>
+          <p>
+            Set up a camera/view profile from one original full-size frame. A profile stores framing and timestamp ROI only; one frame cannot reveal pixels hidden under its capture-time overlay.
+            Routine processing keeps that original overlay and appends the requested time as an edited display annotation. Do not treat it as authentic capture time.
+          </p>
+
+          <label for="profile">Camera/view profile (explicitly select and verify the view)</label>
+          <select id="profile"><option value="">Choose reviewed profile</option></select>
+          <div id="profileInfo" class="status"></div>
+
+          <form id="calibrationForm">
+            <h3>One-frame camera/view setup — creates a draft</h3>
+            <button id="useCurrentImage" type="button" class="secondary">Use the uploaded CCTV image</button>
+            <label for="calibrationFrame">Or choose one original full-size frame</label>
+            <input id="calibrationFrame" type="file" accept="image/jpeg,image/png">
+            <small>Drag directly over the visible timestamp. This saves ROI geometry only; no timestamp pixels are removed or reconstructed.</small>
+            <div id="roiStage" class="roi-stage" hidden><canvas id="roiCanvas" aria-label="Drag to select timestamp area"></canvas></div>
+            <div id="roiInfo" class="result-meta">The normalized and native pixel coordinates are saved in the draft profile.</div>
+            <div class="grid">
+              <div><label for="profileId">Camera/view ID</label><input id="profileId" value="view_site_a_camera_1" required></div>
+              <div><label for="profileName">Display name</label><input id="profileName" value="Site A — Camera 1" required></div>
+              <div><label for="timezone">Camera timezone</label><input id="timezone" value="Asia/Kolkata" required></div>
+              <div><label for="expectedFraming">Expected framing / fixed landmarks</label><input id="expectedFraming" placeholder="e.g. ramp edge, yellow rod, lane direction" required></div>
+            </div>
+            <details>
+              <summary>Advanced overlay and image settings</summary>
+              <div class="grid">
+                <div><label for="timestampFormat">Timestamp format</label><input id="timestampFormat" value="%d-%m-%Y %H:%M:%S"></div>
+                <div><label for="fontSize">Font size (pixels)</label><input id="fontSize" type="number" min="6" value="19"></div>
+                <div><label for="timestampColor">Text color</label><input id="timestampColor" type="color" value="#ebebeb"></div>
+              </div>
+              <details>
+                <summary>Manual timestamp-region coordinates</summary>
+                <div class="roi-grid">
+                  <label>X<input id="roiX" type="number" min="0" value="8"></label>
+                  <label>Y<input id="roiY" type="number" min="0" value="8"></label>
+                  <label>Width<input id="roiWidth" type="number" min="1" value="300"></label>
+                  <label>Height<input id="roiHeight" type="number" min="1" value="32"></label>
+                </div>
+              </details>
+            </details>
+            <button id="calibrate" type="submit" class="secondary">Save one-frame draft profile</button>
+          </form>
+
+          <div id="calibrationStatus" class="status" role="status" aria-live="polite"></div>
+          <div id="calibrationPreview" hidden>
+            <h3>Saved timestamp ROI preview</h3>
+            <img id="referencePreview" alt="Selected timestamp region from the one-frame draft">
+            <p>The displayed crop is only the selected original timestamp region. It is not a clean background reference.</p>
+            <div id="profileReview" hidden>
+              <p>A one-frame draft cannot be marked as a verified timestamp replacement profile. It is reusable for view identification and ROI diagnostics only.</p>
+              <label for="profileReviewer">Reviewer name or initials</label>
+              <input id="profileReviewer" maxlength="40">
+              <label class="inline"><input id="profileReviewConfirmed" type="checkbox"> I reviewed the crop and a processed result.</label>
+              <button id="confirmProfileReview" type="button" class="secondary">Mark camera profile reviewed</button>
+            </div>
+          </div>
+          <details>
+            <summary>Optional Advanced Calibration — combine 5–10 matching original frames</summary>
+            <p>This remains optional and can improve a reference only when the frames truly match. The temporal median may retain ghosts and is never treated as authentic hidden pixels without visual review.</p>
+            <label for="calibrationFrames">Choose 5–10 frames from the same verified camera view</label>
+            <input id="calibrationFrames" type="file" accept="image/jpeg,image/png" multiple>
+            <button id="calibrateMulti" type="button" class="secondary">Generate optional multi-frame draft</button>
+          </details>
+        </details>
+      </section>
+    </main>
+    <script>
+      const byId = (id) => document.getElementById(id);
+      let profiles = [];
+      let sourceDataUrl = '';
+      let activeProfile = null;
+      let lastProcessedProfileId = null;
+      let calibrationImage = null;
+      let calibrationFrameDataUrl = '';
+      let selectedRoi = null;
+      let dragStart = null;
+      let outputUrl = null;
+      let lastPreviewId = null;
+
+      function setStatus(element, message, isError = false) {
+        element.textContent = message;
+        element.className = `status ${isError ? 'error' : 'success'}`;
+      }
+
+      function readDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function localDateTimeNow() {
+        const now = new Date();
+        const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+        return local.toISOString().slice(0, 19);
+      }
+
+      async function api(path, body) {
+        const response = await fetch(path, {
+          method: body ? 'POST' : 'GET',
+          headers: body ? { 'Content-Type': 'application/json' } : {},
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const result = await response.json();
+        if (!response.ok || result.ok === false) {
+          throw new Error(`${result.code || 'ERROR'}: ${result.error || response.statusText}`);
+        }
+        return result;
+      }
+
+      async function loadProfiles(selectProfileId) {
+        const result = await api('/api/profiles');
+        profiles = result.profiles;
+        const select = byId('profile');
+        select.replaceChildren(new Option('No saved camera/view selected', ''));
+        for (const item of profiles.filter((candidate) => !candidate.builtIn)) {
+          const option = new Option(
+            `${item.profile.display_name} — ${item.profile.expected_width}×${item.profile.expected_height} — ${item.profile.profile_status || (item.profile.calibrated ? 'reviewed' : 'draft')}`,
+            item.profile.profile_id,
+          );
+          select.append(option);
+        }
+        const rememberedProfileId =
+          selectProfileId ||
+          localStorage.getItem('admin-builder-camera-profile') ||
+          '';
+        if (rememberedProfileId && profiles.some((item) => item.profile.profile_id === rememberedProfileId)) {
+          select.value = rememberedProfileId;
+          localStorage.setItem('admin-builder-camera-profile', rememberedProfileId);
+        } else {
+          localStorage.removeItem('admin-builder-camera-profile');
+        }
+        updateProfileInfo();
+      }
+
+      function updateProfileInfo() {
+        const selectedId = byId('profile').value;
+        activeProfile = profiles.find((item) => item.profile.profile_id === selectedId) || null;
+        byId('profileInfo').textContent = activeProfile
+          ? `${activeProfile.profile.profile_status === 'draft' || !activeProfile.profile.calibrated
+            ? 'Draft view selected. ROI is diagnostic only; visually verify fixed landmarks in each frame. The editor preserves the original timestamp and adds a separate display-time annotation.'
+            : 'Camera/view profile selected and remembered. Matching dimensions do not verify framing; visually inspect fixed landmarks.'}`
+          : 'No view is assigned. Processing still works; image dimensions alone are never used to guess camera identity.';
+      }
+
+      function setRoi(roi) {
+        selectedRoi = roi;
+        byId('roiX').value = String(roi.x);
+        byId('roiY').value = String(roi.y);
+        byId('roiWidth').value = String(roi.width);
+        byId('roiHeight').value = String(roi.height);
+        if (calibrationImage) {
+          byId('roiInfo').textContent =
+            `Native ROI ${roi.width} × ${roi.height} at (${roi.x}, ${roi.y}); normalized ` +
+            `${(roi.x / calibrationImage.naturalWidth).toFixed(4)}, ${(roi.y / calibrationImage.naturalHeight).toFixed(4)}, ` +
+            `${(roi.width / calibrationImage.naturalWidth).toFixed(4)} × ${(roi.height / calibrationImage.naturalHeight).toFixed(4)}.`;
+        }
+        drawRoi();
+      }
+
+      function drawRoi() {
+        if (!calibrationImage) return;
+        const canvas = byId('roiCanvas');
+        const context = canvas.getContext('2d');
+        canvas.width = calibrationImage.naturalWidth;
+        canvas.height = calibrationImage.naturalHeight;
+        context.drawImage(calibrationImage, 0, 0);
+        if (selectedRoi) {
+          context.fillStyle = '#22c55e33';
+          context.fillRect(selectedRoi.x, selectedRoi.y, selectedRoi.width, selectedRoi.height);
+          context.strokeStyle = '#16a34a';
+          context.lineWidth = Math.max(2, Math.round(canvas.width / 800));
+          context.strokeRect(selectedRoi.x, selectedRoi.y, selectedRoi.width, selectedRoi.height);
+        }
+      }
+
+      function canvasPoint(event) {
+        const rect = byId('roiCanvas').getBoundingClientRect();
+        return {
+          x: Math.max(0, Math.min(calibrationImage.naturalWidth, Math.round((event.clientX - rect.left) * calibrationImage.naturalWidth / rect.width))),
+          y: Math.max(0, Math.min(calibrationImage.naturalHeight, Math.round((event.clientY - rect.top) * calibrationImage.naturalHeight / rect.height))),
+        };
+      }
+
+      function useCalibrationFrame(dataUrl, label) {
+        calibrationFrameDataUrl = dataUrl;
+        calibrationImage = new Image();
+        calibrationImage.onload = () => {
+          byId('roiStage').hidden = false;
+          selectedRoi = null;
+          drawRoi();
+          byId('roiInfo').textContent =
+            `${label}: ${calibrationImage.naturalWidth} × ${calibrationImage.naturalHeight}. Drag over the timestamp.`;
+        };
+        calibrationImage.onerror = () =>
+          setStatus(byId('calibrationStatus'), 'Could not display the selected calibration image.', true);
+        calibrationImage.src = dataUrl;
+      }
+
+      byId('datetime').value = localDateTimeNow();
+      byId('profile').addEventListener('change', () => {
+        if (byId('profile').value) {
+          localStorage.setItem('admin-builder-camera-profile', byId('profile').value);
+        } else {
+          localStorage.removeItem('admin-builder-camera-profile');
+        }
+        updateProfileInfo();
+      });
+
+      byId('source').addEventListener('change', async () => {
+        const file = byId('source').files[0];
+        if (!file) {
+          sourceDataUrl = '';
+          byId('sourceInfo').textContent = 'Choose an image to begin.';
+          return;
+        }
+        if (file.size > 25 * 1024 * 1024) {
+          byId('source').value = '';
+          return setStatus(byId('processStatus'), 'Image must be no larger than 25 MB.', true);
+        }
+        try {
+          sourceDataUrl = await readDataUrl(file);
+          const image = new Image();
+          image.onload = () => {
+            byId('sourceInfo').textContent = `${file.name} · ${image.naturalWidth} × ${image.naturalHeight} · Original remains unchanged.`;
+            byId('sourcePreview').src = sourceDataUrl;
+          };
+          image.onerror = () => setStatus(byId('processStatus'), 'The selected image could not be previewed.', true);
+          image.src = sourceDataUrl;
+        } catch (error) {
+          setStatus(byId('processStatus'), error.message, true);
+        }
+      });
+
+      byId('process').addEventListener('click', async () => {
+        const button = byId('process');
+        const status = byId('processStatus');
+        const source = byId('source').files[0];
+        if (!source || !sourceDataUrl) return setStatus(status, 'Upload a CCTV image first.', true);
+        const datetime = byId('datetime').value;
+        if (!datetime) return setStatus(status, 'Enter the desired local date and time.', true);
+
+        button.disabled = true;
+        byId('result').hidden = true;
+        byId('download').hidden = true;
+        byId('saveEdited').hidden = true;
+        byId('saveEdited').disabled = false;
+        byId('saveStatus').textContent = '';
+        lastPreviewId = null;
+        setStatus(status, 'Processing a copy of the source image…');
+        try {
+          const result = await api('/api/process', {
+            sourceDataUrl,
+            profileId: byId('profile').value || undefined,
+            datetimeLocal: datetime ? (datetime.length === 16 ? `${datetime}:00` : datetime) : null,
+          });
+          lastProcessedProfileId = result.profile.profile_id;
+          const mime = result.manifest.output_format === 'jpeg' ? 'image/jpeg' : 'image/png';
+          const bytes = Uint8Array.from(atob(result.output_image_base64), (character) => character.charCodeAt(0));
+          if (outputUrl) URL.revokeObjectURL(outputUrl);
+          outputUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+          byId('outputPreview').src = outputUrl;
+          byId('download').href = outputUrl;
+          lastPreviewId = result.preview_id;
+          const overlay = result.manifest.operations.find(
+            (operation) => operation.name === 'add_simulated_display_time_overlay',
+          );
+          const lightingOperation = result.manifest.operations.find((operation) => operation.name === 'adjust_lighting');
+          const qaStatus = result.qa_status || result.manifest?.qa_status || 'NEEDS_REVIEW';
+          byId('download').download = `TEST_${qaStatus}_${result.output_image_path}`;
+          const failed = (result.qa_report?.hard_checks || []).filter((item) => item.pass === false);
+          byId('resultSummary').textContent =
+            `Processing ${result.processing_status || 'PROCESSING_COMPLETE'}. QA ${qaStatus}. ` +
+            `This is an unapproved test derivative, not original CCTV and not a report replacement. ` +
+            `Scene size remains ${result.manifest.scene_dimensions.width} × ${result.manifest.scene_dimensions.height}. ` +
+            `The simulated display time is ${overlay?.requested_time || overlay?.text || 'the requested display time'}` +
+            `${lightingOperation ? `; lighting is a ${lightingOperation.preset.replaceAll('_', ' ')} simulation, not a historical recording` : ''}` +
+            `${failed.length ? `. Failed checks: ${failed.map((item) => item.check).join(', ')}` : ''}.`;
+          byId('sourceHash').textContent = `Source SHA-256: ${result.source_sha256}. Original source and its metadata were not modified.`;
+          byId('reviewDetails').textContent =
+            `Timestamp strategy: ${result.manifest.timestamp_strategy}. Profile: ${result.profile.display_name}. ` +
+            `${result.profile_view_warning || ''} ` +
+            `${result.manifest.warnings.join(' ')}`;
+          byId('download').hidden = false;
+          byId('saveEdited').hidden = false;
+          byId('reportSlotPreview').src = outputUrl;
+          const outputDimensions = result.manifest.output_dimensions;
+          const slotRatio = 5 / 3;
+          const outputRatio = outputDimensions.width / outputDimensions.height;
+          const cropDescription = outputRatio > slotRatio
+            ? `Centered cover crop removes about ${Math.round((outputDimensions.width - outputDimensions.height * slotRatio) / 2)} px from each horizontal edge.`
+            : `Centered cover crop removes about ${Math.round((outputDimensions.height - outputDimensions.width / slotRatio) / 2)} px from the top and bottom.`;
+          const annotation = result.manifest.operations.find(
+            (operation) => operation.name === 'add_simulated_display_time_overlay',
+          );
+          const verticalCrop = outputRatio > slotRatio
+            ? 0
+            : Math.round((outputDimensions.height - outputDimensions.width / slotRatio) / 2);
+          const annotationCropWarning =
+            annotation && verticalCrop > 0 && verticalCrop >= (annotation.plate?.height || 24)
+              ? ` The crop also trims about ${verticalCrop} px from the top or bottom; confirm the camera timestamp, truck, and ramp remain visible.`
+              : ' A landscape 5:3 cover crop usually keeps the top-left timestamp.';
+          byId('reportSlotInfo').textContent =
+            `${outputDimensions.width} × ${outputDimensions.height} output in a 5:3 slot. ${cropDescription}${annotationCropWarning} ` +
+            'Edge content in the crop—including a top-left camera timestamp, truck or ramp—may be clipped; inspect each in this preview. Object clipping is not automatically classified.';
+          byId('result').hidden = false;
+          updateProfileInfo();
+          setStatus(
+            status,
+            `Processing completed. QA ${qaStatus}. The camera timestamp stays visible and a simulated display time was added on a copy. This image is not approved to replace original CCTV.`,
+            qaStatus === 'QA_FAILED' || qaStatus === 'UNSUPPORTED_TRANSFORMATION',
+          );
+        } catch (error) {
+          setStatus(status, error.message, true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      byId('saveEdited').addEventListener('click', async () => {
+        if (!lastPreviewId) return setStatus(byId('saveStatus'), 'Process an image before saving it.', true);
+        const button = byId('saveEdited');
+        button.disabled = true;
+        setStatus(byId('saveStatus'), 'Saving a new edited copy…');
+        try {
+          const result = await api(`/api/previews/${lastPreviewId}/save`, {});
+          byId('saveEdited').hidden = true;
+          setStatus(byId('saveStatus'), `Saved ${result.saved.filename}. The original remains unchanged.`);
+          if (!byId('savedImages').hidden) await loadSavedImages();
+        } catch (error) {
+          button.disabled = false;
+          setStatus(byId('saveStatus'), error.message, true);
+        }
+      });
+
+      async function loadSavedImages() {
+        const target = byId('savedImages');
+        const status = byId('savedStatus');
+        target.hidden = false;
+        target.replaceChildren();
+        setStatus(status, 'Loading saved edited images…');
+        try {
+          const result = await api('/api/saved');
+          if (!result.images.length) {
+            setStatus(status, 'No edited copies have been saved on this device yet.');
+            return;
+          }
+          for (const image of result.images) {
+            const item = document.createElement('article');
+            item.className = 'saved-item';
+            const heading = document.createElement('h3');
+            heading.textContent = `EDITED DERIVATIVE — ${image.filename}`;
+            const details = document.createElement('p');
+            details.className = 'result-meta';
+            details.textContent =
+              `Saved ${image.saved_at_utc}. QA ${image.qa_status || 'NEEDS_REVIEW'}. ${image.output_dimensions.width} × ${image.output_dimensions.height}. ` +
+              `Source SHA-256: ${image.source_sha256}. Output SHA-256: ${image.output_sha256}.`;
+            const preview = document.createElement('img');
+            preview.src = image.download_url;
+            preview.alt = `Edited derivative ${image.filename}`;
+            const download = document.createElement('a');
+            download.className = 'download';
+            download.href = image.download_url;
+            download.download = image.visually_approved ? image.filename : `TEST_${image.qa_status || 'NEEDS_REVIEW'}_${image.filename}`;
+            download.textContent = 'Download unapproved test copy';
+            item.append(heading, details, preview, download);
+            target.append(item);
+          }
+          setStatus(status, `${result.images.length} saved edited image${result.images.length === 1 ? '' : 's'}.`);
+        } catch (error) {
+          setStatus(status, error.message, true);
+        }
+      }
+
+      byId('viewSaved').addEventListener('click', () => {
+        const target = byId('savedImages');
+        if (!target.hidden) {
+          target.hidden = true;
+          byId('savedStatus').textContent = '';
+          return;
+        }
+        loadSavedImages();
+      });
+
+      byId('useCurrentImage').addEventListener('click', () => {
+        if (!sourceDataUrl) return setStatus(byId('calibrationStatus'), 'Upload the CCTV image on the main screen first.', true);
+        useCalibrationFrame(sourceDataUrl, 'Current uploaded source');
+      });
+
+      byId('calibrationFrame').addEventListener('change', async () => {
+        const file = byId('calibrationFrame').files[0];
+        if (!file) return;
+        if (file.size > 25 * 1024 * 1024) return setStatus(byId('calibrationStatus'), 'Image must be no larger than 25 MB.', true);
+        try {
+          useCalibrationFrame(await readDataUrl(file), file.name);
+        } catch (error) {
+          setStatus(byId('calibrationStatus'), error.message, true);
+        }
+      });
+
+      byId('calibrationFrames').addEventListener('change', async () => {
+        const files = [...byId('calibrationFrames').files];
+        if (!files.length) return;
+        try {
+          const previewUrl = await readDataUrl(files[0]);
+          useCalibrationFrame(previewUrl, files[0].name);
+        } catch (error) {
+          setStatus(byId('calibrationStatus'), error.message, true);
+        }
+      });
+
+      byId('roiCanvas').addEventListener('pointerdown', (event) => {
+        if (!calibrationImage) return;
+        byId('roiCanvas').setPointerCapture(event.pointerId);
+        dragStart = canvasPoint(event);
+        setRoi({ x: dragStart.x, y: dragStart.y, width: 1, height: 1 });
+      });
+      byId('roiCanvas').addEventListener('pointermove', (event) => {
+        if (!dragStart || !calibrationImage) return;
+        const point = canvasPoint(event);
+        setRoi({
+          x: Math.min(dragStart.x, point.x),
+          y: Math.min(dragStart.y, point.y),
+          width: Math.max(1, Math.abs(point.x - dragStart.x)),
+          height: Math.max(1, Math.abs(point.y - dragStart.y)),
+        });
+      });
+      byId('roiCanvas').addEventListener('pointerup', () => { dragStart = null; });
+      for (const field of ['roiX', 'roiY', 'roiWidth', 'roiHeight']) {
+        byId(field).addEventListener('change', () => {
+          const roi = {
+            x: Number(byId('roiX').value),
+            y: Number(byId('roiY').value),
+            width: Number(byId('roiWidth').value),
+            height: Number(byId('roiHeight').value),
+          };
+          if (Object.values(roi).every(Number.isInteger) && roi.x >= 0 && roi.y >= 0 && roi.width > 0 && roi.height > 0) {
+            selectedRoi = roi;
+            drawRoi();
+          }
+        });
+      }
+
+      byId('calibrationForm').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const button = byId('calibrate');
+        const status = byId('calibrationStatus');
+        if (!calibrationFrameDataUrl || !calibrationImage || !selectedRoi) {
+          return setStatus(status, 'Select one original frame and drag over its timestamp.', true);
+        }
+
+        button.disabled = true;
+        setStatus(status, 'Saving a one-frame camera/view draft…');
+        try {
+          const result = await api('/api/calibrate-draft', {
+            frameDataUrl: calibrationFrameDataUrl,
+            profileId: byId('profileId').value.trim(),
+            displayName: byId('profileName').value.trim(),
+            expectedFraming: byId('expectedFraming').value.trim(),
+            timezone: byId('timezone').value.trim(),
+            timestampFormat: byId('timestampFormat').value,
+            fontSizePx: byId('fontSize').value,
+            color: byId('timestampColor').value,
+            roi: selectedRoi,
+          });
+          const crop = document.createElement('canvas');
+          crop.width = selectedRoi.width;
+          crop.height = selectedRoi.height;
+          crop.getContext('2d').drawImage(
+            calibrationImage,
+            selectedRoi.x,
+            selectedRoi.y,
+            selectedRoi.width,
+            selectedRoi.height,
+            0,
+            0,
+            selectedRoi.width,
+            selectedRoi.height,
+          );
+          byId('referencePreview').src = crop.toDataURL('image/png');
+          byId('calibrationPreview').hidden = false;
+          byId('profileReview').hidden = true;
+          await loadProfiles(result.profile.profile_id);
+          setStatus(status, 'Draft profile saved. It can be selected for this named view; it does not enable in-frame timestamp replacement.');
+        } catch (error) {
+          setStatus(status, error.message, true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      byId('calibrateMulti').addEventListener('click', async () => {
+        const button = byId('calibrateMulti');
+        const status = byId('calibrationStatus');
+        const files = [...byId('calibrationFrames').files];
+        if (files.length < 5 || files.length > 10) return setStatus(status, 'Optional multi-frame setup requires 5–10 matching frames.', true);
+        if (!calibrationImage || !selectedRoi) return setStatus(status, 'Select the timestamp region by dragging on the first frame.', true);
+        if (files.some((file) => file.size > 25 * 1024 * 1024)) return setStatus(status, 'Each image must be no larger than 25 MB.', true);
+        button.disabled = true;
+        setStatus(status, 'Creating an optional multi-frame draft reference…');
+        try {
+          const result = await api('/api/calibrate', {
+            frames: await Promise.all(files.map(async (file) => ({ name: file.name, dataUrl: await readDataUrl(file) }))),
+            profileId: byId('profileId').value.trim(),
+            displayName: byId('profileName').value.trim(),
+            expectedFraming: byId('expectedFraming').value.trim(),
+            timezone: byId('timezone').value.trim(),
+            timestampFormat: byId('timestampFormat').value,
+            fontSizePx: byId('fontSize').value,
+            color: byId('timestampColor').value,
+            roi: selectedRoi,
+          });
+          byId('referencePreview').src = `data:image/png;base64,${result.referencePatchBase64}`;
+          byId('calibrationPreview').hidden = false;
+          byId('profileReview').hidden = false;
+          await loadProfiles(result.profile.profile_id);
+          setStatus(status, 'Optional reference saved as an unreviewed draft. Inspect its background for ghosts before any in-frame simulation.');
+        } catch (error) {
+          setStatus(status, error.message, true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      byId('confirmProfileReview').addEventListener('click', async () => {
+        const reviewer = byId('profileReviewer').value.trim();
+        if (!byId('profileReviewConfirmed').checked) return setStatus(byId('calibrationStatus'), 'Confirm visual review first.', true);
+        if (!activeProfile || lastProcessedProfileId !== activeProfile.profile.profile_id) {
+          return setStatus(byId('calibrationStatus'), 'Process an image with this profile, then review it.', true);
+        }
+        try {
+          const result = await api('/api/profiles/review', {
+            profileId: activeProfile.profile.profile_id,
+            reviewer,
+            confirmed: true,
+          });
+          await loadProfiles(result.profile.profile_id);
+          setStatus(byId('calibrationStatus'), 'Camera profile marked reviewed. It can now be reused automatically when its image size matches.');
+        } catch (error) {
+          setStatus(byId('calibrationStatus'), error.message, true);
+        }
+      });
+
+      loadProfiles().catch((error) => setStatus(byId('processStatus'), error.message, true));
+    </script>
+  </body>
+</html>

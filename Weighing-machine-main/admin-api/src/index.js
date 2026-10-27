@@ -14,6 +14,7 @@ const syncRoutes = require('./routes/sync');
 const mediaRoutes = require('./routes/media');
 const remoteTripsRoutes = require('./routes/remoteTrips');
 const slipReservationsRoutes = require('./routes/slipReservations');
+const adminBuilderRoutes = require('./routes/adminBuilder');
 const {
   ensureSchema: ensureSlipReservationsSchema,
   startFireWorker,
@@ -52,6 +53,7 @@ app.use('/sync', syncRoutes);
 app.use('/media', mediaRoutes);
 app.use('/remote-trips', remoteTripsRoutes);
 app.use('/slip-reservations', slipReservationsRoutes);
+app.use('/admin-builder', adminBuilderRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error('[api] error', err);
