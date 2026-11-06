@@ -3,7 +3,14 @@ import { Link } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
 import CreatedTripsSync from '../components/CreatedTripsSync.jsx';
-import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
+import {
+  customDateToRange,
+  fmtDate,
+  fmtKg,
+  periodToRange,
+  toDatetimeLocalValue,
+  ymd,
+} from '../lib/format.js';
 import { generateFillTimes, timesCollide } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
 import {
@@ -786,6 +793,14 @@ export default function FillBlockedSlips() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [tareHistory, setTareHistory] = useState(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [exportPeriod, setExportPeriod] = useState('today');
+  const [exportCustomDate, setExportCustomDate] = useState(ymd());
+  const [exportBusy, setExportBusy] = useState(false);
+
+  function activeExportRange() {
+    if (exportPeriod === 'custom') return customDateToRange(exportCustomDate);
+    return periodToRange(exportPeriod);
+  }
 
   const vehicles = useMemo(() => {
     const saved = normalizeFillVehicles(lists?.fill_vehicles || []);
@@ -827,7 +842,14 @@ export default function FillBlockedSlips() {
     setLoading(true);
     setError('');
     try {
-      const data = await api.getHeldSlipWindows();
+      const range =
+        exportPeriod === 'custom'
+          ? customDateToRange(exportCustomDate)
+          : periodToRange(exportPeriod);
+      if (exportPeriod === 'custom' && !range) {
+        throw new Error('Choose a valid custom date');
+      }
+      const data = await api.getHeldSlipWindows(range || {});
       const fresh = data.rows || [];
       setRows(fresh);
       setEntries((prev) => {
@@ -852,11 +874,42 @@ export default function FillBlockedSlips() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [exportPeriod, exportCustomDate]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  async function downloadExcel() {
+    const range = activeExportRange();
+    if (exportPeriod === 'custom' && !range) {
+      setError('Choose a valid custom date to download Excel');
+      return;
+    }
+    setExportBusy(true);
+    setError('');
+    try {
+      // Same closed-ticket Excel layout as the weighbridge machine export.
+      const blob = await api.downloadExport('/reports/export/excel', {
+        ...(range || {}),
+        ticket_status: 'CLOSED',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const stamp =
+        exportPeriod === 'custom' && exportCustomDate
+          ? exportCustomDate
+          : exportPeriod;
+      a.download = `weighbridge-report-${stamp}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || 'Excel download failed');
+    } finally {
+      setExportBusy(false);
+    }
+  }
 
   useEffect(() => {
     loadLists();
@@ -1171,9 +1224,49 @@ export default function FillBlockedSlips() {
             </Link>
           </p>
         </div>
-        <button type="button" className="btn-ghost shrink-0" onClick={() => setConfigOpen(true)}>
-          Configure vehicles & destinations
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" className="btn-ghost shrink-0" onClick={() => setConfigOpen(true)}>
+            Configure vehicles & destinations
+          </button>
+          <button
+            type="button"
+            className="btn-primary shrink-0"
+            onClick={downloadExcel}
+            disabled={exportBusy}
+          >
+            {exportBusy ? 'Downloading…' : 'Download Excel'}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2 flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Date filter
+          <select
+            className="field-input text-sm py-1.5 min-w-[9rem]"
+            value={exportPeriod}
+            onChange={(e) => setExportPeriod(e.target.value)}
+          >
+            <option value="today">Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="custom">Custom date</option>
+          </select>
+        </label>
+        {exportPeriod === 'custom' && (
+          <label className="flex flex-col gap-1 text-xs text-slate-400">
+            Day
+            <input
+              type="date"
+              className="field-input text-sm py-1.5"
+              value={exportCustomDate}
+              onChange={(e) => setExportCustomDate(e.target.value)}
+            />
+          </label>
+        )}
+        <p className="text-xs text-slate-500 pb-1.5">
+          List filters blocked slips by blocked/planned time. Excel downloads closed tickets for
+          that day in the same format as the weighbridge machine.
+        </p>
       </div>
 
       <FillListsConfigModal

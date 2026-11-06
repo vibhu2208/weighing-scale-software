@@ -543,9 +543,21 @@ const NEIGHBOR_SLIP_RANGE = 1000;
  * Blocked (held, unfilled) slips with the nearest real ticket below and above
  * each one, so a fill can place its first-weigh time between them. Held slips
  * have no ticket yet, so runs of consecutive blocked slips share neighbours.
+ * Optional `from` / `to` ISO bounds filter on COALESCE(blocked_at, planned_at).
  */
-async function listHeldWithNeighbors() {
+async function listHeldWithNeighbors(filters = {}) {
   await ensureSchema();
+  const params = [getSiteId(), NEIGHBOR_SLIP_RANGE];
+  const dateClauses = [];
+  if (filters.from) {
+    params.push(filters.from);
+    dateClauses.push(`COALESCE(r.blocked_at, r.planned_at) >= $${params.length}`);
+  }
+  if (filters.to) {
+    params.push(filters.to);
+    dateClauses.push(`COALESCE(r.blocked_at, r.planned_at) <= $${params.length}`);
+  }
+  const dateSql = dateClauses.length ? ` AND ${dateClauses.join(' AND ')}` : '';
   const res = await query(
     `WITH held AS (
        SELECT r.id, r.slip_number, r.planned_at, r.note, r.blocked_at,
@@ -554,6 +566,7 @@ async function listHeldWithNeighbors() {
        WHERE r.status = 'held'
          AND r.slip_number ~* '^WB[0-9]+$'
          AND NOT EXISTS (SELECT 1 ${weighbridgeTicketOnSlipSql('$1')})
+         ${dateSql}
      ),
      bounds AS (
        SELECT MIN(n) - $2 AS lo, MAX(n) + $2 AS hi FROM held
@@ -592,7 +605,7 @@ async function listHeldWithNeighbors() {
        LIMIT 1
      ) x ON true
      ORDER BY h.n ASC`,
-    [getSiteId(), NEIGHBOR_SLIP_RANGE],
+    params,
   );
   return (res.rows || []).map((r) => ({
     id: r.id,

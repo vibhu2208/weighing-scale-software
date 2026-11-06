@@ -300,8 +300,9 @@ export const api = {
     return request(`/slip-reservations?${qs}`);
   },
 
-  getHeldSlipWindows() {
-    return request('/slip-reservations/held-windows');
+  getHeldSlipWindows(params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/slip-reservations/held-windows${qs ? `?${qs}` : ''}`);
   },
 
   getVehicleTares(trucks, since) {

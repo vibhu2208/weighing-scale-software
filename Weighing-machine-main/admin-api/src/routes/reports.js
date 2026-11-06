@@ -21,6 +21,39 @@ const {
   attachMediaUrls,
   hydratePhotoKeys,
 } = require('../services/reportMedia');
+const { getAdvanceSettings } = require('../services/settingsService');
+
+async function reportCompanyName() {
+  try {
+    const settings = await getAdvanceSettings();
+    return (
+      String(settings.REPORT_COMPANY_NAME || '').trim() || 'DAYA CHARAN & COMPANY'
+    );
+  } catch {
+    return 'DAYA CHARAN & COMPANY';
+  }
+}
+
+function styleWeighbridgeHeader(ws) {
+  const headerRow = ws.getRow(1);
+  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF1E40AF' },
+  };
+  headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+  headerRow.height = 22;
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  ws.columns.forEach((column) => {
+    let maxLength = 10;
+    column.eachCell({ includeEmpty: true }, (cell) => {
+      const len = cell.value ? String(cell.value).length : 0;
+      if (len > maxLength) maxLength = len;
+    });
+    column.width = Math.min(maxLength + 2, 40);
+  });
+}
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -56,6 +89,7 @@ router.get('/filters', async (_req, res) => {
 router.get('/export/csv', async (req, res) => {
   try {
     const siteId = getSiteId();
+    const company = await reportCompanyName();
     const { where, params } = buildWhere(siteId, req.query || {});
     const result = await query(
       `SELECT * FROM (
@@ -68,7 +102,11 @@ router.get('/export/csv', async (req, res) => {
     );
     const lines = [EXPORT_HEADERS.map((h) => `"${h}"`).join(',')];
     for (const row of result.rows) {
-      lines.push(formatExportRow(row).map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+      lines.push(
+        formatExportRow(row, company)
+          .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+          .join(','),
+      );
     }
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="weighbridge-report.csv"');
@@ -81,6 +119,7 @@ router.get('/export/csv', async (req, res) => {
 router.get('/export/excel', async (req, res) => {
   try {
     const siteId = getSiteId();
+    const company = await reportCompanyName();
     const { where, params } = buildWhere(siteId, req.query || {});
     const result = await query(
       `SELECT * FROM (
@@ -95,8 +134,9 @@ router.get('/export/excel', async (req, res) => {
     const ws = wb.addWorksheet('Reports');
     ws.addRow(EXPORT_HEADERS);
     for (const row of result.rows) {
-      ws.addRow(formatExportRow(row));
+      ws.addRow(formatExportRow(row, company));
     }
+    styleWeighbridgeHeader(ws);
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

@@ -19,6 +19,13 @@ const {
 const router = express.Router();
 router.use(authMiddleware);
 
+function heldWindowFilters(query = {}) {
+  const filters = {};
+  if (query.from) filters.from = String(query.from);
+  if (query.to) filters.to = String(query.to);
+  return filters;
+}
+
 router.get('/hint', async (_req, res) => {
   try {
     await ensureSchema();
@@ -34,9 +41,9 @@ router.get('/hint', async (_req, res) => {
   }
 });
 
-router.get('/held-windows', async (_req, res) => {
+router.get('/held-windows', async (req, res) => {
   try {
-    const rows = await listHeldWithNeighbors();
+    const rows = await listHeldWithNeighbors(heldWindowFilters(req.query || {}));
     return res.json({ ok: true, rows });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
