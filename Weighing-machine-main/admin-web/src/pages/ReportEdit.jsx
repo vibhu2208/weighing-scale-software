@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { reportsListPath } from '../lib/reportsListState.js';
 import { api } from '../api/client.js';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 import blankPhotoUrl from '../assets/blank-photo.png';
@@ -71,6 +72,8 @@ function PhotoSlot({
 export default function ReportEdit() {
   const { slip } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const reportsBackTo = reportsListPath(searchParams);
   const [report, setReport] = useState(null);
   const [form, setForm] = useState({});
   const [photos, setPhotos] = useState({});
@@ -204,7 +207,7 @@ export default function ReportEdit() {
         `Edit queued for weighbridge PC (command ${result.command?.id?.slice(0, 8)}…). Status: ${result.command?.status}. PDF will regenerate on the PC after sync.`,
       );
       if (savedSlip && savedSlip !== slip) {
-        navigate(`/reports/${encodeURIComponent(savedSlip)}/edit`, { replace: true });
+        navigate(`/reports/${encodeURIComponent(savedSlip)}/edit${searchParams.toString() ? `?${searchParams.toString()}` : ''}`, { replace: true });
       }
     } catch (err) {
       setError(err.message);
@@ -222,7 +225,7 @@ export default function ReportEdit() {
     try {
       const result = await api.deleteReport(slip);
       setMessage(`Delete queued (command ${result.command?.id?.slice(0, 8)}…)`);
-      setTimeout(() => navigate('/reports'), 1500);
+      setTimeout(() => navigate(reportsBackTo), 1500);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -235,7 +238,7 @@ export default function ReportEdit() {
     return (
       <div>
         <p className="text-red-400">{error}</p>
-        <Link to="/reports" className="text-brand-400 text-sm mt-2 inline-block">
+        <Link to={reportsBackTo} className="text-brand-400 text-sm mt-2 inline-block">
           Back to reports
         </Link>
       </div>
@@ -248,7 +251,7 @@ export default function ReportEdit() {
     <div className="space-y-4 max-w-3xl">
       <div className="flex items-center justify-between">
         <div>
-          <Link to="/reports" className="text-xs text-brand-400 hover:underline">
+          <Link to={reportsBackTo} className="text-xs text-brand-400 hover:underline">
             ← Reports
           </Link>
           <h2 className="text-xl font-semibold mt-1">Edit report {slip}</h2>
