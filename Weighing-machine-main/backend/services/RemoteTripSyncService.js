@@ -62,6 +62,10 @@ function isOpenRemoteRow(row) {
   return String(row?.ticket_status || '').toUpperCase() === 'OPEN';
 }
 
+function isCancelledRemoteRow(row) {
+  return String(row?.ticket_status || '').toUpperCase() === 'CANCELLED';
+}
+
 function localPhotoExists(filePath) {
   if (!filePath) return false;
   try {
@@ -684,6 +688,7 @@ async function processRemoteRow(row, attempt = 0) {
   const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
 
   const openTicket = isOpenRemoteRow(row);
+  const cancelledTicket = isCancelledRemoteRow(row);
   const importResult = openTicket
     ? TransactionService.importOpenTrip({
         id: localTxnId,
@@ -715,7 +720,11 @@ async function processRemoteRow(row, attempt = 0) {
         material: row.material,
         operator_name: row.operator_name,
         // Remote trips are DCC-only — never import as another company
-        company: 'DCC',
+        company: cancelledTicket ? 'CANCEL' : 'DCC',
+        ticket_status: cancelledTicket ? 'CANCELLED' : 'CLOSED',
+        status: cancelledTicket ? 'cancelled' : undefined,
+        notes: cancelledTicket ? 'Cancelled ticket' : null,
+        driver: cancelledTicket ? 'CANCEL' : null,
         gross_weight: row.gross_weight,
         tare_weight: row.tare_weight,
         timestamp_in: toIso(row.timestamp_in),
@@ -735,28 +744,31 @@ async function processRemoteRow(row, attempt = 0) {
   }
 
   // Ensure vehicle type is set (HYWA needs timestamp_in = gross on reports).
-  try {
-    const VehicleService = require('./VehicleService');
-    const existing = VehicleService.findByNumber(row.truck_number);
-    if (!existing) {
-      VehicleService.create({
-        vehicle_number: row.truck_number,
-        rfid_tag: row.rfid_tag || null,
-        transporter: row.transporter || null,
-        vehicle_type: vType,
-        status: 'active',
+  const cancelVehicle = String(row.truck_number || '').trim().toUpperCase() === 'CANCEL';
+  if (!cancelledTicket && !cancelVehicle) {
+    try {
+      const VehicleService = require('./VehicleService');
+      const existing = VehicleService.findByNumber(row.truck_number);
+      if (!existing) {
+        VehicleService.create({
+          vehicle_number: row.truck_number,
+          rfid_tag: row.rfid_tag || null,
+          transporter: row.transporter || null,
+          vehicle_type: vType,
+          status: 'active',
+        });
+      } else if (
+        vType &&
+        String(existing.vehicle_type || '').toLowerCase() !== vType.toLowerCase()
+      ) {
+        VehicleService.update(existing.id, { vehicle_type: vType });
+      }
+    } catch (err) {
+      logger.warn('Remote trip vehicle type sync failed', {
+        truck: row.truck_number,
+        message: err.message,
       });
-    } else if (
-      vType &&
-      String(existing.vehicle_type || '').toLowerCase() !== vType.toLowerCase()
-    ) {
-      VehicleService.update(existing.id, { vehicle_type: vType });
     }
-  } catch (err) {
-    logger.warn('Remote trip vehicle type sync failed', {
-      truck: row.truck_number,
-      message: err.message,
-    });
   }
 
   if (!importResult.imported && transaction.remote_pg_id !== remoteId) {
@@ -779,9 +791,9 @@ async function processRemoteRow(row, attempt = 0) {
   let mcgResult = {
     ok: true,
     skipped: true,
-    reason: openTicket ? 'open_ticket' : 'already_sent',
+    reason: openTicket ? 'open_ticket' : cancelledTicket ? 'cancelled_ticket' : 'already_sent',
   };
-  if (!openTicket && row.mcg_status !== 'sent') {
+  if (!openTicket && !cancelledTicket && row.mcg_status !== 'sent') {
     try {
       mcgResult = await McgPortalService.postClosedTicket(transaction.id);
     } catch (err) {

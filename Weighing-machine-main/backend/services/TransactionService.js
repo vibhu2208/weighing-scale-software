@@ -415,6 +415,7 @@ const TransactionService = {
     const timestampIn = data.timestamp_in || now;
     const timestampOut = data.timestamp_out || now;
 
+    const cancelled = String(data.ticket_status || '').toUpperCase() === TICKET_STATUS.CANCELLED;
     const db = getDb();
     const insert = db.transaction(() => {
       db.prepare(
@@ -439,11 +440,11 @@ const TransactionService = {
         data.operator_id || null,
         slipNumber,
         SYNC_STATUS.SYNCED,
-        data.status || TRANSACTION_STATUS.CAPTURED,
-        data.notes || null,
+        data.status || (cancelled ? TRANSACTION_STATUS.CANCELLED : TRANSACTION_STATUS.CAPTURED),
+        data.notes || (cancelled ? 'Cancelled ticket' : null),
         now,
         now,
-        TICKET_STATUS.CLOSED,
+        cancelled ? TICKET_STATUS.CANCELLED : TICKET_STATUS.CLOSED,
         data.material || null,
         data.driver || null,
         data.customer_name || null,

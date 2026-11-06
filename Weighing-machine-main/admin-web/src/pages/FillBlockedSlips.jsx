@@ -8,12 +8,20 @@ import { generateFillTimes } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
 import { FILL_OPERATORS as OPERATORS, FILL_VEHICLES as VEHICLES } from '../lib/fillLists.js';
 
+const CANCEL_LABEL = 'CANCEL';
 const FIXED = {
   material: 'RDF',
   customer_name: 'MCG',
   destination: 'MUZAFFAR NAGAR',
   vehicle_type: 'TRUCK',
   ticket_status: 'CLOSED',
+};
+const CANCELLED_FIXED = {
+  material: CANCEL_LABEL,
+  customer_name: CANCEL_LABEL,
+  destination: CANCEL_LABEL,
+  vehicle_type: 'TRUCK',
+  ticket_status: 'CANCELLED',
 };
 const SAVED_LIST_CHECKS = [
   { list: 'materials', label: 'material', values: [FIXED.material] },
@@ -28,6 +36,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function emptyEntry() {
   return {
     selected: false,
+    ticket_status: 'CLOSED',
     truck_number: '',
     operator_name: '',
     gross_weight: '',
@@ -39,6 +48,28 @@ function emptyEntry() {
     weightWarning: '',
     operatorAuto: true,
     operatorNote: '',
+  };
+}
+
+function isCancelled(entry) {
+  return String(entry?.ticket_status || '').toUpperCase() === 'CANCELLED';
+}
+
+function asCancelled(entry) {
+  const timestampIn = entry.timestamp_in || entry.timestamp_out || '';
+  return {
+    ...entry,
+    ticket_status: 'CANCELLED',
+    operator_name: CANCEL_LABEL,
+    operatorAuto: false,
+    operatorNote: 'Cancelled ticket uses CANCEL',
+    gross_weight: '0',
+    tare_weight: '0',
+    weightNote: 'Cancelled ticket uses 0 kg; tare and gross time are the same',
+    weightWarning: '',
+    timestamp_in: timestampIn,
+    timestamp_out: timestampIn,
+    timeWarnings: [],
   };
 }
 
@@ -83,6 +114,7 @@ function operatorChoices(entry) {
 
 /** Re-pick the operator from neighbours unless the user chose one by hand. */
 function withAutoOperator(entry, row) {
+  if (isCancelled(entry)) return asCancelled(entry);
   if (!entry.operatorAuto) return entry;
   return { ...entry, ...nearbyOperator(row, entry.timestamp_in) };
 }
@@ -132,18 +164,20 @@ function localMs(value) {
 
 function rowErrors(entry) {
   const errors = [];
-  if (!entry.truck_number) errors.push('Pick a vehicle');
-  if (!entry.operator_name) errors.push('Pick an operator');
-  const gross = Number(entry.gross_weight);
-  const tare = Number(entry.tare_weight);
-  if (!entry.gross_weight || !(gross > 0)) errors.push('Enter gross weight');
-  if (!entry.tare_weight || !(tare > 0)) errors.push('Enter tare weight');
-  if (gross > 0 && tare > 0 && gross <= tare) errors.push('Gross must be greater than tare');
+  if (!isCancelled(entry)) {
+    if (!entry.truck_number) errors.push('Pick a vehicle');
+    if (!entry.operator_name) errors.push('Pick an operator');
+    const gross = Number(entry.gross_weight);
+    const tare = Number(entry.tare_weight);
+    if (!entry.gross_weight || !(gross > 0)) errors.push('Enter gross weight');
+    if (!entry.tare_weight || !(tare > 0)) errors.push('Enter tare weight');
+    if (gross > 0 && tare > 0 && gross <= tare) errors.push('Gross must be greater than tare');
+  }
   const inMs = localMs(entry.timestamp_in);
   const outMs = localMs(entry.timestamp_out);
   if (!Number.isFinite(inMs)) errors.push('In time needs date and HH:mm:ss');
-  if (!Number.isFinite(outMs)) errors.push('Out time needs date and HH:mm:ss');
-  if (Number.isFinite(inMs) && Number.isFinite(outMs) && outMs <= inMs) {
+  if (!isCancelled(entry) && !Number.isFinite(outMs)) errors.push('Out time needs date and HH:mm:ss');
+  if (!isCancelled(entry) && Number.isFinite(inMs) && Number.isFinite(outMs) && outMs <= inMs) {
     errors.push('Out time must be after in time');
   }
   return errors;
@@ -154,7 +188,7 @@ function overlapErrors(rows, entries) {
   const byId = {};
   const picked = rows
     .map((row) => ({ row, entry: entries[row.id] }))
-    .filter(({ entry }) => entry?.selected && entry.truck_number)
+    .filter(({ entry }) => entry?.selected && entry.truck_number && !isCancelled(entry))
     .map(({ row, entry }) => ({
       id: row.id,
       slip: row.slip_number,
@@ -296,6 +330,9 @@ export default function FillBlockedSlips() {
   function pickVehicle(id, truck) {
     setEntries((prev) => {
       const entry = prev[id] || emptyEntry();
+      if (isCancelled(entry)) {
+        return { ...prev, [id]: { ...entry, truck_number: truck } };
+      }
       return {
         ...prev,
         [id]: { ...entry, truck_number: truck, ...weightPatch(tareHistory, truck, entry.timestamp_in) },
@@ -315,7 +352,7 @@ export default function FillBlockedSlips() {
       const next = { ...prev };
       for (const row of selectedRows) {
         const entry = next[row.id];
-        if (!entry?.truck_number) continue;
+        if (!entry?.truck_number || isCancelled(entry)) continue;
         next[row.id] = {
           ...entry,
           ...weightPatch(tareHistory, entry.truck_number, entry.timestamp_in),
@@ -326,19 +363,59 @@ export default function FillBlockedSlips() {
     setResult(null);
   }
 
+  function setTicketStatus(row, status) {
+    setEntries((prev) => {
+      const entry = prev[row.id] || emptyEntry();
+      if (status === 'CANCELLED') {
+        return { ...prev, [row.id]: asCancelled(entry) };
+      }
+      const restored = {
+        ...entry,
+        ticket_status: 'CLOSED',
+        operator_name: entry.operator_name === CANCEL_LABEL ? '' : entry.operator_name,
+        operatorAuto: entry.operator_name === CANCEL_LABEL || entry.operatorAuto,
+        operatorNote: '',
+        gross_weight: entry.gross_weight === '0' ? '' : entry.gross_weight,
+        tare_weight: entry.tare_weight === '0' ? '' : entry.tare_weight,
+        weightNote: '',
+        weightWarning: '',
+      };
+      let next = withAutoOperator(restored, row);
+      if (next.timestamp_in && next.timestamp_out === next.timestamp_in) {
+        const generated = generateFillTimes(rows, [row.id]);
+        next = applyTimes({ [row.id]: next }, generated, rows)[row.id];
+      }
+      return { ...prev, [row.id]: next };
+    });
+    setResult(null);
+  }
+
+  function markSelectedCancelled() {
+    if (!selectedRows.length) return;
+    setEntries((prev) => {
+      const next = { ...prev };
+      for (const row of selectedRows) {
+        next[row.id] = asCancelled(next[row.id] || emptyEntry());
+      }
+      return next;
+    });
+    setResult(null);
+  }
+
   function buildTrips() {
     return selectedRows.map((row) => {
       const entry = entries[row.id];
+      const cancelled = isCancelled(entry);
       return {
-        ...FIXED,
+        ...(cancelled ? CANCELLED_FIXED : FIXED),
         reservation_id: row.id,
         slip_number: row.slip_number,
-        truck_number: entry.truck_number,
-        operator_name: entry.operator_name,
-        gross_weight: Number(entry.gross_weight),
-        tare_weight: Number(entry.tare_weight),
+        truck_number: cancelled ? entry.truck_number || CANCEL_LABEL : entry.truck_number,
+        operator_name: cancelled ? CANCEL_LABEL : entry.operator_name,
+        gross_weight: cancelled ? 0 : Number(entry.gross_weight),
+        tare_weight: cancelled ? 0 : Number(entry.tare_weight),
         timestamp_in: new Date(entry.timestamp_in).toISOString(),
-        timestamp_out: new Date(entry.timestamp_out).toISOString(),
+        timestamp_out: new Date(cancelled ? entry.timestamp_in : entry.timestamp_out).toISOString(),
       };
     });
   }
@@ -346,9 +423,17 @@ export default function FillBlockedSlips() {
   async function run(dryRun) {
     if (blocked) return;
     const trips = buildTrips();
+    const cancelledCount = trips.filter((t) => t.ticket_status === 'CANCELLED').length;
+    const closedCount = trips.length - cancelledCount;
+    const confirmParts = [
+      closedCount ? `${closedCount} closed` : null,
+      cancelledCount ? `${cancelledCount} cancelled` : null,
+    ].filter(Boolean);
     if (
       !dryRun &&
-      !window.confirm(`Create ${trips.length} remote trip(s) on the selected blocked slips?`)
+      !window.confirm(
+        `Create ${trips.length} remote trip(s) on the selected blocked slips (${confirmParts.join(', ')})?`,
+      )
     ) {
       return;
     }
@@ -383,11 +468,13 @@ export default function FillBlockedSlips() {
       <div>
         <h2 className="text-xl font-semibold">Fill blocked slips</h2>
         <p className="text-sm text-slate-400 mt-1">
-          Pick the blocked slips to fill and choose a vehicle and operator for each. Tare is filled
-          from that vehicle&apos;s previous-day tare ± 50–200 kg and gross at random between 65,000
-          and 65,500 kg. The in time (tare, 1st weigh) is placed at random between the previous and
-          next slip&apos;s in times; the out time (gross) is 1 h 45 m to 2 h 30 m later. Weights and
-          times can be edited before creating.{' '}
+          Pick the blocked slips to fill and choose a vehicle and operator for each closed ticket.
+          Set Ticket to Cancelled to fill a void slip (CANCEL / 0 kg, same tare and gross time)
+          instead of a real weighment.
+          Tare is filled from that vehicle&apos;s previous-day tare ± 50–200 kg and gross at random
+          between 65,000 and 65,500 kg. The in time (tare, 1st weigh) is placed at random between
+          the previous and next slip&apos;s in times; the out time (gross) is 1 h 45 m to 2 h 30 m
+          later. Weights and times can be edited before creating.{' '}
           <Link to="/plan-gaps" className="text-brand-300 hover:underline">
             Back to Plan Gaps
           </Link>
@@ -417,7 +504,7 @@ export default function FillBlockedSlips() {
         </span>
         <span>
           <span className="text-slate-400">Ticket</span>{' '}
-          <span className="font-medium text-white">Closed</span>
+          <span className="font-medium text-white">Closed or Cancelled</span>
         </span>
       </div>
 
@@ -448,10 +535,22 @@ export default function FillBlockedSlips() {
           type="button"
           className="btn-ghost text-xs"
           onClick={regenerateWeights}
-          disabled={!selectedRows.some((row) => entries[row.id]?.truck_number) || !tareHistory}
-          title="Re-roll tare and gross for selected rows that have a vehicle"
+          disabled={
+            !selectedRows.some((row) => entries[row.id]?.truck_number && !isCancelled(entries[row.id])) ||
+            !tareHistory
+          }
+          title="Re-roll tare and gross for selected closed rows that have a vehicle"
         >
           {tareHistory ? 'Regenerate weights' : 'Loading tare history…'}
+        </button>
+        <button
+          type="button"
+          className="btn-ghost text-xs"
+          onClick={markSelectedCancelled}
+          disabled={!selectedRows.length}
+          title="Fill selected slips as cancelled tickets (CANCEL / 0 kg)"
+        >
+          Mark selected cancelled
         </button>
         <span className="text-xs text-slate-500">
           {rows.length} blocked slip(s) · {selectedRows.length} selected
@@ -471,6 +570,7 @@ export default function FillBlockedSlips() {
                 />
               </th>
               <th className="p-2">Slip</th>
+              <th className="p-2">Ticket</th>
               <th className="p-2">Between</th>
               <th className="p-2">Vehicle</th>
               <th className="p-2">Operator</th>
@@ -484,9 +584,11 @@ export default function FillBlockedSlips() {
           <tbody>
             {rows.map((row) => {
               const entry = entries[row.id] || emptyEntry();
+              const cancelled = isCancelled(entry);
               const errs = problems[row.id] || [];
-              const net =
-                Number(entry.gross_weight) > 0 && Number(entry.tare_weight) > 0
+              const net = cancelled
+                ? 0
+                : Number(entry.gross_weight) > 0 && Number(entry.tare_weight) > 0
                   ? Number(entry.gross_weight) - Number(entry.tare_weight)
                   : null;
               const hasNotes =
@@ -505,6 +607,17 @@ export default function FillBlockedSlips() {
                       />
                     </td>
                     <td className="p-2 font-mono text-xs">{row.slip_number}</td>
+                    <td className="p-2">
+                      <select
+                        className="field-input text-xs py-1 min-w-[7.5rem]"
+                        value={cancelled ? 'CANCELLED' : 'CLOSED'}
+                        onChange={(e) => setTicketStatus(row, e.target.value)}
+                        aria-label={`Ticket type for ${row.slip_number}`}
+                      >
+                        <option value="CLOSED">Closed</option>
+                        <option value="CANCELLED">Cancelled</option>
+                      </select>
+                    </td>
                     <td className="p-2 text-xs text-slate-400 whitespace-nowrap">
                       <div>
                         {row.prev ? (
@@ -533,7 +646,7 @@ export default function FillBlockedSlips() {
                         value={entry.truck_number}
                         onChange={(e) => pickVehicle(row.id, e.target.value)}
                       >
-                        <option value="">Select…</option>
+                        <option value="">{cancelled ? 'CANCEL' : 'Select…'}</option>
                         {VEHICLES.map((v, i) => (
                           <option key={v} value={v}>
                             {i + 1}. {v}
@@ -552,6 +665,7 @@ export default function FillBlockedSlips() {
                             operatorNote: '',
                           })
                         }
+                        disabled={cancelled}
                       >
                         <option value="">Select…</option>
                         {operatorChoices(entry).map((o) => (
@@ -564,19 +678,21 @@ export default function FillBlockedSlips() {
                     <td className="p-2">
                       <input
                         type="number"
-                        min={1}
+                        min={cancelled ? 0 : 1}
                         className="field-input text-xs py-1 w-24"
                         value={entry.gross_weight}
                         onChange={(e) => update(row.id, { gross_weight: e.target.value })}
+                        disabled={cancelled}
                       />
                     </td>
                     <td className="p-2">
                       <input
                         type="number"
-                        min={1}
+                        min={cancelled ? 0 : 1}
                         className="field-input text-xs py-1 w-24"
                         value={entry.tare_weight}
                         onChange={(e) => update(row.id, { tare_weight: e.target.value })}
+                        disabled={cancelled}
                       />
                     </td>
                     <td className="p-2">
@@ -595,6 +711,8 @@ export default function FillBlockedSlips() {
                         className="field-input text-xs py-1"
                         value={entry.timestamp_out}
                         onChange={(e) => update(row.id, { timestamp_out: e.target.value })}
+                        disabled={cancelled}
+                        title={cancelled ? 'Cancelled tickets use the same tare and gross time' : undefined}
                       />
                     </td>
                     <td className="p-2 text-xs whitespace-nowrap">{fmtKg(net)}</td>
@@ -602,7 +720,7 @@ export default function FillBlockedSlips() {
                   {hasNotes && (
                     <tr className="border-b border-slate-800/60">
                       <td />
-                      <td colSpan={9} className="px-2 pb-2 text-xs space-y-0.5">
+                      <td colSpan={10} className="px-2 pb-2 text-xs space-y-0.5">
                         {errs.map((msg) => (
                           <p key={msg} className="text-red-300">
                             {msg}
@@ -630,7 +748,7 @@ export default function FillBlockedSlips() {
             })}
             {!loading && rows.length === 0 && (
               <tr>
-                <td colSpan={10} className="p-6 text-center text-slate-500">
+                <td colSpan={11} className="p-6 text-center text-slate-500">
                   No blocked slips to fill.{' '}
                   <Link to="/plan-gaps" className="text-brand-300 hover:underline">
                     Plan or block gaps
