@@ -4,16 +4,31 @@ import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
 import CreatedTripsSync from '../components/CreatedTripsSync.jsx';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
-import { generateFillTimes } from '../lib/slipFillTimes.js';
+import { generateFillTimes, timesCollide } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
-import { FILL_OPERATORS as OPERATORS, FILL_VEHICLES as VEHICLES } from '../lib/fillLists.js';
+import {
+  FILL_OPERATORS as OPERATORS,
+  FILL_KIND_COMPOST,
+  FILL_KIND_RDF,
+  FILL_KINDS,
+  DEFAULT_FILL_DESTINATION as DEFAULT_DESTINATION,
+  compactPlate,
+  defaultFillDestinations,
+  defaultFillVehicles,
+  destinationsForKind,
+  fillDestinationNames,
+  fillVehiclePlates,
+  fillVehicleProfile,
+  lookupFillVehicle,
+  normalizeFillDestinations,
+  normalizeFillKind,
+  normalizeFillVehicles,
+  samePlate,
+} from '../lib/fillLists.js';
 
 const CANCEL_LABEL = 'CANCEL';
 const FIXED = {
-  material: 'RDF',
   customer_name: 'MCG',
-  destination: 'MUZAFFAR NAGAR',
-  vehicle_type: 'TRUCK',
   ticket_status: 'CLOSED',
 };
 const CANCELLED_FIXED = {
@@ -24,9 +39,8 @@ const CANCELLED_FIXED = {
   ticket_status: 'CANCELLED',
 };
 const SAVED_LIST_CHECKS = [
-  { list: 'materials', label: 'material', values: [FIXED.material] },
+  { list: 'materials', label: 'material', values: ['RDF', 'COMPOST'] },
   { list: 'customers', label: 'customer', values: [FIXED.customer_name] },
-  { list: 'destinations', label: 'destination', values: [FIXED.destination] },
   { list: 'operators', label: 'operator', values: OPERATORS },
 ];
 const COMPLETE_LOCAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
@@ -38,6 +52,7 @@ function emptyEntry() {
     selected: false,
     ticket_status: 'CLOSED',
     truck_number: '',
+    destination: DEFAULT_DESTINATION,
     operator_name: '',
     gross_weight: '',
     tare_weight: '',
@@ -83,18 +98,28 @@ function sameLocalDay(a, b) {
   );
 }
 
-/** Operator of the neighbouring slip closest in time to `timestampIn` on the same day. */
+function isCancelOperator(name) {
+  return String(name || '').trim().toLowerCase() === 'cancel';
+}
+
+/**
+ * Operator of the neighbouring slip closest in time to `timestampIn` on the same day.
+ * Neighbours marked CANCEL are skipped; the other neighbour is used instead.
+ */
 function nearbyOperator(row, timestampIn) {
   const inMs = localMs(timestampIn);
   if (!row || !Number.isFinite(inMs)) return { operator_name: '', operatorNote: '' };
   const candidates = [row.prev, row.next]
-    .filter((n) => n?.operator_name && n.timestamp_in)
+    .filter((n) => n?.operator_name && n.timestamp_in && !isCancelOperator(n.operator_name))
     .map((n) => ({ ...n, at: new Date(n.timestamp_in).getTime() }))
     .filter((n) => Number.isFinite(n.at) && sameLocalDay(n.at, inMs))
     .sort((a, b) => Math.abs(a.at - inMs) - Math.abs(b.at - inMs));
   const hit = candidates[0];
   if (!hit) {
-    return { operator_name: '', operatorNote: 'No neighbouring slip on the same day has an operator; pick one' };
+    return {
+      operator_name: '',
+      operatorNote: 'No neighbouring slip on the same day has a usable operator (cancel skipped); pick one',
+    };
   }
   const name = String(hit.operator_name).trim();
   const match = OPERATORS.find((o) => o.toLowerCase() === name.toLowerCase());
@@ -106,10 +131,464 @@ function nearbyOperator(row, timestampIn) {
 
 function operatorChoices(entry) {
   const extra = String(entry?.operator_name || '').trim();
-  if (extra && !OPERATORS.some((o) => o.toLowerCase() === extra.toLowerCase())) {
+  if (
+    extra &&
+    !isCancelOperator(extra) &&
+    !OPERATORS.some((o) => o.toLowerCase() === extra.toLowerCase())
+  ) {
     return [...OPERATORS, extra];
   }
   return OPERATORS;
+}
+
+/** Vehicles still free for this row (already-picked plates are hidden elsewhere). */
+function vehicleChoices(rowId, entries, vehicles) {
+  const taken = [];
+  for (const [id, entry] of Object.entries(entries || {})) {
+    if (id === rowId) continue;
+    const truck = String(entry?.truck_number || '').trim();
+    if (truck) taken.push(truck);
+  }
+  const current = String(entries?.[rowId]?.truck_number || '').trim();
+  return vehicles
+    .filter(
+      (v) =>
+        samePlate(v.truck_number, current) || !taken.some((t) => samePlate(t, v.truck_number)),
+    )
+    .map((v, i) => {
+      const profile = fillVehicleProfile(v.kind);
+      return {
+        value: v.truck_number,
+        kind: profile.kind,
+        label: `${i + 1}. ${v.truck_number} · ${profile.kind}`,
+      };
+    });
+}
+
+function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }) {
+  const [draftVehicles, setDraftVehicles] = useState(vehicles);
+  const [draftDestinations, setDraftDestinations] = useState(destinations);
+  const [vehicleInput, setVehicleInput] = useState('');
+  const [vehicleKind, setVehicleKind] = useState(FILL_KIND_RDF);
+  const [vehicleDefaultTare, setVehicleDefaultTare] = useState('');
+  const [vehicleNetMin, setVehicleNetMin] = useState('');
+  const [vehicleNetMax, setVehicleNetMax] = useState('');
+  const [destinationInput, setDestinationInput] = useState('');
+  const [destinationKind, setDestinationKind] = useState(FILL_KIND_RDF);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setDraftVehicles(normalizeFillVehicles(vehicles));
+    setDraftDestinations(normalizeFillDestinations(destinations));
+    setVehicleInput('');
+    setVehicleKind(FILL_KIND_RDF);
+    setVehicleDefaultTare('');
+    setVehicleNetMin('');
+    setVehicleNetMax('');
+    setDestinationInput('');
+    setDestinationKind(FILL_KIND_RDF);
+    setError('');
+  }, [open, vehicles, destinations]);
+
+  if (!open) return null;
+
+  function addVehicle() {
+    const plate = compactPlate(vehicleInput);
+    if (!plate) return;
+    if (!(Number(vehicleDefaultTare) > 0)) {
+      setError('Enter a fixed tare (kg) for this vehicle');
+      return;
+    }
+    if (vehicleKind === FILL_KIND_COMPOST) {
+      if (!(Number(vehicleNetMin) > 0) || !(Number(vehicleNetMax) > 0)) {
+        setError('Compost vehicles need net min and max (kg), e.g. 30000–33000');
+        return;
+      }
+    }
+    setError('');
+    setDraftVehicles((prev) =>
+      normalizeFillVehicles([
+        ...prev,
+        {
+          truck_number: plate,
+          kind: vehicleKind,
+          default_tare: vehicleDefaultTare,
+          net_min: vehicleNetMin,
+          net_max: vehicleNetMax,
+        },
+      ]),
+    );
+    setVehicleInput('');
+    setVehicleDefaultTare('');
+    setVehicleNetMin('');
+    setVehicleNetMax('');
+  }
+
+  function setVehicleItemKind(plate, kind) {
+    const nextKind = normalizeFillKind(kind);
+    setDraftVehicles((prev) =>
+      prev.map((v) => {
+        if (!samePlate(v.truck_number, plate)) return v;
+        if (nextKind === FILL_KIND_COMPOST) {
+          return {
+            ...v,
+            kind: nextKind,
+            default_tare: v.default_tare || null,
+            net_min: v.net_min || null,
+            net_max: v.net_max || null,
+          };
+        }
+        return {
+          truck_number: v.truck_number,
+          kind: nextKind,
+          default_tare: v.default_tare || null,
+        };
+      }),
+    );
+  }
+
+  function patchVehicle(plate, patch) {
+    setDraftVehicles((prev) =>
+      normalizeFillVehicles(
+        prev.map((v) => (samePlate(v.truck_number, plate) ? { ...v, ...patch } : v)),
+      ),
+    );
+  }
+
+  function addDestination() {
+    const name = String(destinationInput || '').trim();
+    if (!name) return;
+    setDraftDestinations((prev) =>
+      normalizeFillDestinations([...prev, { name, kind: destinationKind }]),
+    );
+    setDestinationInput('');
+  }
+
+  function setDestinationItemKind(name, kind, prevKind) {
+    setDraftDestinations((prev) =>
+      normalizeFillDestinations(
+        prev.map((d) =>
+          d.name.toLowerCase() === String(name).toLowerCase() && d.kind === prevKind
+            ? { ...d, kind: normalizeFillKind(kind) }
+            : d,
+        ),
+      ),
+    );
+  }
+
+  async function save() {
+    setSaving(true);
+    setError('');
+    try {
+      const nextVehicles = normalizeFillVehicles(draftVehicles);
+      const nextDestinations = normalizeFillDestinations(draftDestinations);
+      if (!nextVehicles.length) throw new Error('Add at least one vehicle');
+      if (!nextDestinations.length) throw new Error('Add at least one destination');
+      for (const v of nextVehicles) {
+        if (!(v.default_tare > 0)) {
+          throw new Error(`Vehicle ${v.truck_number} needs a fixed tare (kg)`);
+        }
+        if (v.kind === FILL_KIND_COMPOST && (!(v.net_min > 0) || !(v.net_max > 0))) {
+          throw new Error(
+            `Compost vehicle ${v.truck_number} needs net min/max (kg)`,
+          );
+        }
+      }
+      const masterNames = fillDestinationNames(nextDestinations);
+      await Promise.all([
+        api.putList('fill_vehicles', nextVehicles),
+        api.putList('fill_destinations', nextDestinations),
+        api.putList('destinations', masterNames),
+      ]);
+      onSaved({ vehicles: nextVehicles, destinations: nextDestinations });
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Could not save configuration');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 sm:p-6">
+      <div className="card flex w-full max-w-6xl max-h-[95vh] flex-col overflow-hidden p-6 sm:p-8 space-y-5">
+        <div className="flex shrink-0 items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-semibold sm:text-2xl">Fill configuration</h3>
+            <p className="text-sm text-slate-400 mt-1 max-w-3xl">
+              Tag vehicles and destinations as RDF or Compost. Every vehicle needs a fixed tare.
+              Compost also needs a net weight range (min–max kg).
+            </p>
+          </div>
+          <button type="button" className="btn-ghost shrink-0" onClick={onClose} disabled={saving}>
+            Close
+          </button>
+        </div>
+
+        {error && <p className="shrink-0 text-sm text-red-400">{error}</p>}
+
+        <div className="grid min-h-0 flex-1 gap-5 overflow-hidden lg:grid-cols-2">
+          <section className="flex min-h-0 flex-col space-y-3 overflow-hidden rounded-lg border border-slate-800 p-4 sm:p-5">
+            <h4 className="shrink-0 text-base font-medium text-brand-300">Vehicles</h4>
+            <div className="flex flex-wrap gap-2">
+              <input
+                className="field-input text-sm min-w-[10rem] flex-1"
+                value={vehicleInput}
+                placeholder="e.g. HR58E3515"
+                onChange={(e) => setVehicleInput(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addVehicle();
+                  }
+                }}
+              />
+              <select
+                className="field-input text-sm py-2 w-[9.5rem]"
+                value={vehicleKind}
+                onChange={(e) => setVehicleKind(normalizeFillKind(e.target.value))}
+                title="Vehicle flow / material"
+              >
+                {FILL_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {kind === FILL_KIND_COMPOST ? 'Compost (HYWA)' : 'RDF (TRUCK)'}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn-ghost shrink-0" onClick={addVehicle}>
+                Add
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Fixed tare (kg)
+                <input
+                  type="number"
+                  min={1}
+                  className="field-input text-sm w-36"
+                  value={vehicleDefaultTare}
+                  placeholder="e.g. 12000"
+                  onChange={(e) => setVehicleDefaultTare(e.target.value)}
+                />
+              </label>
+              {vehicleKind === FILL_KIND_COMPOST && (
+                <>
+                  <label className="flex flex-col gap-1 text-xs text-slate-400">
+                    Net min (kg)
+                    <input
+                      type="number"
+                      min={1}
+                      className="field-input text-sm w-36"
+                      value={vehicleNetMin}
+                      placeholder="e.g. 30000 (30t)"
+                      onChange={(e) => setVehicleNetMin(e.target.value)}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-slate-400">
+                    Net max (kg)
+                    <input
+                      type="number"
+                      min={1}
+                      className="field-input text-sm w-36"
+                      value={vehicleNetMax}
+                      placeholder="e.g. 33000 (33t)"
+                      onChange={(e) => setVehicleNetMax(e.target.value)}
+                    />
+                  </label>
+                </>
+              )}
+            </div>
+            <p className="text-xs text-slate-500">
+              RDF → fixed tare ±50–200 kg, gross 65,000–65,500. Compost → fixed tare ±30–70 kg; net
+              random in min–max; gross = tare + net.
+            </p>
+            <ul className="min-h-0 flex-1 space-y-2 overflow-auto text-sm pr-1">
+              {draftVehicles.map((item) => (
+                <li
+                  key={item.truck_number}
+                  className="space-y-2 rounded-md bg-slate-900/70 px-3 py-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono">{item.truck_number}</span>
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="field-input text-xs py-1 w-[8.5rem]"
+                        value={normalizeFillKind(item.kind)}
+                        onChange={(e) => setVehicleItemKind(item.truck_number, e.target.value)}
+                      >
+                        <option value={FILL_KIND_RDF}>RDF</option>
+                        <option value={FILL_KIND_COMPOST}>Compost</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="text-xs text-red-300 hover:text-red-200"
+                        onClick={() =>
+                          setDraftVehicles((prev) =>
+                            prev.filter((v) => !samePlate(v.truck_number, item.truck_number)),
+                          )
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                      Fixed tare
+                      <input
+                        type="number"
+                        min={1}
+                        className="field-input text-xs py-1 w-28"
+                        value={item.default_tare ?? ''}
+                        onChange={(e) =>
+                          patchVehicle(item.truck_number, { default_tare: e.target.value })
+                        }
+                      />
+                    </label>
+                    {normalizeFillKind(item.kind) === FILL_KIND_COMPOST && (
+                      <>
+                        <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                          Net min
+                          <input
+                            type="number"
+                            min={1}
+                            className="field-input text-xs py-1 w-28"
+                            value={item.net_min ?? ''}
+                            onChange={(e) =>
+                              patchVehicle(item.truck_number, { net_min: e.target.value })
+                            }
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                          Net max
+                          <input
+                            type="number"
+                            min={1}
+                            className="field-input text-xs py-1 w-28"
+                            value={item.net_max ?? ''}
+                            onChange={(e) =>
+                              patchVehicle(item.truck_number, { net_max: e.target.value })
+                            }
+                          />
+                        </label>
+                      </>
+                    )}
+                  </div>
+                </li>
+              ))}
+              {!draftVehicles.length && (
+                <li className="text-xs text-slate-500">No vehicles yet.</li>
+              )}
+            </ul>
+          </section>
+
+          <section className="flex min-h-0 flex-col space-y-3 overflow-hidden rounded-lg border border-slate-800 p-4 sm:p-5">
+            <h4 className="shrink-0 text-base font-medium text-brand-300">Destinations</h4>
+            <div className="flex flex-wrap gap-2">
+              <input
+                className="field-input text-sm min-w-[10rem] flex-1"
+                value={destinationInput}
+                placeholder="e.g. MUZAFFAR NAGAR"
+                onChange={(e) => setDestinationInput(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addDestination();
+                  }
+                }}
+              />
+              <select
+                className="field-input text-sm py-2 w-[9.5rem]"
+                value={destinationKind}
+                onChange={(e) => setDestinationKind(normalizeFillKind(e.target.value))}
+              >
+                {FILL_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {kind === FILL_KIND_COMPOST ? 'Compost' : 'RDF'}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn-ghost shrink-0" onClick={addDestination}>
+                Add
+              </button>
+            </div>
+            <p className="shrink-0 text-xs text-slate-500">
+              Destinations are filtered in the table by the selected vehicle&apos;s RDF/Compost kind.
+            </p>
+            <ul className="min-h-0 flex-1 space-y-2 overflow-auto text-sm pr-1">
+              {draftDestinations.map((item) => (
+                <li
+                  key={`${item.name}|${item.kind}`}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-slate-900/70 px-3 py-2.5"
+                >
+                  <span>{item.name}</span>
+                  <div className="flex items-center gap-2">
+                    <select
+                      className="field-input text-xs py-1 w-[8.5rem]"
+                      value={normalizeFillKind(item.kind)}
+                      onChange={(e) =>
+                        setDestinationItemKind(item.name, e.target.value, item.kind)
+                      }
+                    >
+                      <option value={FILL_KIND_RDF}>RDF</option>
+                      <option value={FILL_KIND_COMPOST}>Compost</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="text-xs text-red-300 hover:text-red-200"
+                      onClick={() =>
+                        setDraftDestinations((prev) =>
+                          prev.filter(
+                            (d) =>
+                              !(
+                                d.name.toLowerCase() === item.name.toLowerCase() &&
+                                d.kind === item.kind
+                              ),
+                          ),
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              ))}
+              {!draftDestinations.length && (
+                <li className="text-xs text-slate-500">No destinations yet.</li>
+              )}
+            </ul>
+          </section>
+        </div>
+
+        <div className="flex shrink-0 justify-end gap-3 border-t border-slate-800 pt-4">
+          <button type="button" className="btn-ghost px-5" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary px-6" onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function defaultDestinationForKind(destinations, kind) {
+  const match = destinationsForKind(destinations, kind);
+  if (match.length) return match[0].name;
+  if (normalizeFillKind(kind) === FILL_KIND_RDF) return DEFAULT_DESTINATION;
+  return '';
+}
+
+function destinationChoices(destinations, kind, current) {
+  const opts = destinationsForKind(destinations, kind).map((d) => d.name);
+  const cur = String(current || '').trim();
+  if (cur && !opts.some((name) => name.toLowerCase() === cur.toLowerCase())) {
+    opts.unshift(cur);
+  }
+  return opts;
 }
 
 /** Re-pick the operator from neighbours unless the user chose one by hand. */
@@ -129,14 +608,21 @@ function tareHistorySince(rows) {
   return new Date(earliest - TARE_HISTORY_DAYS * DAY_MS).toISOString();
 }
 
-function weightPatch(history, truck, timestampIn) {
+function weightPatch(history, truck, timestampIn, vehicles = []) {
   if (!truck) return { weightNote: '', weightWarning: '' };
-  const w = generateFillWeights(history || [], truck, localMs(timestampIn));
+  const configured = lookupFillVehicle(vehicles, truck);
+  const kind = fillVehicleProfile(configured?.kind).kind;
+  const w = generateFillWeights(history || [], truck, localMs(timestampIn), Math.random, {
+    kind,
+    defaultTare: configured?.default_tare,
+    netMin: configured?.net_min,
+    netMax: configured?.net_max,
+  });
   return {
-    gross_weight: String(w.gross),
+    gross_weight: w.gross == null ? '' : String(w.gross),
     tare_weight: w.tare == null ? '' : String(w.tare),
     weightNote: w.source,
-    weightWarning: history ? w.warning : 'Tare history is still loading; use Regenerate weights',
+    weightWarning: w.warning,
   };
 }
 
@@ -166,7 +652,9 @@ function rowErrors(entry) {
   const errors = [];
   if (!isCancelled(entry)) {
     if (!entry.truck_number) errors.push('Pick a vehicle');
+    if (!String(entry.destination || '').trim()) errors.push('Pick a destination');
     if (!entry.operator_name) errors.push('Pick an operator');
+    else if (isCancelOperator(entry.operator_name)) errors.push('Cancel is not allowed as operator');
     const gross = Number(entry.gross_weight);
     const tare = Number(entry.tare_weight);
     if (!entry.gross_weight || !(gross > 0)) errors.push('Enter gross weight');
@@ -212,6 +700,69 @@ function overlapErrors(rows, entries) {
   return byId;
 }
 
+function neighborEvents(row) {
+  const events = [];
+  for (const side of [row.prev, row.next]) {
+    if (!side) continue;
+    const slip = side.slip_number || 'neighbour';
+    const inAt = new Date(side.timestamp_in || '').getTime();
+    if (Number.isFinite(inAt)) events.push({ slip, label: 'in', at: inAt });
+    const outAt = new Date(side.timestamp_out || '').getTime();
+    if (Number.isFinite(outAt)) events.push({ slip, label: 'out', at: outAt });
+  }
+  return events;
+}
+
+/**
+ * In/out of selected fills must stay more than 1 minute from each other and
+ * from neighbouring real slips' in/out times.
+ */
+function timeCollisionErrors(rows, entries) {
+  const byId = {};
+  const selected = rows
+    .map((row) => ({ row, entry: entries[row.id] }))
+    .filter(({ entry }) => entry?.selected)
+    .map(({ row, entry }) => ({
+      id: row.id,
+      slip: row.slip_number,
+      row,
+      events: [
+        { label: 'in', at: localMs(entry.timestamp_in) },
+        { label: 'out', at: localMs(entry.timestamp_out) },
+      ].filter((e) => Number.isFinite(e.at)),
+    }));
+
+  for (const item of selected) {
+    for (const ev of item.events) {
+      for (const n of neighborEvents(item.row)) {
+        if (!timesCollide(ev.at, n.at)) continue;
+        (byId[item.id] ||= []).push(
+          `${ev.label} time collides with ${n.slip} ${n.label} (need >1 min apart)`,
+        );
+      }
+    }
+  }
+
+  for (let i = 0; i < selected.length; i += 1) {
+    for (let j = i + 1; j < selected.length; j += 1) {
+      const a = selected[i];
+      const b = selected[j];
+      for (const ae of a.events) {
+        for (const be of b.events) {
+          if (!timesCollide(ae.at, be.at)) continue;
+          (byId[a.id] ||= []).push(
+            `${ae.label} time collides with ${b.slip} ${be.label} (need >1 min apart)`,
+          );
+          (byId[b.id] ||= []).push(
+            `${be.label} time collides with ${a.slip} ${ae.label} (need >1 min apart)`,
+          );
+        }
+      }
+    }
+  }
+  return byId;
+}
+
 function statusTone(status) {
   if (status === 'created') return 'success';
   if (status === 'valid') return 'info';
@@ -234,6 +785,43 @@ export default function FillBlockedSlips() {
   const [createdIds, setCreatedIds] = useState([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [tareHistory, setTareHistory] = useState(null);
+  const [configOpen, setConfigOpen] = useState(false);
+
+  const vehicles = useMemo(() => {
+    const saved = normalizeFillVehicles(lists?.fill_vehicles || []);
+    return saved.length ? saved : defaultFillVehicles();
+  }, [lists]);
+
+  const destinations = useMemo(() => {
+    const saved = normalizeFillDestinations(lists?.fill_destinations || []);
+    if (saved.length) return saved;
+    // Migrate plain master destinations as RDF until configured.
+    const legacy = normalizeFillDestinations(
+      (lists?.destinations || []).map((name) => ({ name, kind: FILL_KIND_RDF })),
+    );
+    return legacy.length ? legacy : defaultFillDestinations();
+  }, [lists]);
+
+  const vehiclePlates = useMemo(() => fillVehiclePlates(vehicles), [vehicles]);
+
+  const loadLists = useCallback(async () => {
+    try {
+      const names = [
+        ...SAVED_LIST_CHECKS.map(({ list }) => list),
+        'destinations',
+        'fill_vehicles',
+        'fill_destinations',
+      ];
+      const res = await Promise.all(names.map((list) => api.getList(list)));
+      const out = {};
+      names.forEach((list, i) => {
+        out[list] = res[i].items || [];
+      });
+      setLists(out);
+    } catch {
+      setLists(null);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -242,18 +830,22 @@ export default function FillBlockedSlips() {
       const data = await api.getHeldSlipWindows();
       const fresh = data.rows || [];
       setRows(fresh);
-      api
-        .getVehicleTares(VEHICLES, tareHistorySince(fresh))
-        .then((res) => setTareHistory(res.rows || []))
-        .catch((err) => {
-          setTareHistory([]);
-          setError(`Could not load vehicle tare history: ${err.message}`);
-        });
       setEntries((prev) => {
         const kept = {};
-        for (const row of fresh) kept[row.id] = prev[row.id] || emptyEntry();
+        for (const row of fresh) {
+          const prior = prev[row.id] || emptyEntry();
+          kept[row.id] = {
+            ...emptyEntry(),
+            ...prior,
+            destination: prior.destination || DEFAULT_DESTINATION,
+          };
+        }
         const needTimes = fresh.filter((row) => !kept[row.id].timestamp_in).map((r) => r.id);
-        return applyTimes(kept, generateFillTimes(fresh, needTimes), fresh);
+        return applyTimes(
+          kept,
+          generateFillTimes(fresh, needTimes, { existing: kept }),
+          fresh,
+        );
       });
     } catch (err) {
       setError(err.message);
@@ -267,16 +859,29 @@ export default function FillBlockedSlips() {
   }, [load]);
 
   useEffect(() => {
-    Promise.all(SAVED_LIST_CHECKS.map(({ list }) => api.getList(list)))
+    loadLists();
+  }, [loadLists]);
+
+  useEffect(() => {
+    if (!rows.length || !vehiclePlates.length) {
+      setTareHistory([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getVehicleTares(vehiclePlates, tareHistorySince(rows))
       .then((res) => {
-        const out = {};
-        SAVED_LIST_CHECKS.forEach(({ list }, i) => {
-          out[list] = res[i].items || [];
-        });
-        setLists(out);
+        if (!cancelled) setTareHistory(res.rows || []);
       })
-      .catch(() => setLists(null));
-  }, []);
+      .catch((err) => {
+        if (cancelled) return;
+        setTareHistory([]);
+        setError(`Could not load vehicle tare history: ${err.message}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rows, vehiclePlates]);
 
   const missingFromLists = useMemo(() => {
     if (!lists) return [];
@@ -288,21 +893,40 @@ export default function FillBlockedSlips() {
         if (!saved.includes(value.toLowerCase())) missing.push(`${label} "${value}"`);
       }
     }
+    const savedDest = (lists.destinations || []).map((v) => String(v).trim().toLowerCase());
+    if (savedDest.length) {
+      const seen = new Set();
+      for (const row of rows) {
+        const entry = entries[row.id];
+        if (!entry?.selected || isCancelled(entry)) continue;
+        const dest = String(entry.destination || '').trim();
+        if (!dest) continue;
+        const key = dest.toLowerCase();
+        if (seen.has(key) || savedDest.includes(key)) continue;
+        seen.add(key);
+        missing.push(`destination "${dest}"`);
+      }
+    }
     return missing;
-  }, [lists]);
+  }, [lists, rows, entries]);
 
   const overlaps = useMemo(() => overlapErrors(rows, entries), [rows, entries]);
+  const collisions = useMemo(() => timeCollisionErrors(rows, entries), [rows, entries]);
   const selectedRows = rows.filter((row) => entries[row.id]?.selected);
   const problems = useMemo(() => {
     const out = {};
     for (const row of rows) {
       const entry = entries[row.id];
       if (!entry?.selected) continue;
-      const errs = [...rowErrors(entry), ...(overlaps[row.id] || [])];
+      const errs = [
+        ...rowErrors(entry),
+        ...(overlaps[row.id] || []),
+        ...(collisions[row.id] || []),
+      ];
       if (errs.length) out[row.id] = errs;
     }
     return out;
-  }, [rows, entries, overlaps]);
+  }, [rows, entries, overlaps, collisions]);
   const blocked = selectedRows.length === 0 || Object.keys(problems).length > 0;
   const allSelected = rows.length > 0 && selectedRows.length === rows.length;
 
@@ -333,9 +957,18 @@ export default function FillBlockedSlips() {
       if (isCancelled(entry)) {
         return { ...prev, [id]: { ...entry, truck_number: truck } };
       }
+      const kind = lookupFillVehicle(vehicles, truck)?.kind || FILL_KIND_RDF;
+      const allowed = destinationsForKind(destinations, kind);
+      const current = String(entry.destination || '').trim();
+      const stillValid = allowed.some((d) => d.name.toLowerCase() === current.toLowerCase());
       return {
         ...prev,
-        [id]: { ...entry, truck_number: truck, ...weightPatch(tareHistory, truck, entry.timestamp_in) },
+        [id]: {
+          ...entry,
+          truck_number: truck,
+          destination: stillValid ? current : defaultDestinationForKind(destinations, kind),
+          ...weightPatch(tareHistory, truck, entry.timestamp_in, vehicles),
+        },
       };
     });
     setResult(null);
@@ -343,7 +976,9 @@ export default function FillBlockedSlips() {
 
   function regenerate() {
     const ids = selectedRows.length ? selectedRows.map((r) => r.id) : rows.map((r) => r.id);
-    setEntries((prev) => applyTimes(prev, generateFillTimes(rows, ids), rows));
+    setEntries((prev) =>
+      applyTimes(prev, generateFillTimes(rows, ids, { existing: prev }), rows),
+    );
     setResult(null);
   }
 
@@ -355,7 +990,7 @@ export default function FillBlockedSlips() {
         if (!entry?.truck_number || isCancelled(entry)) continue;
         next[row.id] = {
           ...entry,
-          ...weightPatch(tareHistory, entry.truck_number, entry.timestamp_in),
+          ...weightPatch(tareHistory, entry.truck_number, entry.timestamp_in, vehicles),
         };
       }
       return next;
@@ -406,8 +1041,17 @@ export default function FillBlockedSlips() {
     return selectedRows.map((row) => {
       const entry = entries[row.id];
       const cancelled = isCancelled(entry);
+      const configured = lookupFillVehicle(vehicles, entry.truck_number);
+      const profile = fillVehicleProfile(configured?.kind);
       return {
-        ...(cancelled ? CANCELLED_FIXED : FIXED),
+        ...(cancelled
+          ? CANCELLED_FIXED
+          : {
+              ...FIXED,
+              destination: String(entry.destination || '').trim(),
+              material: profile.material,
+              vehicle_type: profile.vehicle_type,
+            }),
         reservation_id: row.id,
         slip_number: row.slip_number,
         truck_number: cancelled ? entry.truck_number || CANCEL_LABEL : entry.truck_number,
@@ -463,32 +1107,87 @@ export default function FillBlockedSlips() {
     }
   }
 
+  function handleConfigSaved({ vehicles: nextVehicles, destinations: nextDestinations }) {
+    const typedVehicles = normalizeFillVehicles(nextVehicles);
+    const typedDestinations = normalizeFillDestinations(nextDestinations);
+    const destNames = fillDestinationNames(typedDestinations);
+    setLists((prev) => ({
+      ...(prev || {}),
+      fill_vehicles: typedVehicles,
+      fill_destinations: typedDestinations,
+      destinations: destNames,
+    }));
+    setEntries((prev) => {
+      const next = { ...prev };
+      for (const [id, entry] of Object.entries(next)) {
+        let patch = { ...entry };
+        if (
+          entry?.truck_number &&
+          !typedVehicles.some((v) => samePlate(v.truck_number, entry.truck_number))
+        ) {
+          patch = {
+            ...patch,
+            truck_number: '',
+            destination: defaultDestinationForKind(typedDestinations, FILL_KIND_RDF),
+            gross_weight: '',
+            tare_weight: '',
+            weightNote: '',
+            weightWarning: '',
+          };
+        } else {
+          const kind =
+            lookupFillVehicle(typedVehicles, entry?.truck_number)?.kind || FILL_KIND_RDF;
+          const allowed = destinationsForKind(typedDestinations, kind);
+          const current = String(entry?.destination || '').trim();
+          const stillValid = allowed.some((d) => d.name.toLowerCase() === current.toLowerCase());
+          if (!stillValid) {
+            patch.destination = defaultDestinationForKind(typedDestinations, kind);
+          }
+        }
+        next[id] = patch;
+      }
+      return next;
+    });
+  }
+
   return (
-    <div className="space-y-6 max-w-7xl">
-      <div>
-        <h2 className="text-xl font-semibold">Fill blocked slips</h2>
-        <p className="text-sm text-slate-400 mt-1">
-          Pick the blocked slips to fill and choose a vehicle and operator for each closed ticket.
-          Set Ticket to Cancelled to fill a void slip (CANCEL / 0 kg, same tare and gross time)
-          instead of a real weighment.
-          Tare is filled from that vehicle&apos;s previous-day tare ± 50–200 kg and gross at random
-          between 65,000 and 65,500 kg. The in time (tare, 1st weigh) is placed at random between
-          the previous and next slip&apos;s in times; the out time (gross) is 1 h 45 m to 2 h 30 m
-          later. Weights and times can be edited before creating.{' '}
-          <Link to="/plan-gaps" className="text-brand-300 hover:underline">
-            Back to Plan Gaps
-          </Link>
-          {' · '}
-          <Link to="/bulk-photos" className="text-brand-300 hover:underline">
-            Bulk vehicle photos
-          </Link>
-        </p>
+    <div className="space-y-6 w-full">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold">Fill blocked slips</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Pick the blocked slips to fill and choose a vehicle, destination, and operator for each
+            closed ticket. Vehicle kind (RDF or Compost) sets material and report flow: RDF = TRUCK
+            tare-first; Compost = HYWA gross-first. Set Ticket to Cancelled to fill a void slip
+            (CANCEL / 0 kg, same tare and gross time). Tare/gross weights are generated the same way;
+            only labels and report mapping change. The 1st weigh is placed between neighbouring in
+            times; the 2nd weigh is 1 h 45 m to 2 h 30 m later.{' '}
+            <Link to="/plan-gaps" className="text-brand-300 hover:underline">
+              Back to Plan Gaps
+            </Link>
+            {' · '}
+            <Link to="/bulk-photos" className="text-brand-300 hover:underline">
+              Bulk vehicle photos
+            </Link>
+          </p>
+        </div>
+        <button type="button" className="btn-ghost shrink-0" onClick={() => setConfigOpen(true)}>
+          Configure vehicles & destinations
+        </button>
       </div>
 
-      <div className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm flex flex-wrap gap-x-6 gap-y-1">
+      <FillListsConfigModal
+        open={configOpen}
+        vehicles={vehicles}
+        destinations={destinations}
+        onClose={() => setConfigOpen(false)}
+        onSaved={handleConfigSaved}
+      />
+
+      <div className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm flex flex-wrap items-center gap-x-6 gap-y-2">
         <span>
           <span className="text-slate-400">Material</span>{' '}
-          <span className="font-medium text-white">{FIXED.material}</span>
+          <span className="font-medium text-white">by vehicle (RDF / COMPOST)</span>
         </span>
         <span>
           <span className="text-slate-400">Customer</span>{' '}
@@ -496,11 +1195,11 @@ export default function FillBlockedSlips() {
         </span>
         <span>
           <span className="text-slate-400">Destination</span>{' '}
-          <span className="font-medium text-white">{FIXED.destination}</span>
+          <span className="font-medium text-white">per slip in table</span>
         </span>
         <span>
           <span className="text-slate-400">Vehicle type</span>{' '}
-          <span className="font-medium text-white">TRUCK (tare first)</span>
+          <span className="font-medium text-white">by vehicle (TRUCK / HYWA)</span>
         </span>
         <span>
           <span className="text-slate-400">Ticket</span>{' '}
@@ -573,11 +1272,12 @@ export default function FillBlockedSlips() {
               <th className="p-2">Ticket</th>
               <th className="p-2">Between</th>
               <th className="p-2">Vehicle</th>
+              <th className="p-2">Destination</th>
               <th className="p-2">Operator</th>
               <th className="p-2">Gross kg</th>
               <th className="p-2">Tare kg</th>
-              <th className="p-2">In (tare)</th>
-              <th className="p-2">Out (gross)</th>
+              <th className="p-2">In (1st weigh)</th>
+              <th className="p-2">Out (2nd weigh)</th>
               <th className="p-2">Net</th>
             </tr>
           </thead>
@@ -585,6 +1285,9 @@ export default function FillBlockedSlips() {
             {rows.map((row) => {
               const entry = entries[row.id] || emptyEntry();
               const cancelled = isCancelled(entry);
+              const profile = fillVehicleProfile(
+                lookupFillVehicle(vehicles, entry.truck_number)?.kind,
+              );
               const errs = problems[row.id] || [];
               const net = cancelled
                 ? 0
@@ -594,7 +1297,8 @@ export default function FillBlockedSlips() {
               const hasNotes =
                 errs.length > 0 ||
                 entry.timeWarnings.length > 0 ||
-                Boolean(entry.weightNote || entry.weightWarning || entry.operatorNote);
+                Boolean(entry.weightNote || entry.weightWarning || entry.operatorNote) ||
+                Boolean(entry.truck_number && !cancelled);
               return (
                 <React.Fragment key={row.id}>
                   <tr className={`align-top ${hasNotes ? '' : 'border-b border-slate-800/60'}`}>
@@ -642,14 +1346,44 @@ export default function FillBlockedSlips() {
                     </td>
                     <td className="p-2">
                       <select
-                        className="field-input text-xs py-1 min-w-[8.5rem]"
+                        className="field-input text-xs py-1 min-w-[10rem]"
                         value={entry.truck_number}
                         onChange={(e) => pickVehicle(row.id, e.target.value)}
                       >
                         <option value="">{cancelled ? 'CANCEL' : 'Select…'}</option>
-                        {VEHICLES.map((v, i) => (
-                          <option key={v} value={v}>
-                            {i + 1}. {v}
+                        {vehicleChoices(row.id, entries, vehicles).map((v) => (
+                          <option key={v.value} value={v.value}>
+                            {v.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="p-2">
+                      <select
+                        className="field-input text-xs py-1 min-w-[10rem]"
+                        value={entry.destination || ''}
+                        onChange={(e) => update(row.id, { destination: e.target.value })}
+                        disabled={cancelled || !entry.truck_number}
+                        title={
+                          entry.truck_number
+                            ? `${profile.kind} destinations`
+                            : 'Select a vehicle first'
+                        }
+                      >
+                        <option value="">
+                          {cancelled
+                            ? 'CANCEL'
+                            : entry.truck_number
+                              ? 'Select…'
+                              : 'Pick vehicle first'}
+                        </option>
+                        {destinationChoices(
+                          destinations,
+                          profile.kind,
+                          entry.destination,
+                        ).map((name) => (
+                          <option key={name} value={name}>
+                            {name}
                           </option>
                         ))}
                       </select>
@@ -702,7 +1436,11 @@ export default function FillBlockedSlips() {
                         className="field-input text-xs py-1"
                         value={entry.timestamp_in}
                         onChange={(e) => updateInTime(row, e.target.value)}
+                        title={profile.inLabel}
                       />
+                      {entry.truck_number && !cancelled && (
+                        <div className="mt-0.5 text-[10px] text-slate-500">{profile.inLabel}</div>
+                      )}
                     </td>
                     <td className="p-2">
                       <input
@@ -712,15 +1450,27 @@ export default function FillBlockedSlips() {
                         value={entry.timestamp_out}
                         onChange={(e) => update(row.id, { timestamp_out: e.target.value })}
                         disabled={cancelled}
-                        title={cancelled ? 'Cancelled tickets use the same tare and gross time' : undefined}
+                        title={
+                          cancelled
+                            ? 'Cancelled tickets use the same tare and gross time'
+                            : profile.outLabel
+                        }
                       />
+                      {entry.truck_number && !cancelled && (
+                        <div className="mt-0.5 text-[10px] text-slate-500">{profile.outLabel}</div>
+                      )}
                     </td>
                     <td className="p-2 text-xs whitespace-nowrap">{fmtKg(net)}</td>
                   </tr>
                   {hasNotes && (
                     <tr className="border-b border-slate-800/60">
                       <td />
-                      <td colSpan={10} className="px-2 pb-2 text-xs space-y-0.5">
+                      <td colSpan={11} className="px-2 pb-2 text-xs space-y-0.5">
+                        {entry.truck_number && !cancelled && (
+                          <p className="text-slate-500">
+                            {profile.kind} · material {profile.material} · {profile.flowNote}
+                          </p>
+                        )}
                         {errs.map((msg) => (
                           <p key={msg} className="text-red-300">
                             {msg}

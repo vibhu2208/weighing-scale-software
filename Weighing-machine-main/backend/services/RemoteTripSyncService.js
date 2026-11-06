@@ -302,7 +302,7 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       vehicleNumber: truckNumber,
     });
     const key = String(s3Key).trim();
-    if (localPhotoExists(localPath)) {
+    if (localPhotoExists(localPath) && isJpegFile(localPath)) {
       paths[slot.col] = localPath;
       usedS3Keys[slot.col] = key;
       continue;
@@ -321,7 +321,7 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       date,
       { vehicleNumber: truckNumber },
     );
-    if (localPhotoExists(localPath)) {
+    if (localPhotoExists(localPath) && isJpegFile(localPath)) {
       paths[inferred.col] = localPath;
       usedS3Keys[inferred.col] = s3Key;
       continue;
@@ -366,12 +366,21 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
   return { ...paths, report_path: reportPath, _s3Keys: usedS3Keys };
 }
 
-function assertPhotosReady(row, photoPaths) {
+async function s3PhotoStillAvailable(s3Key) {
+  if (!isS3ObjectKey(s3Key) || !S3Service.isConfigured()) return false;
+  try {
+    return await S3Service.objectExists(s3Key);
+  } catch (_e) {
+    return false;
+  }
+}
+
+async function assertPhotosReady(row, photoPaths) {
   const missing = [];
   for (const slot of PHOTO_SLOTS) {
     const key = row[slot.col];
     if (!isS3ObjectKey(key)) continue;
-    if (!localPhotoExists(photoPaths?.[slot.col])) missing.push(slot.col);
+    if (!localPhotoExists(photoPaths?.[slot.col])) missing.push(slot);
   }
   if (!missing.length) {
     photoMissCounts.delete(row.id);
@@ -379,15 +388,27 @@ function assertPhotosReady(row, photoPaths) {
   }
   const attempt = (photoMissCounts.get(row.id) || 0) + 1;
   photoMissCounts.set(row.id, attempt);
-  if (attempt <= MAX_PHOTO_MISS_CYCLES) {
+
+  let availableOnS3 = false;
+  for (const slot of missing) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await s3PhotoStillAvailable(row[slot.col])) {
+      availableOnS3 = true;
+      break;
+    }
+  }
+
+  if (availableOnS3 || attempt <= MAX_PHOTO_MISS_CYCLES) {
     throw new Error(
-      `Photos not on the weighbridge yet for ${row.slip_number}: ${missing.join(', ')} (attempt ${attempt})`,
+      `Photos not on the weighbridge yet for ${row.slip_number}: ${missing
+        .map((slot) => slot.col)
+        .join(', ')} (attempt ${attempt})`,
     );
   }
   logger.error('Remote trip continuing with photos still missing', {
     remoteId: row.id,
     slip: row.slip_number,
-    missing,
+    missing: missing.map((slot) => slot.col),
   });
 }
 
@@ -440,7 +461,8 @@ function applyLocalPhotoUpdates(txn, photoPaths) {
     for (const slot of PHOTO_SLOTS.filter((item) => item.pass === pass)) {
       const nextPath = photoPaths[slot.col];
       if (!localPhotoExists(nextPath)) continue;
-      if (localPhotoExists(txn[slot.col])) continue;
+      const existing = txn[slot.col];
+      if (localPhotoExists(existing) && !isS3ObjectKey(existing)) continue;
       updates[slot.col] = nextPath;
       newSnapshots.push({
         id: slot.cam,
@@ -646,7 +668,7 @@ async function processRemoteRow(row, attempt = 0) {
     const photoSync = await syncImportedTripPhotos(row, alreadyImported, {
       regeneratePdf: !isOpenRemoteRow(row),
     });
-    assertPhotosReady(row, photoSync.localPaths);
+    await assertPhotosReady(row, photoSync.localPaths);
     const marked = await markRemoteTripSynced(remoteId, alreadyImported.id, {
       ok: true,
       skipped: true,
@@ -684,7 +706,7 @@ async function processRemoteRow(row, attempt = 0) {
   pendingLocalIds.set(remoteId, localTxnId);
   const extraKeys = await collectCandidateS3Keys(row);
   const photoPaths = await downloadRemotePhotos(row, localTxnId, extraKeys);
-  assertPhotosReady(row, photoPaths);
+  await assertPhotosReady(row, photoPaths);
   const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
 
   const openTicket = isOpenRemoteRow(row);
