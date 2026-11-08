@@ -16,6 +16,7 @@ const {
   bufferToDataUrl,
 } = require('./vehicleReportHtml');
 const { hydratePhotoKeys } = require('./reportMedia');
+const { shrinkReportPdf } = require('./pdfShrink');
 
 const PHOTO_FIELDS = [
   { col: 'arrival_photo_1', pass: 'arrival', slot: 1 },
@@ -134,7 +135,10 @@ async function renderHtmlToPdfBuffer(html) {
       margin: { top: '0', right: '0', bottom: '0', left: '0' },
       preferCSSPageSize: true,
     });
-    return Buffer.from(pdf);
+    // Chrome re-embeds every photo as a raw RGB Flate stream, which turns six
+    // camera frames into a ~20 MB file. Re-encode those streams as JPEG at the
+    // same pixel dimensions: identical page, a fraction of the bytes.
+    return await shrinkReportPdf(Buffer.from(pdf));
   } finally {
     if (browser) {
       try {
