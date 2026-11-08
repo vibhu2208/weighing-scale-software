@@ -9,8 +9,10 @@ const {
   listRemoteTrips,
   getRemoteTrip,
   attachPhotos,
+  resyncRemoteTrip,
 } = require('../services/remoteTripService');
 const { generateTripPdf } = require('../services/reportPdfService');
+const { generateRemoteTripPhoto } = require('../services/tripImageService');
 const { grossWeightTimestamp } = require('../services/vehicleReportHtml');
 const { isConfigured, presignGet, getObjectBuffer, mirrorReportKey } = require('../services/s3Presign');
 
@@ -156,12 +158,38 @@ router.post('/', async (req, res) => {
   }
 });
 
+router.post('/:id/generate-photo', async (req, res) => {
+  try {
+    const result = await generateRemoteTripPhoto(query, req.params.id, req.body || {});
+    return res.json({
+      ok: true,
+      trip: await attachTripMedia(result.trip),
+      slot: result.slot,
+      pass: result.pass,
+      key: result.key,
+    });
+  } catch (err) {
+    const status = /Gemini image edit failed|timed out/.test(err.message) ? 502 : 400;
+    return res.status(status).json({ ok: false, error: err.message });
+  }
+});
+
 router.patch('/:id/photos', async (req, res) => {
   try {
     const trip = await attachPhotos(query, req.params.id, req.body?.photoS3Keys || []);
     return res.json({ ok: true, trip });
   } catch (err) {
     return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+router.post('/:id/resync', async (req, res) => {
+  try {
+    const trip = await resyncRemoteTrip(query, req.params.id);
+    return res.json({ ok: true, trip: await attachTripMedia(trip) });
+  } catch (err) {
+    const status = err.status || (/not found/i.test(err.message) ? 404 : 400);
+    return res.status(status).json({ ok: false, error: err.message });
   }
 });
 
