@@ -1344,6 +1344,51 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   return trip;
 }
 
+/**
+ * Clear PC sync flags so the weighbridge re-imports this remote trip.
+ */
+async function resyncRemoteTrip(queryFn, id) {
+  const row = await getRemoteTrip(queryFn, id);
+  if (!row) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!row.synced_to_local) {
+    const err = new Error('Trip is not synced');
+    err.status = 400;
+    throw err;
+  }
+  if (isHeldUntilOutTime(row)) {
+    const err = new Error('Trip is waiting until close time');
+    err.status = 400;
+    throw err;
+  }
+
+  const res = await queryFn(
+    `UPDATE remote_trips
+     SET synced_to_local = false,
+         synced_at = NULL,
+         local_id = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id],
+  );
+  const trip = res.rows[0];
+  if (!trip) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    await queryFn(`SELECT pg_notify('new_remote_trip', $1)`, [String(trip.id)]);
+  } catch (err) {
+    console.warn('[remoteTrip] resync notify failed', err.message);
+  }
+  return trip;
+}
+
 module.exports = {
   buildCreatePayload,
   validateRemoteTripFields,
@@ -1353,6 +1398,7 @@ module.exports = {
   listRemoteTrips,
   getRemoteTrip,
   attachPhotos,
+  resyncRemoteTrip,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,
   reconcileRemoteTripsFromMirror,
