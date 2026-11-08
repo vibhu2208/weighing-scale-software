@@ -46,6 +46,7 @@ export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) 
   const [error, setError] = useState('');
   const [pendingOnly, setPendingOnly] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
+  const [resyncId, setResyncId] = useState('');
   const highlight = new Set(highlightIds);
 
   const load = useCallback(async () => {
@@ -161,6 +162,27 @@ export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) 
                       <div className="text-xs text-slate-500 mt-1 whitespace-nowrap">
                         until {fmtDate(row.release_at)}
                       </div>
+                    )}
+                    {state.label === 'Synced' && (
+                      <button
+                        type="button"
+                        className="mt-1 block text-amber-400 hover:underline text-xs disabled:opacity-50"
+                        disabled={Boolean(resyncId)}
+                        onClick={async () => {
+                          setResyncId(row.id);
+                          setError('');
+                          try {
+                            await api.resyncRemoteTrip(row.id);
+                            await load();
+                          } catch (err) {
+                            setError(err.message);
+                          } finally {
+                            setResyncId('');
+                          }
+                        }}
+                      >
+                        {resyncId === row.id ? 'Resync…' : 'Resync'}
+                      </button>
                     )}
                   </td>
                   <td className="p-3 text-xs whitespace-nowrap">

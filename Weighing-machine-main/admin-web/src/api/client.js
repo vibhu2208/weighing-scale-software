@@ -280,6 +280,13 @@ export const api = {
     });
   },
 
+  resyncRemoteTrip(id) {
+    return request(`/remote-trips/${encodeURIComponent(id)}/resync`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
   async downloadRemoteTripPdf(id, slipNumber) {
     return downloadPdfBlob(
       `/remote-trips/${encodeURIComponent(id)}/pdf`,
