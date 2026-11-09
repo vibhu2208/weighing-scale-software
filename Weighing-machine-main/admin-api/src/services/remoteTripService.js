@@ -1389,6 +1389,33 @@ async function resyncRemoteTrip(queryFn, id) {
   return trip;
 }
 
+/**
+ * Permanently remove a remote trip and its mirror row.
+ * Caller should enqueue delete_report when wasSynced is true.
+ */
+async function deleteRemoteTrip(queryFn, id, { siteId = getSiteId() } = {}) {
+  const row = await getRemoteTrip(queryFn, id);
+  if (!row) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const slip = String(row.slip_number || '').trim();
+  const wasSynced = Boolean(row.synced_to_local);
+
+  await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [id]);
+  if (slip) {
+    await queryFn(
+      `DELETE FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+      [siteId, slip],
+    );
+  }
+
+  return { slip_number: slip, wasSynced };
+}
+
 module.exports = {
   buildCreatePayload,
   validateRemoteTripFields,
@@ -1399,6 +1426,7 @@ module.exports = {
   getRemoteTrip,
   attachPhotos,
   resyncRemoteTrip,
+  deleteRemoteTrip,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,
   reconcileRemoteTripsFromMirror,
