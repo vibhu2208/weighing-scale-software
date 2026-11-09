@@ -10,7 +10,9 @@ const {
   getRemoteTrip,
   attachPhotos,
   resyncRemoteTrip,
+  deleteRemoteTrip,
 } = require('../services/remoteTripService');
+const { createCommand } = require('../services/commandService');
 const { generateTripPdf } = require('../services/reportPdfService');
 const { generateRemoteTripPhoto } = require('../services/tripImageService');
 const { grossWeightTimestamp } = require('../services/vehicleReportHtml');
@@ -189,6 +191,30 @@ router.post('/:id/resync', async (req, res) => {
     return res.json({ ok: true, trip: await attachTripMedia(trip) });
   } catch (err) {
     const status = err.status || (/not found/i.test(err.message) ? 404 : 400);
+    return res.status(status).json({ ok: false, error: err.message });
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const result = await deleteRemoteTrip(query, req.params.id);
+    let localDeleteQueued = false;
+    if (result.wasSynced && result.slip_number) {
+      await createCommand({
+        type: 'delete_report',
+        payload: { slipNumber: result.slip_number },
+        createdBy: req.user?.email,
+      });
+      localDeleteQueued = true;
+    }
+    return res.json({
+      ok: true,
+      deleted: true,
+      slip_number: result.slip_number,
+      localDeleteQueued,
+    });
+  } catch (err) {
+    const status = err.status || (/not found/i.test(err.message) ? 404 : 500);
     return res.status(status).json({ ok: false, error: err.message });
   }
 });

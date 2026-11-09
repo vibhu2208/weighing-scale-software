@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
+import RemoveRemoteTripButton from '../components/RemoveRemoteTripButton.jsx';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 
 const PHOTO_SLOTS = [1, 2, 3];
@@ -1189,6 +1190,12 @@ export default function RemoteTrips() {
                           ? 'Synced'
                           : 'Pending'}
                     </Badge>
+                    <RemoveRemoteTripButton
+                      tripId={row.id}
+                      disabled={Boolean(pdfBusy)}
+                      onDone={loadTrips}
+                      onError={(err) => setError(err.message)}
+                    />
                   </td>
                   <td className="p-3 text-xs text-slate-400">{row.mcg_status || '—'}</td>
                   <td className="p-3">

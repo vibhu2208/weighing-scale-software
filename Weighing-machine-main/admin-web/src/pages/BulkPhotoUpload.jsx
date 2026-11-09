@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import blankPhotoUrl from '../assets/blank-photo.png';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
+import RemoveRemoteTripButton from '../components/RemoveRemoteTripButton.jsx';
 import {
   fmtDate,
   fmtKg,
@@ -756,6 +757,12 @@ export default function BulkPhotoUpload() {
                         {fmtDate(row.synced_at)}
                       </div>
                     )}
+                    <RemoveRemoteTripButton
+                      tripId={row.id}
+                      disabled={busy}
+                      onDone={load}
+                      onError={(err) => setError(err.message)}
+                    />
                   </td>
                   <td className="p-3">
                     <div className="text-[11px] text-slate-500 mb-1">

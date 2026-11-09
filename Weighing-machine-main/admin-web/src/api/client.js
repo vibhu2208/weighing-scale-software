@@ -287,6 +287,12 @@ export const api = {
     });
   },
 
+  deleteRemoteTrip(id) {
+    return request(`/remote-trips/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
   async downloadRemoteTripPdf(id, slipNumber) {
     return downloadPdfBlob(
       `/remote-trips/${encodeURIComponent(id)}/pdf`,

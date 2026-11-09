@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client.js';
 import Badge from './Badge.jsx';
+import RemoveRemoteTripButton from './RemoveRemoteTripButton.jsx';
 import { fmtDate, fmtKg } from '../lib/format.js';
 
 const REFRESH_MS = 30_000;
@@ -184,6 +185,12 @@ export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) 
                         {resyncId === row.id ? 'Resync…' : 'Resync'}
                       </button>
                     )}
+                    <RemoveRemoteTripButton
+                      tripId={row.id}
+                      disabled={Boolean(resyncId)}
+                      onDone={load}
+                      onError={(err) => setError(err.message)}
+                    />
                   </td>
                   <td className="p-3 text-xs whitespace-nowrap">
                     {row.synced_at ? (
