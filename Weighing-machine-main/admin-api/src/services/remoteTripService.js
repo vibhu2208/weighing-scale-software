@@ -1390,6 +1390,64 @@ async function resyncRemoteTrip(queryFn, id) {
 }
 
 /**
+ * Void a remote trip like Fill Blocked Slips cancel: CANCEL labels, 0 kg,
+ * same tare/gross time, CANCELLED status. Caller should enqueue PC edit when synced.
+ */
+async function cancelRemoteTrip(queryFn, id, { siteId = getSiteId() } = {}) {
+  const row = await getRemoteTrip(queryFn, id);
+  if (!row) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+  if (String(row.ticket_status || '').toUpperCase() === 'CANCELLED') {
+    const err = new Error('Trip is already cancelled');
+    err.status = 400;
+    throw err;
+  }
+
+  const slip = String(row.slip_number || '').trim();
+  const wasSynced = Boolean(row.synced_to_local) || Boolean(row.local_id);
+  const plate = compactToken(row.truck_number);
+  const truckNumber = plate && !isCancelToken(plate) ? plate : CANCEL_LABEL;
+  const timestampIn = row.timestamp_in || row.timestamp_out || new Date().toISOString();
+
+  const res = await queryFn(
+    `UPDATE remote_trips
+     SET ticket_status = 'CANCELLED',
+         status = 'cancelled',
+         material = $2,
+         customer_name = $2,
+         destination = $2,
+         operator_name = $2,
+         truck_number = $3,
+         gross_weight = 0,
+         tare_weight = 0,
+         timestamp_in = $4,
+         timestamp_out = $4,
+         mcg_status = 'skipped',
+         mcg_error = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id, CANCEL_LABEL, truckNumber, timestampIn],
+  );
+  const trip = res.rows[0];
+  if (!trip) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    await upsertMirrorFromRemoteTrip(queryFn, trip, siteId);
+  } catch (err) {
+    console.warn('[remoteTrip] mirror upsert on cancel failed', err.message);
+  }
+
+  return { trip, slip_number: slip, wasSynced };
+}
+
+/**
  * Permanently remove a remote trip and its mirror row.
  * Caller should enqueue delete_report when wasSynced is true.
  */
@@ -1426,6 +1484,7 @@ module.exports = {
   getRemoteTrip,
   attachPhotos,
   resyncRemoteTrip,
+  cancelRemoteTrip,
   deleteRemoteTrip,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,

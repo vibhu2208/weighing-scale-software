@@ -10,6 +10,7 @@ const {
   getRemoteTrip,
   attachPhotos,
   resyncRemoteTrip,
+  cancelRemoteTrip,
   deleteRemoteTrip,
 } = require('../services/remoteTripService');
 const { createCommand } = require('../services/commandService');
@@ -189,6 +190,43 @@ router.post('/:id/resync', async (req, res) => {
   try {
     const trip = await resyncRemoteTrip(query, req.params.id);
     return res.json({ ok: true, trip: await attachTripMedia(trip) });
+  } catch (err) {
+    const status = err.status || (/not found/i.test(err.message) ? 404 : 400);
+    return res.status(status).json({ ok: false, error: err.message });
+  }
+});
+
+router.post('/:id/cancel', async (req, res) => {
+  try {
+    const result = await cancelRemoteTrip(query, req.params.id);
+    let localEditQueued = false;
+    if (result.wasSynced && result.slip_number) {
+      await createCommand({
+        type: 'edit_report',
+        payload: {
+          slipNumber: result.slip_number,
+          cancel: true,
+          ticket_status: 'CANCELLED',
+          material: 'CANCEL',
+          customer_name: 'CANCEL',
+          destination: 'CANCEL',
+          operator_name: 'CANCEL',
+          company: 'CANCEL',
+          gross_weight: 0,
+          tare_weight: 0,
+          truck_number: result.trip?.truck_number || 'CANCEL',
+          timestamp_in: result.trip?.timestamp_in,
+          timestamp_out: result.trip?.timestamp_out,
+        },
+        createdBy: req.user?.email,
+      });
+      localEditQueued = true;
+    }
+    return res.json({
+      ok: true,
+      trip: await attachTripMedia(result.trip),
+      localEditQueued,
+    });
   } catch (err) {
     const status = err.status || (/not found/i.test(err.message) ? 404 : 400);
     return res.status(status).json({ ok: false, error: err.message });

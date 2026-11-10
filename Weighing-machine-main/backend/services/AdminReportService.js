@@ -17,7 +17,7 @@ const {
   setPassSnapshots,
 } = require('../utils/tripPhotos');
 const { resolveVehicleType, isHywa } = require('../utils/vehicleTypes');
-const { TICKET_STATUS } = require('../utils/constants');
+const { TICKET_STATUS, TRANSACTION_STATUS } = require('../utils/constants');
 const { toPublicTransaction } = require('../utils/transactionPublic');
 const logger = require('../utils/logger');
 
@@ -514,6 +514,56 @@ function applyRemoteDelete(data = {}) {
   return performClosedReportDelete({ ...data, remote: true });
 }
 
+/**
+ * Apply admin "cancel remote trip" — CANCEL labels, 0 kg, CANCELLED status.
+ * Missing / deleted local tickets are success (cloud-only cancel).
+ */
+function applyRemoteCancel(data = {}) {
+  const slip = String(data.slipNumber || data.slip_number || '').trim();
+  logger.info('Applying remote report cancel', { slip });
+  const txn = data.transactionId
+    ? TransactionService.getById(data.transactionId)
+    : TransactionService.getBySlipNumber(slip);
+
+  if (!txn) {
+    return { ok: true, skipped: true, slip_number: slip || null };
+  }
+  if (txn.ticket_status === TICKET_STATUS.DELETED) {
+    return { ok: true, skipped: true, slip_number: txn.slip_number, transactionId: txn.id };
+  }
+
+  const cancel = 'CANCEL';
+  const timestampIn = txn.timestamp_in || txn.timestamp_out || new Date().toISOString();
+  const plate = String(txn.truck_number || '').trim().toUpperCase();
+  const truckNumber =
+    plate && plate !== cancel ? plate : data.truck_number || data.truckNumber || cancel;
+
+  const updated = TransactionService.updateFields(txn.id, {
+    ticket_status: TICKET_STATUS.CANCELLED,
+    status: TRANSACTION_STATUS.CANCELLED,
+    material: cancel,
+    customer_name: cancel,
+    destination: cancel,
+    operator_name: cancel,
+    company: cancel,
+    driver: cancel,
+    truck_number: truckNumber,
+    gross_weight: 0,
+    tare_weight: 0,
+    raw_gross_weight: 0,
+    raw_tare_weight: 0,
+    timestamp_in: timestampIn,
+    timestamp_out: timestampIn,
+    notes: txn.notes ? `${txn.notes}; Cancelled by admin` : 'Cancelled by admin',
+  });
+
+  return {
+    ok: true,
+    slip_number: updated.slip_number,
+    transactionId: updated.id,
+  };
+}
+
 module.exports = {
   listRecentClosedReports,
   getClosedReportBySlip,
@@ -522,4 +572,5 @@ module.exports = {
   deleteClosedReport,
   applyRemoteUpdate,
   applyRemoteDelete,
+  applyRemoteCancel,
 };

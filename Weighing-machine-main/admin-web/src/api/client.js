@@ -293,6 +293,13 @@ export const api = {
     });
   },
 
+  cancelRemoteTrip(id) {
+    return request(`/remote-trips/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
   async downloadRemoteTripPdf(id, slipNumber) {
     return downloadPdfBlob(
       `/remote-trips/${encodeURIComponent(id)}/pdf`,

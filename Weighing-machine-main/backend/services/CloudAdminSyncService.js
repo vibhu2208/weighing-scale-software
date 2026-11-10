@@ -11,6 +11,7 @@ const TransactionService = require('./TransactionService');
 const SettingsService = require('./SettingsService');
 const S3Service = require('./S3Service');
 const AdminReportService = require('./AdminReportService');
+const { mergeOptionListValues } = require('../utils/optionListMerge');
 
 let cronJob = null;
 let catchUpJob = null;
@@ -35,6 +36,15 @@ const REMOTE_SAFE_KEYS = new Set([
   'WEIGHBRIDGE_ID',
   'REPORT_COMPANY_NAME',
   'REPORT_LOGO_PATH',
+  'materials_list',
+  'customers_list',
+  'destinations_list',
+  'operators_list',
+  'companies_list',
+]);
+
+/** Option lists: merge cloud into local so PC-added entries are not wiped. */
+const REMOTE_MERGE_LIST_KEYS = new Set([
   'materials_list',
   'customers_list',
   'destinations_list',
@@ -422,25 +432,29 @@ async function applyCommand(row) {
     // Apply locally first, then refresh mirror. Never delete-before-push:
     // a failed S3/mirror push used to leave admin Reports empty while the
     // command stayed pending / blocked later syncs.
-    const result = await AdminReportService.applyRemoteUpdate(payload);
+    const result = payload.cancel
+      ? AdminReportService.applyRemoteCancel(payload)
+      : await AdminReportService.applyRemoteUpdate(payload);
     const lookupSlip = result?.slip_number || payload.newSlipNumber || payload.slipNumber;
     const txn =
       TransactionService.getById(result?.transactionId) ||
       TransactionService.getBySlipNumber(lookupSlip);
-    const wantTruck = String(
-      payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
-    )
-      .trim()
-      .toUpperCase();
-    if (wantTruck) {
-      const gotTruck = String(txn?.truck_number || '').trim().toUpperCase();
-      if (gotTruck !== wantTruck) {
-        throw new Error(
-          `Vehicle number not applied on PC (wanted ${wantTruck}, got ${gotTruck || 'empty'})`,
-        );
+    if (!payload.cancel) {
+      const wantTruck = String(
+        payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
+      )
+        .trim()
+        .toUpperCase();
+      if (wantTruck) {
+        const gotTruck = String(txn?.truck_number || '').trim().toUpperCase();
+        if (gotTruck !== wantTruck) {
+          throw new Error(
+            `Vehicle number not applied on PC (wanted ${wantTruck}, got ${gotTruck || 'empty'})`,
+          );
+        }
       }
     }
-    if (txn) {
+    if (txn && txn.ticket_status !== 'DELETED') {
       try {
         await pushTransaction(txn);
       } catch (err) {
@@ -517,6 +531,16 @@ async function pullSettings() {
         }
       } catch (_e) {
         /* optional */
+      }
+      continue;
+    }
+
+    if (REMOTE_MERGE_LIST_KEYS.has(row.key)) {
+      const local = SettingsService.get(row.key);
+      const merged = mergeOptionListValues(local, row.value);
+      if (local !== merged) {
+        SettingsService.set(row.key, merged);
+        logger.info('CloudAdminSync merged option list', { key: row.key });
       }
       continue;
     }
