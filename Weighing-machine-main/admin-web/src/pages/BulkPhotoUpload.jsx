@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import JSZip from 'jszip';
 import blankPhotoUrl from '../assets/blank-photo.png';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
@@ -11,7 +10,6 @@ import {
   fmtKg,
   periodToRange,
   rangeForLocalDate,
-  reportPdfFilename,
   ymd,
 } from '../lib/format.js';
 import { FILL_VEHICLES, samePlate } from '../lib/fillLists.js';
@@ -26,6 +24,7 @@ import {
   parseVehiclePhotoName,
   photoMappingLabel,
   slotCode,
+  tripPhotoFullUrl,
   tripPhotoUrl,
   vehicleLast4,
 } from '../lib/bulkVehiclePhotos.js';
@@ -402,35 +401,96 @@ export default function BulkPhotoUpload() {
 
     const uploaded = [];
     try {
-      await mapPool(ready, 3, async (item) => {
+      // Upload each source file once, then CopyObject mapped destination slots.
+      const sourceSlotOf = (item) => {
+        if (item.copiedFrom) {
+          const m = String(item.copiedFrom).match(/(\d)$/);
+          return m ? Number(m[1]) : item.parsed.slot;
+        }
+        return item.parsed.slot;
+      };
+      const sourceUploadKey = (item) =>
+        `${item.fileId}|${item.trip.id}|${item.parsed.pass}|${sourceSlotOf(item)}`;
+
+      const uniqueSources = [];
+      const seenSources = new Set();
+      for (const item of ready) {
+        const key = sourceUploadKey(item);
+        if (seenSources.has(key)) continue;
+        seenSources.add(key);
+        uniqueSources.push(item);
+      }
+
+      const sourceKeys = new Map();
+      setProgress({ done: 0, total: uniqueSources.length + ready.length, name: 'upload' });
+      await mapPool(uniqueSources, 3, async (item) => {
         const entry = fileById.get(item.fileId);
+        const srcSlot = sourceSlotOf(item);
         setProgress((p) => ({
           done: p?.done || 0,
-          total: ready.length,
+          total: uniqueSources.length + ready.length,
           name: item.name,
         }));
         try {
           const uploadedPhoto = await api.uploadRemoteTripPhoto(
             item.trip.slip_number,
-            item.parsed.slot,
+            srcSlot,
             entry.file,
             item.parsed.pass,
           );
-          uploaded.push({
-            ...item,
-            key: uploadedPhoto.key,
-            status: 'uploaded',
-          });
+          sourceKeys.set(sourceUploadKey(item), uploadedPhoto.key);
         } catch (err) {
-          uploaded.push({
-            ...item,
-            status: 'failed',
-            error: err.message,
-          });
+          sourceKeys.set(sourceUploadKey(item), { error: err.message });
         }
         setProgress((p) => ({
           done: (p?.done || 0) + 1,
-          total: ready.length,
+          total: uniqueSources.length + ready.length,
+          name: item.name,
+        }));
+      });
+
+      await mapPool(ready, 4, async (item) => {
+        const srcKeyOrErr = sourceKeys.get(sourceUploadKey(item));
+        setProgress((p) => ({
+          done: p?.done || 0,
+          total: uniqueSources.length + ready.length,
+          name: item.name,
+        }));
+        if (!srcKeyOrErr || srcKeyOrErr.error) {
+          uploaded.push({
+            ...item,
+            status: 'failed',
+            error: srcKeyOrErr?.error || 'Source upload missing',
+          });
+        } else {
+          try {
+            const srcSlot = sourceSlotOf(item);
+            let key = srcKeyOrErr;
+            if (item.parsed.slot !== srcSlot) {
+              const copied = await api.copyRemoteTripPhoto(
+                srcKeyOrErr,
+                item.trip.slip_number,
+                item.parsed.slot,
+                item.parsed.pass,
+              );
+              key = copied.key;
+            }
+            uploaded.push({
+              ...item,
+              key,
+              status: 'uploaded',
+            });
+          } catch (err) {
+            uploaded.push({
+              ...item,
+              status: 'failed',
+              error: err.message,
+            });
+          }
+        }
+        setProgress((p) => ({
+          done: (p?.done || 0) + 1,
+          total: uniqueSources.length + ready.length,
           name: item.name,
         }));
       });
@@ -446,12 +506,32 @@ export default function BulkPhotoUpload() {
         });
       }
 
-      for (const [tripId, photoS3Keys] of byTrip.entries()) {
+      const tripAttachJobs = [...byTrip.entries()];
+      await mapPool(tripAttachJobs, 3, async ([tripId, photoS3Keys]) => {
         try {
-          // eslint-disable-next-line no-await-in-loop
-          await api.attachRemoteTripPhotos(tripId, photoS3Keys);
+          const attachedRes = await api.attachRemoteTripPhotos(tripId, photoS3Keys);
           for (const item of uploaded) {
             if (item.trip.id === tripId && item.status === 'uploaded') item.status = 'attached';
+          }
+          if (attachedRes?.trip) {
+            const trip = attachedRes.trip;
+            const urlFields = {};
+            await Promise.all(
+              photoS3Keys.map(async ({ slot, pass, key }) => {
+                try {
+                  const signed = await api.presignMedia(key);
+                  urlFields[`${pass}_photo_${slot}_url`] = signed.url;
+                } catch {
+                  /* preview optional */
+                }
+              }),
+            );
+            setRows((prev) =>
+              prev.map((row) => {
+                if (row.id !== tripId) return row;
+                return { ...row, ...trip, ...urlFields };
+              }),
+            );
           }
         } catch (err) {
           for (const item of uploaded) {
@@ -461,7 +541,7 @@ export default function BulkPhotoUpload() {
             }
           }
         }
-      }
+      });
 
       const attached = uploaded.filter((r) => r.status === 'attached').length;
       const failed = uploaded.filter((r) => r.status !== 'attached').length;
@@ -486,7 +566,6 @@ export default function BulkPhotoUpload() {
           }
           return keep;
         });
-        await load();
       }
     } catch (err) {
       setError(err.message);
@@ -533,56 +612,15 @@ export default function BulkPhotoUpload() {
     setZipBusy(true);
     setError('');
     setMessage('');
-    setProgress({ done: 0, total: zipTrips.length, name: 'reports zip' });
+    setProgress({ done: 0, total: zipTrips.length, name: 'server zip' });
     try {
-      const zip = new JSZip();
       const folderName = zipName(day, customDate);
-      const folder = zip.folder(folderName);
-      const failed = [];
-      const filenameCounts = new Map();
-      await mapPool(zipTrips, 1, async (row) => {
-        setProgress((p) => ({
-          done: p?.done || 0,
-          total: zipTrips.length,
-          name: row.slip_number,
-        }));
-        try {
-          const blob = await api.fetchRemoteTripPdfBlob(row.id, { print: 'gross' });
-          const baseFilename = reportPdfFilename(
-            row.truck_number,
-            row.timestamp_out || row.timestamp_in,
-          );
-          const count = (filenameCounts.get(baseFilename) || 0) + 1;
-          filenameCounts.set(baseFilename, count);
-          const filename =
-            count === 1
-              ? baseFilename
-              : `${baseFilename.slice(0, -4)}-${count}.pdf`;
-          folder.file(filename, blob);
-        } catch (err) {
-          failed.push(`${row.slip_number}: ${err.message}`);
-        }
-        setProgress((p) => ({
-          done: (p?.done || 0) + 1,
-          total: zipTrips.length,
-          name: row.slip_number,
-        }));
-      });
-      const ok = zipTrips.length - failed.length;
-      if (!ok) {
-        throw new Error(failed.join('; ') || 'No reports could be downloaded');
-      }
-      const packed = await zip.generateAsync({
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 },
-      });
+      const ids = zipTrips.map((row) => row.id).filter(Boolean);
+      const packed = await api.downloadRemoteTripsZip(ids, { print: 'gross' });
       api.saveBlob(packed, `${folderName}.zip`);
       setZipOpen(false);
       setMessage(
-        failed.length
-          ? `Downloaded ${ok} report(s) in ${folderName}.zip with print date = gross time. ${failed.length} failed: ${failed.join('; ')}`
-          : `Downloaded ${ok} report(s) in ${folderName}.zip. Print date on each slip is the gross weigh time.`,
+        `Downloaded ${ids.length} report(s) in ${folderName}.zip. Print date on each slip is the gross weigh time.`,
       );
     } catch (err) {
       setError(err.message);
@@ -784,6 +822,8 @@ export default function BulkPhotoUpload() {
                         const incoming = incomingByTrip.get(`${row.id}:${slot.pass}:${slot.slot}`);
                         const local = incoming && fileById.get(incoming.fileId);
                         const url = local?.preview || tripPhotoUrl(row, slot.pass, slot.slot);
+                        const fullUrl =
+                          local?.preview || tripPhotoFullUrl(row, slot.pass, slot.slot) || url;
                         return (
                           <div key={slot.code} className="text-left">
                             <div className="text-[10px] text-slate-500 mb-0.5 flex items-center gap-1">
@@ -800,7 +840,7 @@ export default function BulkPhotoUpload() {
                                 className="block"
                                 onClick={() =>
                                   setLightbox({
-                                    url,
+                                    url: fullUrl,
                                     label: `${row.slip_number} ${slot.code.toUpperCase()}`,
                                   })
                                 }
@@ -808,7 +848,14 @@ export default function BulkPhotoUpload() {
                                 <img
                                   src={url}
                                   alt=""
+                                  loading="lazy"
+                                  decoding="async"
                                   className="h-16 w-[4.5rem] rounded object-cover bg-slate-800 border border-slate-700"
+                                  onError={(e) => {
+                                    if (fullUrl && e.currentTarget.src !== fullUrl) {
+                                      e.currentTarget.src = fullUrl;
+                                    }
+                                  }}
                                 />
                               </button>
                             ) : (
@@ -970,6 +1017,8 @@ export default function BulkPhotoUpload() {
                         <img
                           src={entry.preview}
                           alt=""
+                          loading="lazy"
+                          decoding="async"
                           className="h-14 w-20 rounded object-cover bg-slate-800"
                         />
                       ) : (

@@ -599,6 +599,8 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
                             <img
                               src={preview}
                               alt=""
+                              loading="lazy"
+                              decoding="async"
                               className="h-14 w-full rounded object-cover bg-slate-800 border border-slate-700"
                             />
                           ) : (

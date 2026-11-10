@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const archiver = require('archiver');
 const { query, getSiteId } = require('../db');
 const { authMiddleware } = require('../auth');
 const {
@@ -17,7 +18,13 @@ const { createCommand } = require('../services/commandService');
 const { generateTripPdf } = require('../services/reportPdfService');
 const { generateRemoteTripPhoto } = require('../services/tripImageService');
 const { grossWeightTimestamp } = require('../services/vehicleReportHtml');
-const { isConfigured, presignGet, getObjectBuffer, mirrorReportKey } = require('../services/s3Presign');
+const { isConfigured, presignGet } = require('../services/s3Presign');
+const { maxConcurrency } = require('../services/browserPool');
+const {
+  reportZipFilename,
+  uniqueZipEntryName,
+  calendarDateInTz,
+} = require('../services/reportZipNames');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -30,6 +37,26 @@ const PHOTO_COLS = [
   'departure_photo_2',
   'departure_photo_3',
 ];
+
+function thumbKeyFromPhotoKey(key) {
+  if (!key || /\.thumb\.jpe?g$/i.test(key)) return key;
+  return String(key).replace(/\.jpe?g$/i, '.thumb.jpg');
+}
+
+async function mapPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next;
+      next += 1;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.max(1, Math.min(limit, items.length || 1));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return out;
+}
 
 async function attachTripMedia(row) {
   if (!row) return row;
@@ -51,14 +78,22 @@ async function attachTripMedia(row) {
   }
   for (const col of PHOTO_COLS) {
     if (!out[col]) continue;
+    const fullKey = out[col];
+    const thumbKey = thumbKeyFromPhotoKey(fullKey);
     tasks.push(
-      presignGet(out[col])
-        .then((url) => {
-          out[`${col}_url`] = url;
-        })
-        .catch(() => {
+      (async () => {
+        try {
+          out[`${col}_url`] = await presignGet(fullKey);
+        } catch {
           out[`${col}_url`] = null;
-        }),
+        }
+        try {
+          // May 404 for older uploads without thumbs; UI falls back to full.
+          out[`${col}_thumb_url`] = await presignGet(thumbKey);
+        } catch {
+          out[`${col}_thumb_url`] = null;
+        }
+      })(),
     );
   }
   if (tasks.length) await Promise.all(tasks);
@@ -75,6 +110,151 @@ router.get('/', async (req, res) => {
   }
 });
 
+/**
+ * Stream a ZIP of trip PDFs (server-side, STORE compression).
+ * Body: { ids: string[], print?: 'gross' }
+ */
+router.post('/zip', async (req, res) => {
+  let archive = null;
+  try {
+    const ids = Array.isArray(req.body?.ids)
+      ? [
+          ...new Set(
+            req.body.ids
+              .map((id) => String(id || '').trim())
+              .filter((id) => id && id.length <= 80),
+          ),
+        ]
+      : [];
+    if (!ids.length) {
+      return res.status(400).json({ ok: false, error: 'ids required' });
+    }
+    if (ids.length > 200) {
+      return res.status(400).json({ ok: false, error: 'Maximum 200 reports per zip' });
+    }
+    const printGross = String(req.body?.print || '') === 'gross';
+    const siteId = getSiteId();
+    const folder = `reports-${calendarDateInTz(new Date())}`;
+
+    const concurrency = maxConcurrency();
+    const failures = [];
+    const filenameCounts = new Map();
+    let archived = 0;
+    let clientGone = false;
+
+    req.on('close', () => {
+      clientGone = true;
+    });
+
+    // Resolve trips + names first so -2/-3 suffixes are deterministic by time/slip.
+    const resolved = [];
+    for (const id of ids) {
+      try {
+        const trip = await getRemoteTrip(query, id);
+        if (!trip) {
+          failures.push(`${id}: not found`);
+          continue;
+        }
+        resolved.push(trip);
+      } catch (err) {
+        failures.push(`${id}: ${err.message}`);
+      }
+    }
+    resolved.sort((a, b) => {
+      const ta = new Date(a.timestamp_out || a.timestamp_in || 0).getTime();
+      const tb = new Date(b.timestamp_out || b.timestamp_in || 0).getTime();
+      if (ta !== tb) return ta - tb;
+      return String(a.slip_number || '').localeCompare(String(b.slip_number || ''));
+    });
+    const jobs = resolved.map((trip) => {
+      const baseName = reportZipFilename(
+        trip.truck_number,
+        trip.timestamp_out || trip.timestamp_in,
+      );
+      return {
+        trip,
+        name: uniqueZipEntryName(baseName, filenameCounts),
+      };
+    });
+
+    function ensureArchive() {
+      if (archive) return archive;
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${folder}.zip"`,
+      );
+      archive = archiver('zip', { store: true });
+      archive.on('error', (err) => {
+        console.error('[remoteTrips.zip]', err);
+        try {
+          res.destroy(err);
+        } catch {
+          /* ignore */
+        }
+      });
+      archive.pipe(res);
+      return archive;
+    }
+
+    await mapPool(jobs, concurrency, async (job) => {
+      if (clientGone) return;
+      try {
+        const built = await generateTripPdf(job.trip, {
+          siteId,
+          upload: true,
+          grossPrint: printGross,
+          printAt: printGross ? grossWeightTimestamp(job.trip) : undefined,
+        });
+        if (clientGone) return;
+        ensureArchive().append(built.pdf, { name: `${folder}/${job.name}` });
+        archived += 1;
+      } catch (err) {
+        failures.push(`${job.trip.slip_number || job.trip.id}: ${err.message}`);
+      }
+    });
+
+    if (clientGone) {
+      try {
+        if (archive) archive.abort();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    if (!archived) {
+      return res.status(500).json({
+        ok: false,
+        error: failures[0] || 'No PDFs could be generated for zip',
+        failures,
+      });
+    }
+
+    if (failures.length) {
+      ensureArchive().append(
+        `archived=${archived}\nfailures=${failures.length}\n${failures.join('\n')}\n`,
+        { name: `${folder}/_errors.txt` },
+      );
+    }
+    await ensureArchive().finalize();
+  } catch (err) {
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+    try {
+      if (archive) archive.abort();
+    } catch {
+      /* ignore */
+    }
+    try {
+      res.destroy(err);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
 router.get('/:id/pdf', async (req, res) => {
   try {
     const trip = await getRemoteTrip(query, req.params.id);
@@ -83,47 +263,19 @@ router.get('/:id/pdf', async (req, res) => {
     const siteId = getSiteId();
     const filename = `${trip.slip_number}_report.pdf`;
     const printGross = String(req.query.print || '') === 'gross';
-    let pdf = null;
 
-    if (!printGross) {
-      const existingKeys = [trip.report_s3_key, mirrorReportKey(siteId, trip.slip_number)].filter(
-        Boolean,
-      );
-      for (const key of existingKeys) {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          pdf = await getObjectBuffer(key);
-        } catch {
-          pdf = null;
-        }
-        if (pdf) break;
-      }
-    }
-
-    if (!pdf) {
-      const built = await generateTripPdf(trip, {
-        siteId,
-        upload: true,
-        printAt: printGross ? grossWeightTimestamp(trip) : undefined,
-      });
-      pdf = built.pdf;
-      if (built.report_s3_key) {
-        await query(`UPDATE remote_trips SET report_s3_key = $2 WHERE id = $1`, [
-          trip.id,
-          built.report_s3_key,
-        ]);
-        await query(
-          `UPDATE transactions_mirror
-           SET report_s3_key = $3, updated_at = now()
-           WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
-          [siteId, trip.slip_number, built.report_s3_key],
-        );
-      }
-    }
+    const built = await generateTripPdf(trip, {
+      siteId,
+      upload: true,
+      grossPrint: printGross,
+      printAt: printGross ? grossWeightTimestamp(trip) : undefined,
+    });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.send(pdf);
+    if (built.fromCache) res.setHeader('X-PDF-Cache', 'HIT');
+    else res.setHeader('X-PDF-Cache', 'MISS');
+    return res.send(built.pdf);
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

@@ -36,7 +36,15 @@ export function tripPhotoFilled(trip, pass, slot) {
 }
 
 export function tripPhotoUrl(trip, pass, slot) {
-  return trip?.[`${pass}_photo_${slot}_url`] || '';
+  return (
+    trip?.[`${pass}_photo_${slot}_thumb_url`] ||
+    trip?.[`${pass}_photo_${slot}_url`] ||
+    ''
+  );
+}
+
+export function tripPhotoFullUrl(trip, pass, slot) {
+  return trip?.[`${pass}_photo_${slot}_url`] || tripPhotoUrl(trip, pass, slot);
 }
 
 export function expectedPhotoSlots(trip) {

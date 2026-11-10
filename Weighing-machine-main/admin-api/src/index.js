@@ -84,6 +84,16 @@ async function bootstrap() {
     );
   }
   try {
+    const { ensurePerfSchema } = require('./services/perfSchema');
+    await ensurePerfSchema();
+    console.log('[api] perf indexes / PDF fingerprint schema ready');
+  } catch (err) {
+    console.error(
+      '[api] perf schema setup failed — run scripts/rds/004_perf_indexes.sql:',
+      err.message,
+    );
+  }
+  try {
     startMirrorReconcileWorker(query, 60);
     startOutTimeReleaseWorker(query, 15000);
     console.log('[api] remote trip → mirror reconcile worker started');
@@ -106,6 +116,17 @@ function start() {
   bootstrap().catch((err) => {
     console.error('[api] bootstrap error', err);
   });
+
+  const shutdown = () => {
+    try {
+      const { closeBrowserPool } = require('./services/browserPool');
+      closeBrowserPool().catch(() => {});
+    } catch {
+      /* optional */
+    }
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 start();

@@ -2,10 +2,8 @@
 
 const { siteIdAliases } = require('../siteId');
 
-const REPORT_DATE_SQL = `CASE
-  WHEN ticket_status = 'CLOSED' THEN COALESCE(timestamp_out, updated_at)
-  ELSE timestamp_in
-END`;
+/** Stored generated column (ensurePerfSchema / 004_perf_indexes.sql) — keeps date index usable. */
+const REPORT_DATE_SQL = `report_date`;
 
 const PHOTO_SCORE_SQL = `(
   (NULLIF(BTRIM(COALESCE(arrival_photo_1, '')), '') IS NOT NULL)::int +
@@ -70,24 +68,15 @@ function buildWhere(siteId, filters = {}) {
   return { where: `WHERE ${clauses.join(' AND ')}`, params, reportDateSql: REPORT_DATE_SQL };
 }
 
-async function queryPaginated(queryFn, siteId, filters = {}) {
+async function queryPaginated(queryFn, siteId, filters = {}, options = {}) {
   const { where, params, reportDateSql } = buildWhere(siteId, filters);
   const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 200));
   const page = Math.max(0, Number(filters.page) || 0);
   const offset = page * limit;
   const distinctOrder = `slip_number, ${PHOTO_SCORE_SQL} DESC, ${reportDateSql} DESC`;
+  const skipCount = Boolean(options.skipCount);
 
-  const countRes = await queryFn(
-    `SELECT COUNT(*) AS c FROM (
-       SELECT DISTINCT ON (slip_number) slip_number
-       FROM transactions_mirror ${where}
-       ORDER BY ${distinctOrder}
-     ) d`,
-    params,
-  );
-  const total = Number(countRes.rows[0].c);
-
-  const rowsRes = await queryFn(
+  const rowsPromise = queryFn(
     `SELECT * FROM (
        SELECT DISTINCT ON (slip_number) *
        FROM transactions_mirror ${where}
@@ -98,13 +87,33 @@ async function queryPaginated(queryFn, siteId, filters = {}) {
     [...params, limit, offset],
   );
 
+  let total = null;
+  let rowsRes;
+  if (skipCount) {
+    rowsRes = await rowsPromise;
+  } else {
+    const [countRes, rows] = await Promise.all([
+      queryFn(
+        `SELECT COUNT(*) AS c FROM (
+           SELECT DISTINCT ON (slip_number) slip_number
+           FROM transactions_mirror ${where}
+           ORDER BY ${distinctOrder}
+         ) d`,
+        params,
+      ),
+      rowsPromise,
+    ]);
+    rowsRes = rows;
+    total = Number(countRes.rows[0].c);
+  }
+
   return {
     rows: rowsRes.rows,
     pagination: {
       page,
       pageSize: limit,
       total,
-      totalPages: Math.max(1, Math.ceil(total / limit)),
+      totalPages: total == null ? null : Math.max(1, Math.ceil(total / limit)),
     },
   };
 }

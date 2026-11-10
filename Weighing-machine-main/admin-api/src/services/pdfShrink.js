@@ -175,11 +175,15 @@ async function shrinkReportPdf(pdf, options = {}) {
     if (!objects) return pdf;
 
     const edits = new Map();
-    for (const object of objects) {
-      if (object.streamStart == null) continue;
-      // eslint-disable-next-line no-await-in-loop
-      const edit = await recompressImageObject(pdf, object, quality, maxImageWidth);
-      if (edit) edits.set(object.num, edit);
+    const candidates = objects.filter((object) => object.streamStart != null);
+    const results = await Promise.all(
+      candidates.map(async (object) => {
+        const edit = await recompressImageObject(pdf, object, quality, maxImageWidth);
+        return edit ? [object.num, edit] : null;
+      }),
+    );
+    for (const pair of results) {
+      if (pair) edits.set(pair[0], pair[1]);
     }
     if (!edits.size) return pdf;
 

@@ -5,6 +5,7 @@ const {
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
+  CopyObjectCommand,
   ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -23,12 +24,20 @@ function isConfigured() {
   return Boolean(accessKeyId && secretAccessKey);
 }
 
+let cachedClient = null;
+let cachedClientKey = '';
+
 function getClient() {
   const { accessKeyId, secretAccessKey, region } = getConfig();
-  return new S3Client({
-    region,
-    credentials: { accessKeyId, secretAccessKey },
-  });
+  const key = `${region}\0${accessKeyId}\0${secretAccessKey}`;
+  if (!cachedClient || cachedClientKey !== key) {
+    cachedClient = new S3Client({
+      region,
+      credentials: { accessKeyId, secretAccessKey },
+    });
+    cachedClientKey = key;
+  }
+  return cachedClient;
 }
 
 function getBucket() {
@@ -102,9 +111,47 @@ function mirrorReportKey(siteId, slip) {
   return `sites/${siteId}/mirror/${slip}/report.pdf`;
 }
 
+/** Gross-print-date PDF used by ZIP downloads — never overwrites report.pdf. */
+function mirrorReportGrossKey(siteId, slip) {
+  return `sites/${siteId}/mirror/${slip}/report_gross.pdf`;
+}
+
+function encodeCopySource(bucket, key) {
+  return `${bucket}/${String(key)
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')}`;
+}
+
+async function copyObject(sourceKey, destKey) {
+  if (!isConfigured()) throw new Error('S3 not configured');
+  if (!sourceKey || !destKey) throw new Error('sourceKey and destKey required');
+  if (sourceKey === destKey) return destKey;
+  const bucket = getBucket();
+  await getClient().send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: encodeCopySource(bucket, sourceKey),
+      Key: destKey,
+      ContentType: 'image/jpeg',
+      MetadataDirective: 'REPLACE',
+    }),
+  );
+  return destKey;
+}
+
 function remoteTripPhotoKey(slip, slot, pass = 'departure') {
   const tag = pass === 'arrival' ? 'arrival' : 'departure';
   return `remote-trips/${slip}/${tag}_cam-${slot}.jpg`;
+}
+
+function remoteTripPhotoThumbKey(slip, slot, pass = 'departure') {
+  const tag = pass === 'arrival' ? 'arrival' : 'departure';
+  return `remote-trips/${slip}/${tag}_cam-${slot}.thumb.jpg`;
+}
+
+function mirrorPhotoThumbKey(siteId, slip, slot, pass = 'departure') {
+  return `sites/${siteId}/mirror/${slip}/${pass}_cam-${slot}.thumb.jpg`;
 }
 
 function fillVehicleStillKey(plate, pass = 'departure', slot = 1) {
@@ -151,16 +198,21 @@ function inferPhotoFieldFromKey(s3Key) {
 
 module.exports = {
   isConfigured,
+  getClient,
   presignGet,
   presignPut,
   objectExists,
   listKeys,
   inferPhotoFieldFromKey,
   putObject,
+  copyObject,
   getObjectBuffer,
   mirrorPhotoKey,
   mirrorReportKey,
+  mirrorReportGrossKey,
   remoteTripPhotoKey,
+  remoteTripPhotoThumbKey,
+  mirrorPhotoThumbKey,
   fillVehicleStillKey,
   getBucket,
 };

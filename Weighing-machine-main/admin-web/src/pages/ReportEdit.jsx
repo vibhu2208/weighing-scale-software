@@ -48,9 +48,21 @@ function PhotoSlot({
       />
       <div className="mt-2 h-24 rounded border border-slate-700 bg-slate-900/50 overflow-hidden flex items-center justify-center">
         {previewUrl ? (
-          <img src={previewUrl} alt={title} className="h-full w-full object-cover" />
+          <img
+            src={previewUrl}
+            alt={title}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover"
+          />
         ) : existingUrl ? (
-          <img src={existingUrl} alt={title} className="h-full w-full object-cover" />
+          <img
+            src={existingUrl}
+            alt={title}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover"
+          />
         ) : (
           <div className="flex flex-col items-center gap-2">
             <span className="text-[10px] text-slate-500 px-2 text-center">No photo</span>
@@ -184,13 +196,17 @@ export default function ReportEdit() {
     setMessage('');
     try {
       const photoS3Keys = [];
+      const uploadJobs = [];
       for (const { pass } of PHOTO_PASSES) {
         for (const slot of PHOTO_SLOTS) {
           const file = photos[photoKey(pass, slot)];
-          if (file) {
-            const uploaded = await uploadPhoto(pass, slot, file);
-            if (uploaded) photoS3Keys.push(uploaded);
-          }
+          if (file) uploadJobs.push(uploadPhoto(pass, slot, file));
+        }
+      }
+      if (uploadJobs.length) {
+        const uploaded = await Promise.all(uploadJobs);
+        for (const item of uploaded) {
+          if (item) photoS3Keys.push(item);
         }
       }
 

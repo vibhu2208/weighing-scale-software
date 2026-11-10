@@ -1030,26 +1030,70 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
   let deleted = 0;
   let errors = 0;
 
-  for (const rt of remotes.rows || []) {
+  const remoteRows = remotes.rows || [];
+  // One batched mirror fetch instead of 1–2 queries per remote row.
+  const localIds = [
+    ...new Set(remoteRows.map((rt) => rt.local_id).filter(Boolean)),
+  ];
+  const slips = [
+    ...new Set(
+      remoteRows
+        .map((rt) => String(rt.slip_number || '').trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  ];
+  const mirrorByLocal = new Map();
+  const mirrorBySlip = new Map();
+  let mirrorBatchOk = false;
+  if (localIds.length || slips.length) {
     try {
-      let mirror = null;
-      if (rt.local_id) {
-        const byLocal = await queryFn(
-          `SELECT * FROM transactions_mirror
-           WHERE site_id = $1 AND local_id = $2
-           LIMIT 1`,
-          [siteId, rt.local_id],
-        );
-        mirror = byLocal.rows[0] || null;
+      const mirrorRes = await queryFn(
+        `SELECT * FROM transactions_mirror
+         WHERE site_id = $1
+           AND (
+             (cardinality($2::text[]) > 0 AND local_id = ANY($2::text[]))
+             OR (cardinality($3::text[]) > 0 AND UPPER(slip_number) = ANY($3::text[]))
+           )`,
+        [siteId, localIds, slips],
+      );
+      for (const row of mirrorRes.rows || []) {
+        if (row.local_id) mirrorByLocal.set(row.local_id, row);
+        const slip = String(row.slip_number || '').trim().toUpperCase();
+        if (slip) mirrorBySlip.set(slip, row);
       }
-      if (!mirror) {
-        const bySlip = await queryFn(
-          `SELECT * FROM transactions_mirror
-           WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)
-           LIMIT 1`,
-          [siteId, rt.slip_number],
-        );
-        mirror = bySlip.rows[0] || null;
+      mirrorBatchOk = true;
+    } catch (err) {
+      console.warn('[remoteTrip] batched mirror fetch failed; falling back', err.message);
+    }
+  }
+
+  for (const rt of remoteRows) {
+    try {
+      let mirror =
+        (rt.local_id && mirrorByLocal.get(rt.local_id)) ||
+        mirrorBySlip.get(String(rt.slip_number || '').trim().toUpperCase()) ||
+        null;
+
+      // Per-row lookup only when the batched fetch failed entirely.
+      if (!mirror && !mirrorBatchOk) {
+        if (rt.local_id) {
+          const byLocal = await queryFn(
+            `SELECT * FROM transactions_mirror
+             WHERE site_id = $1 AND local_id = $2
+             LIMIT 1`,
+            [siteId, rt.local_id],
+          );
+          mirror = byLocal.rows[0] || null;
+        }
+        if (!mirror) {
+          const bySlip = await queryFn(
+            `SELECT * FROM transactions_mirror
+             WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)
+             LIMIT 1`,
+            [siteId, rt.slip_number],
+          );
+          mirror = bySlip.rows[0] || null;
+        }
       }
 
       if (!mirror) {
@@ -1085,6 +1129,35 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           continue;
         }
       }
+
+      const nextLocalId =
+        mirror.local_id && mirror.local_id !== rt.id
+          ? mirror.local_id
+          : rt.local_id && rt.local_id !== rt.id
+            ? rt.local_id
+            : mirror.local_id || rt.local_id || null;
+      const unchanged =
+        slipToWrite === oldSlip &&
+        String(rt.truck_number || '') === String(mirror.truck_number || '') &&
+        String(rt.rfid_tag || '') === String(mirror.rfid_tag || '') &&
+        String(rt.customer_name || '') === String(mirror.customer_name || '') &&
+        String(rt.destination || '') === String(mirror.destination || '') &&
+        String(rt.material || '') === String(mirror.material || '') &&
+        String(rt.operator_name || '') === String(mirror.operator_name || '') &&
+        String(rt.transporter || '') === String(mirror.transporter || '') &&
+        String(rt.vehicle_type || '') === String(mirror.vehicle_type || '') &&
+        Number(rt.tare_weight) === Number(mirror.tare_weight) &&
+        Number(rt.gross_weight) === Number(mirror.gross_weight) &&
+        String(rt.ticket_status || '') === String(mirror.ticket_status || '') &&
+        String(rt.local_id || '') === String(nextLocalId || '') &&
+        String(rt.arrival_photo_1 || '') === String(mirror.arrival_photo_1 || '') &&
+        String(rt.arrival_photo_2 || '') === String(mirror.arrival_photo_2 || '') &&
+        String(rt.arrival_photo_3 || '') === String(mirror.arrival_photo_3 || '') &&
+        String(rt.departure_photo_1 || '') === String(mirror.departure_photo_1 || '') &&
+        String(rt.departure_photo_2 || '') === String(mirror.departure_photo_2 || '') &&
+        String(rt.departure_photo_3 || '') === String(mirror.departure_photo_3 || '') &&
+        String(rt.report_s3_key || '') === String(mirror.report_s3_key || '');
+      if (unchanged) continue;
 
       await queryFn(
         `UPDATE remote_trips SET
@@ -1136,11 +1209,7 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           mirror.timestamp_in || null,
           mirror.timestamp_out || null,
           // Don't overwrite a real local UUID with the create-time placeholder (remote id).
-          mirror.local_id && mirror.local_id !== rt.id
-            ? mirror.local_id
-            : rt.local_id && rt.local_id !== rt.id
-              ? rt.local_id
-              : mirror.local_id || rt.local_id || null,
+          nextLocalId,
           mirror.arrival_photo_1 || null,
           mirror.arrival_photo_2 || null,
           mirror.arrival_photo_3 || null,
@@ -1303,6 +1372,14 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
 
   if (!Object.keys(updates).length) {
     return row;
+  }
+
+  // Photo keys are stable paths — clear PDF fingerprints so cache rebuilds.
+  try {
+    const { clearPdfFingerprints } = require('./pdfContentCache');
+    await clearPdfFingerprints(queryFn, row.slip_number, getSiteId());
+  } catch (err) {
+    console.warn('[remoteTrip] clear pdf fingerprints failed', err.message);
   }
 
   // If PC already imported the trip before photos were attached, re-queue so
