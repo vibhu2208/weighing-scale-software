@@ -457,6 +457,34 @@ function performClosedReportDelete(data = {}) {
   };
 }
 
+/**
+ * Hard-remove a local ticket when admin deletes the cloud remote_trips row.
+ * Missing / already-gone tickets are success so Remove stays idempotent.
+ */
+function performPurgedReportDelete(data = {}) {
+  const slip = String(data.slipNumber || data.slip_number || '').trim();
+  const txn = data.transactionId
+    ? TransactionService.getById(data.transactionId)
+    : TransactionService.getBySlipNumber(slip);
+
+  if (!txn) {
+    logger.info('Remote purge skipped — no local ticket', { slip });
+    return { ok: true, skipped: true, slip_number: slip || null };
+  }
+
+  const purged = TransactionService.purgeById(txn.id);
+  logger.info('Local ticket purged after remote trip remove', {
+    transactionId: purged.id,
+    slip: purged.slip_number,
+  });
+  return {
+    ok: true,
+    purged: true,
+    slip_number: purged.slip_number,
+    transactionId: purged.id,
+  };
+}
+
 function deleteClosedReport(data = {}) {
   OperatorAuthService.assertManualHywaSectionAccess();
   const result = performClosedReportDelete(data);
@@ -476,7 +504,13 @@ async function applyRemoteUpdate(data = {}) {
 }
 
 function applyRemoteDelete(data = {}) {
-  logger.info('Applying remote report delete', { slip: data.slipNumber || data.slip_number });
+  logger.info('Applying remote report delete', {
+    slip: data.slipNumber || data.slip_number,
+    purge: !!data.purge,
+  });
+  if (data.purge) {
+    return performPurgedReportDelete({ ...data, remote: true });
+  }
   return performClosedReportDelete({ ...data, remote: true });
 }
 

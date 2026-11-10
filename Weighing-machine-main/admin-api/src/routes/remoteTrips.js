@@ -199,10 +199,13 @@ router.delete('/:id', async (req, res) => {
   try {
     const result = await deleteRemoteTrip(query, req.params.id);
     let localDeleteQueued = false;
-    if (result.wasSynced && result.slip_number) {
+    // Always ask the PC to purge any local copy — even if cloud said Pending
+    // (e.g. after Resync). Soft-delete alone can leave remote_pg_id linked and
+    // a later sync pass can make the ticket look active again.
+    if (result.slip_number) {
       await createCommand({
         type: 'delete_report',
-        payload: { slipNumber: result.slip_number },
+        payload: { slipNumber: result.slip_number, purge: true },
         createdBy: req.user?.email,
       });
       localDeleteQueued = true;
@@ -212,6 +215,7 @@ router.delete('/:id', async (req, res) => {
       deleted: true,
       slip_number: result.slip_number,
       localDeleteQueued,
+      wasSynced: result.wasSynced,
     });
   } catch (err) {
     const status = err.status || (/not found/i.test(err.message) ? 404 : 500);

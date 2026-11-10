@@ -663,8 +663,39 @@ async function markRemoteTripSynced(remoteId, localId, mcgResult, row = {}) {
 async function processRemoteRow(row, attempt = 0) {
   const remoteId = row.id;
 
+  // Admin Remove can delete the RDS row while this process still holds a stale
+  // in-memory copy from loadPendingRows(). Re-check before creating a local ticket.
+  try {
+    const live = await pg.query('SELECT id FROM remote_trips WHERE id = $1 LIMIT 1', [remoteId]);
+    if (!live.rows[0]) {
+      pendingLocalIds.delete(remoteId);
+      photoMissCounts.delete(remoteId);
+      logger.info('Remote trip disappeared before import — skipping', {
+        remoteId,
+        slip: row.slip_number,
+      });
+      return { ok: true, reason: 'remote_deleted' };
+    }
+  } catch (err) {
+    logger.warn('Remote trip existence check failed', {
+      remoteId,
+      message: err.message,
+    });
+  }
+
   const alreadyImported = TransactionService.getByRemotePgId(remoteId);
   if (alreadyImported) {
+    // Soft-deleted locals must not be revived by photo sync / mirror push.
+    if (String(alreadyImported.ticket_status || '').toUpperCase() === 'DELETED') {
+      pendingLocalIds.delete(remoteId);
+      photoMissCounts.delete(remoteId);
+      logger.info('Remote trip matches a deleted local ticket — skipping revive', {
+        remoteId,
+        slip: row.slip_number,
+        localId: alreadyImported.id,
+      });
+      return { ok: true, reason: 'local_deleted', transactionId: alreadyImported.id };
+    }
     const photoSync = await syncImportedTripPhotos(row, alreadyImported, {
       regeneratePdf: !isOpenRemoteRow(row),
     });
