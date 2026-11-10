@@ -9,6 +9,7 @@ const {
   importRemoteTrips,
   listRemoteTrips,
   getRemoteTrip,
+  getRemoteTripsByIds,
   attachPhotos,
   resyncRemoteTrip,
   cancelRemoteTrip,
@@ -116,6 +117,7 @@ router.get('/', async (req, res) => {
  */
 router.post('/zip', async (req, res) => {
   let archive = null;
+  const startedAt = Date.now();
   try {
     const ids = Array.isArray(req.body?.ids)
       ? [
@@ -142,24 +144,28 @@ router.post('/zip', async (req, res) => {
     let archived = 0;
     let clientGone = false;
 
-    req.on('close', () => {
-      clientGone = true;
+    // IMPORTANT: do NOT use req.on('close') — it fires when the request body
+    // finishes reading, which aborts the zip before any PDF is built.
+    res.on('close', () => {
+      if (!res.writableFinished) clientGone = true;
     });
 
-    // Resolve trips + names first so -2/-3 suffixes are deterministic by time/slip.
-    const resolved = [];
-    for (const id of ids) {
-      try {
-        const trip = await getRemoteTrip(query, id);
-        if (!trip) {
-          failures.push(`${id}: not found`);
-          continue;
-        }
-        resolved.push(trip);
-      } catch (err) {
-        failures.push(`${id}: ${err.message}`);
-      }
+    console.log('[remoteTrips.zip] start', { count: ids.length, concurrency, printGross });
+
+    // One round-trip instead of N sequential SELECTs (avoids hanging on a dead conn).
+    let loaded = [];
+    try {
+      loaded = await getRemoteTripsByIds(query, ids);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: `Failed to load trips: ${err.message}` });
     }
+
+    const resolved = [];
+    loaded.forEach((trip, i) => {
+      if (!trip) failures.push(`${ids[i]}: not found`);
+      else resolved.push(trip);
+    });
+
     resolved.sort((a, b) => {
       const ta = new Date(a.timestamp_out || a.timestamp_in || 0).getTime();
       const tb = new Date(b.timestamp_out || b.timestamp_in || 0).getTime();
@@ -177,6 +183,14 @@ router.post('/zip', async (req, res) => {
       };
     });
 
+    if (!jobs.length) {
+      return res.status(500).json({
+        ok: false,
+        error: failures[0] || 'No PDFs could be generated for zip',
+        failures,
+      });
+    }
+
     function ensureArchive() {
       if (archive) return archive;
       res.setHeader('Content-Type', 'application/zip');
@@ -184,6 +198,7 @@ router.post('/zip', async (req, res) => {
         'Content-Disposition',
         `attachment; filename="${folder}.zip"`,
       );
+      res.setHeader('Cache-Control', 'no-store');
       archive = archiver('zip', { store: true });
       archive.on('error', (err) => {
         console.error('[remoteTrips.zip]', err);
@@ -199,9 +214,12 @@ router.post('/zip', async (req, res) => {
 
     await mapPool(jobs, concurrency, async (job) => {
       if (clientGone) return;
+      const label = job.trip.slip_number || job.trip.id;
+      const t0 = Date.now();
       try {
         const built = await generateTripPdf(job.trip, {
           siteId,
+          // Keep S3 cache warm, but don't block the zip forever on upload failures.
           upload: true,
           grossPrint: printGross,
           printAt: printGross ? grossWeightTimestamp(job.trip) : undefined,
@@ -209,12 +227,15 @@ router.post('/zip', async (req, res) => {
         if (clientGone) return;
         ensureArchive().append(built.pdf, { name: `${folder}/${job.name}` });
         archived += 1;
+        console.log('[remoteTrips.zip] pdf', label, `${Date.now() - t0}ms`, built.fromCache ? 'HIT' : 'MISS');
       } catch (err) {
-        failures.push(`${job.trip.slip_number || job.trip.id}: ${err.message}`);
+        console.warn('[remoteTrips.zip] pdf fail', label, err.message);
+        failures.push(`${label}: ${err.message}`);
       }
     });
 
     if (clientGone) {
+      console.log('[remoteTrips.zip] client aborted', { archived, ms: Date.now() - startedAt });
       try {
         if (archive) archive.abort();
       } catch {
@@ -224,11 +245,18 @@ router.post('/zip', async (req, res) => {
     }
 
     if (!archived) {
-      return res.status(500).json({
-        ok: false,
-        error: failures[0] || 'No PDFs could be generated for zip',
-        failures,
-      });
+      try {
+        archive.abort();
+      } catch {
+        /* ignore */
+      }
+      // Headers already sent as zip — destroy so client doesn't get an empty archive.
+      try {
+        res.destroy(new Error(failures[0] || 'No PDFs could be generated for zip'));
+      } catch {
+        /* ignore */
+      }
+      return;
     }
 
     if (failures.length) {
@@ -238,7 +266,13 @@ router.post('/zip', async (req, res) => {
       );
     }
     await ensureArchive().finalize();
+    console.log('[remoteTrips.zip] done', {
+      archived,
+      failures: failures.length,
+      ms: Date.now() - startedAt,
+    });
   } catch (err) {
+    console.error('[remoteTrips.zip] error', err.message);
     if (!res.headersSent) {
       return res.status(500).json({ ok: false, error: err.message });
     }

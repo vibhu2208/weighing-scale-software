@@ -27,12 +27,19 @@ function getPool() {
     throw new Error('DATABASE_URL is not configured');
   }
   if (!pool) {
+    // statement_timeout via startup options — never SET on 'connect' (races pg checkout).
+    const base = stripSslModeFromUrl(getConnectionString());
+    const sep = base.includes('?') ? '&' : '?';
+    const connectionString = `${base}${sep}options=${encodeURIComponent('-c statement_timeout=30000')}`;
     pool = new Pool({
-      connectionString: stripSslModeFromUrl(getConnectionString()),
+      connectionString,
       ssl: { rejectUnauthorized: false },
-      max: 8,
+      max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 15000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
+      application_name: 'admin-api',
     });
     pool.on('error', (err) => {
       console.error('[db] pool error', err.message);

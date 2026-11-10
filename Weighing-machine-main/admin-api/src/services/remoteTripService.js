@@ -1357,6 +1357,14 @@ async function getRemoteTrip(queryFn, id) {
   return res.rows[0] || null;
 }
 
+async function getRemoteTripsByIds(queryFn, ids = []) {
+  const list = [...new Set((ids || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!list.length) return [];
+  const res = await queryFn(`SELECT * FROM remote_trips WHERE id = ANY($1::text[])`, [list]);
+  const byId = new Map(res.rows.map((row) => [String(row.id), row]));
+  return list.map((id) => byId.get(id) || null);
+}
+
 async function attachPhotos(queryFn, id, photoS3Keys = []) {
   const row = await getRemoteTrip(queryFn, id);
   if (!row) throw new Error('Remote trip not found');
@@ -1571,6 +1579,7 @@ module.exports = {
   BULK_MAX_TRIPS,
   listRemoteTrips,
   getRemoteTrip,
+  getRemoteTripsByIds,
   attachPhotos,
   resyncRemoteTrip,
   cancelRemoteTrip,

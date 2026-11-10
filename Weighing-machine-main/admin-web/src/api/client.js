@@ -399,8 +399,10 @@ export const api = {
           ids,
           print: params.print || undefined,
         }),
+        signal: params.signal,
       });
-    } catch {
+    } catch (err) {
+      if (err?.name === 'AbortError') throw new Error('Zip cancelled');
       throw new Error(
         import.meta.env.DEV
           ? 'Cannot reach admin API — run "npm run dev" in the admin-api folder (port 3001)'

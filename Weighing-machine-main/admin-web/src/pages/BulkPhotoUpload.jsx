@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import blankPhotoUrl from '../assets/blank-photo.png';
 import { api } from '../api/client.js';
@@ -164,6 +164,8 @@ export default function BulkPhotoUpload() {
   const [photoMapping, setPhotoMapping] = useState(loadPhotoMapping);
   const [configOpen, setConfigOpen] = useState(false);
   const [draftMapping, setDraftMapping] = useState(loadPhotoMapping);
+  const zipAbortRef = useRef(null);
+  const zipTimerRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -188,6 +190,17 @@ export default function BulkPhotoUpload() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        zipAbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+      if (zipTimerRef.current) clearInterval(zipTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -607,24 +620,58 @@ export default function BulkPhotoUpload() {
     });
   }
 
+  function cancelZipDownload() {
+    try {
+      zipAbortRef.current?.abort();
+    } catch {
+      /* ignore */
+    }
+    zipAbortRef.current = null;
+    if (zipTimerRef.current) {
+      clearInterval(zipTimerRef.current);
+      zipTimerRef.current = null;
+    }
+    setZipBusy(false);
+    setProgress(null);
+    setZipOpen(false);
+  }
+
   async function downloadReportsZip() {
     if (!zipTrips.length || zipBusy) return;
     setZipBusy(true);
     setError('');
     setMessage('');
-    setProgress({ done: 0, total: zipTrips.length, name: 'server zip' });
+    const total = zipTrips.length;
+    const started = Date.now();
+    setProgress({ done: 0, total, name: 'server zip · 0s' });
+    if (zipTimerRef.current) clearInterval(zipTimerRef.current);
+    zipTimerRef.current = setInterval(() => {
+      const sec = Math.round((Date.now() - started) / 1000);
+      setProgress({ done: 0, total, name: `server zip · ${sec}s` });
+    }, 1000);
+
+    const ac = new AbortController();
+    zipAbortRef.current = ac;
     try {
       const folderName = zipName(day, customDate);
       const ids = zipTrips.map((row) => row.id).filter(Boolean);
-      const packed = await api.downloadRemoteTripsZip(ids, { print: 'gross' });
+      const packed = await api.downloadRemoteTripsZip(ids, {
+        print: 'gross',
+        signal: ac.signal,
+      });
       api.saveBlob(packed, `${folderName}.zip`);
       setZipOpen(false);
       setMessage(
         `Downloaded ${ids.length} report(s) in ${folderName}.zip. Print date on each slip is the gross weigh time.`,
       );
     } catch (err) {
-      setError(err.message);
+      if (err.message !== 'Zip cancelled') setError(err.message);
     } finally {
+      if (zipTimerRef.current) {
+        clearInterval(zipTimerRef.current);
+        zipTimerRef.current = null;
+      }
+      zipAbortRef.current = null;
       setZipBusy(false);
       setProgress(null);
     }
@@ -1217,10 +1264,9 @@ export default function BulkPhotoUpload() {
               <button
                 type="button"
                 className="btn-ghost"
-                disabled={zipBusy}
-                onClick={() => setZipOpen(false)}
+                onClick={() => (zipBusy ? cancelZipDownload() : setZipOpen(false))}
               >
-                Cancel
+                {zipBusy ? 'Cancel zip' : 'Cancel'}
               </button>
               <button
                 type="button"

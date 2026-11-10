@@ -9,10 +9,25 @@ const fs = require('fs');
  */
 
 let browserPromise = null;
-let launching = false;
+let launchLock = null;
 let activePages = 0;
 const waitQueue = [];
 let resolvedExecutablePath;
+
+const PAGE_TIMEOUT_MS = Number(process.env.PDF_PAGE_TIMEOUT_MS || 60000);
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label || 'operation'} timed out after ${ms}ms`)),
+        ms,
+      );
+    }),
+  ]);
+}
 
 function maxConcurrency() {
   const n = Number(process.env.PDF_BROWSER_CONCURRENCY || 2);
@@ -97,19 +112,21 @@ async function getBrowser() {
       browserPromise = null;
     }
   }
-  if (launching && browserPromise) {
-    return browserPromise;
+  if (!launchLock) {
+    launchLock = createBrowser()
+      .then((browser) => {
+        browserPromise = Promise.resolve(browser);
+        return browser;
+      })
+      .catch((err) => {
+        browserPromise = null;
+        throw err;
+      })
+      .finally(() => {
+        launchLock = null;
+      });
   }
-  launching = true;
-  browserPromise = createBrowser()
-    .catch((err) => {
-      browserPromise = null;
-      throw err;
-    })
-    .finally(() => {
-      launching = false;
-    });
-  return browserPromise;
+  return launchLock;
 }
 
 function acquireSlot() {
@@ -143,13 +160,17 @@ async function withPdfPage(fn) {
   await acquireSlot();
   let page = null;
   try {
-    const browser = await getBrowser();
+    const browser = await withTimeout(getBrowser(), PAGE_TIMEOUT_MS, 'browser launch');
     page = await browser.newPage();
-    return await fn(page);
+    return await withTimeout(fn(page), PAGE_TIMEOUT_MS, 'PDF render');
   } catch (err) {
-    // Drop a broken browser so the next call relaunches.
+    // Drop a broken/hung browser so the next call relaunches and slots free.
     const msg = String(err && err.message ? err.message : err || '');
-    if (/Target closed|Session closed|Browser disconnected|Protocol error/i.test(msg)) {
+    if (
+      /timed out|Target closed|Session closed|Browser disconnected|Protocol error/i.test(
+        msg,
+      )
+    ) {
       const broken = browserPromise;
       browserPromise = null;
       if (broken) {
