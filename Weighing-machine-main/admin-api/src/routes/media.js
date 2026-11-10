@@ -17,29 +17,47 @@ const {
   isConfigured,
 } = require('../services/s3Presign');
 const { clearPdfFingerprints } = require('../services/pdfContentCache');
+const {
+  ABSOLUTE_MAX_BYTES,
+  normalizeReportPhoto,
+} = require('../services/photoNormalize');
 
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
 
 const router = express.Router();
 router.use(authMiddleware);
 
-const MAX_UPLOAD_BYTES = 12 * 1024 * 1024; // 12 MB decoded image cap
-
 function parseImageBuffer(imageBase64) {
   if (!imageBase64 || typeof imageBase64 !== 'string') {
     throw new Error('imageBase64 is required');
   }
-  if (imageBase64.length > MAX_UPLOAD_BYTES * 1.4) {
-    throw new Error('Image too large (max 12 MB)');
+  // Base64 expands ~4/3; keep intake under absolute decoded ceiling.
+  if (imageBase64.length > ABSOLUTE_MAX_BYTES * 1.4) {
+    throw new Error('Image too large to process (max ~28 MB)');
   }
   const match = imageBase64.match(/^data:image\/[\w+.-]+;base64,(.+)$/);
   const raw = match ? match[1] : imageBase64;
   const buf = Buffer.from(raw, 'base64');
   if (!buf.length) throw new Error('Invalid image data');
-  if (buf.length > MAX_UPLOAD_BYTES) {
-    throw new Error('Image too large (max 12 MB)');
+  if (buf.length > ABSOLUTE_MAX_BYTES) {
+    throw new Error('Image too large to process (max ~28 MB)');
   }
   return buf;
+}
+
+/** Decode → optional resize (>12 MB) → store only the final report-sized bytes. */
+async function storeReportPhoto(key, rawBody, preferredType) {
+  const normalized = await normalizeReportPhoto(rawBody);
+  const contentType = normalized.contentType || preferredType || 'image/jpeg';
+  await putObject(key, normalized.body, contentType);
+  if (normalized.resized) {
+    console.log(
+      '[media] resized oversized photo',
+      key,
+      `${normalized.originalBytes}→${normalized.storedBytes}`,
+    );
+  }
+  return normalized;
 }
 
 /** Small JPEG for list grids — original stays untouched for PDFs. */
@@ -124,11 +142,19 @@ router.post('/remote-trip-upload', async (req, res) => {
     }
     const key = remoteTripPhotoKey(slipNum, slotNum, photoPass);
     const thumbKey = remoteTripPhotoThumbKey(slipNum, slotNum, photoPass);
-    const body = parseImageBuffer(imageBase64);
-    await putObject(key, body, contentType || 'image/jpeg');
-    await writePhotoThumb(key, body, thumbKey);
+    const raw = parseImageBuffer(imageBase64);
+    const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
+    await writePhotoThumb(key, stored.body, thumbKey);
     await clearPdfFingerprints(query, slipNum).catch(() => {});
-    return res.json({ ok: true, key, thumbKey, slot: slotNum, pass: photoPass });
+    return res.json({
+      ok: true,
+      key,
+      thumbKey,
+      slot: slotNum,
+      pass: photoPass,
+      resized: stored.resized,
+      bytes: stored.storedBytes,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
@@ -144,11 +170,28 @@ router.post('/remote-trip-thumb', async (req, res) => {
     if (!key.startsWith('remote-trips/') && !key.startsWith('sites/')) {
       return res.status(400).json({ ok: false, error: 'key not allowed' });
     }
-    const body = await getObjectBuffer(key);
+    let body = await getObjectBuffer(key);
     if (!body) return res.status(404).json({ ok: false, error: 'object not found' });
+    // Direct S3 PUTs can leave oversized originals — replace in place, then thumb.
+    const normalized = await normalizeReportPhoto(body);
+    if (normalized.resized) {
+      await putObject(key, normalized.body, 'image/jpeg');
+      body = normalized.body;
+      console.log(
+        '[media] replaced oversized S3 photo',
+        key,
+        `${normalized.originalBytes}→${normalized.storedBytes}`,
+      );
+    }
     const thumbKey = key.replace(/\.jpe?g$/i, '.thumb.jpg');
     await writePhotoThumb(key, body, thumbKey);
-    return res.json({ ok: true, key, thumbKey });
+    return res.json({
+      ok: true,
+      key,
+      thumbKey,
+      resized: normalized.resized,
+      bytes: normalized.storedBytes,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
@@ -173,10 +216,18 @@ router.post('/fill-vehicle-still', async (req, res) => {
       });
     }
     const key = fillVehicleStillKey(truck, photoPass, slotNum);
-    const body = parseImageBuffer(imageBase64);
-    await putObject(key, body, contentType || 'image/jpeg');
+    const raw = parseImageBuffer(imageBase64);
+    const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
     const url = await presignGet(key);
-    return res.json({ ok: true, key, url, slot: slotNum, pass: photoPass });
+    return res.json({
+      ok: true,
+      key,
+      url,
+      slot: slotNum,
+      pass: photoPass,
+      resized: stored.resized,
+      bytes: stored.storedBytes,
+    });
   } catch (err) {
     return res.status(400).json({ ok: false, error: err.message });
   }
@@ -237,11 +288,19 @@ router.post('/upload', async (req, res) => {
     }
     const key = mirrorPhotoKey(siteId, slipNum, slotNum, photoPass);
     const thumbKey = mirrorPhotoThumbKey(siteId, slipNum, slotNum, photoPass);
-    const body = parseImageBuffer(imageBase64);
-    await putObject(key, body, contentType || 'image/jpeg');
-    await writePhotoThumb(key, body, thumbKey);
+    const raw = parseImageBuffer(imageBase64);
+    const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
+    await writePhotoThumb(key, stored.body, thumbKey);
     await clearPdfFingerprints(query, slipNum, siteId).catch(() => {});
-    return res.json({ ok: true, key, thumbKey, slot: slotNum, pass: photoPass });
+    return res.json({
+      ok: true,
+      key,
+      thumbKey,
+      slot: slotNum,
+      pass: photoPass,
+      resized: stored.resized,
+      bytes: stored.storedBytes,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

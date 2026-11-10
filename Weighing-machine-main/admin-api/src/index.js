@@ -36,7 +36,8 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json({ limit: '25mb' }));
+// Base64 photos can exceed 12 MB before server-side resize; allow intake then normalize.
+app.use(express.json({ limit: '40mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({
