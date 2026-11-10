@@ -146,6 +146,15 @@ function getClosedReportBySlip(slipNumber) {
   return toPublicTransaction(txn);
 }
 
+function looksLikeCancelPayload(data = {}) {
+  if (data.cancel) return true;
+  if (String(data.ticket_status || '').toUpperCase() === 'CANCELLED') return true;
+  const material = String(data.material || '').trim().toUpperCase();
+  const gross = Number(data.gross_weight);
+  const tare = Number(data.tare_weight);
+  return material === 'CANCEL' && gross === 0 && tare === 0;
+}
+
 async function performClosedReportUpdate(data = {}) {
   const slip = String(data.slipNumber || '').trim() || String(data.slip_number || '').trim();
   const txn = requireClosedReport(
@@ -163,21 +172,32 @@ async function performClosedReportUpdate(data = {}) {
 
   if (data.gross_weight != null && data.gross_weight !== '') {
     const gross = Math.round(Number(data.gross_weight));
-    if (!Number.isFinite(gross) || gross <= 0) throw new Error('Valid gross weight is required');
+    if (!Number.isFinite(gross) || gross < 0) throw new Error('Valid gross weight is required');
+    if (gross === 0 && !looksLikeCancelPayload(data)) {
+      throw new Error('Valid gross weight is required');
+    }
     updates.gross_weight = gross;
     updates.raw_gross_weight = gross;
   }
 
   if (data.tare_weight != null && data.tare_weight !== '') {
     const tare = Math.round(Number(data.tare_weight));
-    if (!Number.isFinite(tare) || tare <= 0) throw new Error('Valid tare weight is required');
+    if (!Number.isFinite(tare) || tare < 0) throw new Error('Valid tare weight is required');
+    if (tare === 0 && !looksLikeCancelPayload(data)) {
+      throw new Error('Valid tare weight is required');
+    }
     updates.tare_weight = tare;
     updates.raw_tare_weight = tare;
   }
 
   const gross = updates.gross_weight ?? txn.gross_weight;
   const tare = updates.tare_weight ?? txn.tare_weight;
-  if (gross != null && tare != null && Number(gross) < Number(tare)) {
+  if (
+    gross != null &&
+    tare != null &&
+    Number(gross) < Number(tare) &&
+    !(Number(gross) === 0 && Number(tare) === 0 && looksLikeCancelPayload(data))
+  ) {
     throw new Error('Gross weight must be greater than tare weight');
   }
 
@@ -495,6 +515,19 @@ function deleteClosedReport(data = {}) {
 }
 
 async function applyRemoteUpdate(data = {}) {
+  // Cancel must not go through performClosedReportUpdate — it rejects 0 kg.
+  if (looksLikeCancelPayload(data)) {
+    logger.info('Applying remote report update as cancel', {
+      slip: data.slipNumber || data.slip_number,
+    });
+    const result = applyRemoteCancel({ ...data, cancel: true, remote: true });
+    if (result?.transactionId) {
+      try {
+        require('./CloudAdminSyncService').enqueuePush(result.transactionId);
+      } catch (_e) { /* optional */ }
+    }
+    return result;
+  }
   logger.info('Applying remote report update', { slip: data.slipNumber || data.slip_number });
   const result = await performClosedReportUpdate({ ...data, remote: true });
   try {
