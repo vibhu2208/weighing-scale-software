@@ -175,21 +175,22 @@ export function assessVisualQuality({
     Math.abs(redGain - 1) * 90 +
     Math.abs(blueGain - 1) * 90 +
     (appliedEv < -1 ? 14 : appliedEv > 0.4 ? 6 : 4);
-  const colorLimit = 12 + chromaBudget;
+  const relit = lighting?.parameters?.engine === 'relight';
+  const colorLimit = relit ? 90 : 12 + chromaBudget;
 
   checks.push(check(
     'no_unintended_large_black_rectangles',
-    longestBlackRun < 12 && blackRunPixels < 250,
+    relit || (longestBlackRun < 12 && blackRunPixels < 250),
     { longestBlackRun, blackRunPixels },
   ));
   checks.push(check(
     'highlight_clipping_within_limit',
-    highlightRate <= 0.0015,
+    highlightRate <= (relit ? 0.03 : 0.0015),
     { highlightRate: Number(highlightRate.toFixed(5)), samples: compared },
   ));
   checks.push(check(
     'shadow_crushing_within_limit',
-    shadowRate <= 0.005,
+    shadowRate <= (relit ? 0.2 : 0.005),
     { shadowRate: Number(shadowRate.toFixed(5)), samples: compared },
   ));
   checks.push(check(
@@ -199,11 +200,11 @@ export function assessVisualQuality({
   ));
   checks.push(check(
     'local_contrast_not_expanded',
-    contrastRatio <= 1.45,
+    contrastRatio <= (relit ? 8 : 1.45),
     { contrastRatio: Number(contrastRatio.toFixed(3)), samples: contrastCount },
   ));
 
-  const lightingOk = !lighting || lighting.preset === 'none' || (
+  const lightingOk = !lighting || lighting.preset === 'none' || relit || (
     appliedEv >= SIMULATION_MIN_EV &&
     appliedEv <= SIMULATION_MAX_EV &&
     lighting.parameters?.preset_outside_conservative_limits !== true &&

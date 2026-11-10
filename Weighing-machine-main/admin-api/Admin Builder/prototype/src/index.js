@@ -4,6 +4,8 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { ProcessingError } from './errors.js';
 import { applyLighting } from './lighting.js';
+import { drawOsd, eraseOsd, formatOsdText, planOsdReplacement } from './osd.js';
+import { relight } from './relight.js';
 import { assessVisualQuality, reportSafeRect } from './quality.js';
 import {
   MAX_INPUT_BYTES,
@@ -565,13 +567,28 @@ export async function processJob({
     throw new ProcessingError('FORMAT_EXTENSION_MISMATCH', 'Source filename extension does not match decoded image format.');
   }
 
-  const lighting = applyLighting(
-    source.pixels,
-    job.lighting_mode,
-    job.datetime_local,
-    profile,
-  );
-  let workingPixels = lighting.pixels;
+  const inframeOsd = timestampStrategy === 'inframe_osd';
+  let osdPlan = null;
+  let lighting;
+  let workingPixels;
+  if (inframeOsd) {
+    // Erase the camera stamp, relight the scene, then redraw the requested
+    // stamp unaffected by the grade (the camera burns its OSD after exposure).
+    osdPlan = planOsdReplacement(source.pixels, source.width, source.height, job.datetime_local);
+    const erased = eraseOsd(source.pixels, source.width, source.height, osdPlan.osd);
+    if (job.lighting_mode === 'none') {
+      lighting = applyLighting(erased, 'none', job.datetime_local, profile);
+    } else {
+      lighting = await relight(erased, source.width, source.height, job.datetime_local, {
+        skipRect: osdPlan.osd,
+        lamps: Array.isArray(job.lamps) ? job.lamps : [],
+      });
+    }
+    workingPixels = drawOsd(lighting.pixels, source.width, source.height, osdPlan.osd, osdPlan.text);
+  } else {
+    lighting = applyLighting(source.pixels, job.lighting_mode, job.datetime_local, profile);
+    workingPixels = lighting.pixels;
+  }
   let renderedText = null;
   let referencePatchSha256 = null;
   const roi = profile.timestamp.roi;
@@ -616,6 +633,15 @@ export async function processJob({
     imageEncoder = sharp(workingPixels, {
       raw: { width: source.width, height: source.height, channels: 3 },
     }).composite(annotation.overlays).removeAlpha().toColourspace('srgb');
+  } else if (inframeOsd) {
+    // Provenance lives in the sidecar manifest, the EDITED_ filename and an
+    // EXIF description; nothing is drawn on the scene.
+    imageEncoder = sharp(workingPixels, {
+      raw: { width: source.width, height: source.height, channels: 3 },
+    })
+      .removeAlpha()
+      .toColourspace('srgb')
+      .withExif({ IFD0: { ImageDescription: 'Admin Builder synthetic derivative - not original CCTV' } });
   } else {
     const watermarkOverlay = makeWatermarkSvg(source.width, source.height);
     imageEncoder = imageEncoder
@@ -668,6 +694,17 @@ export async function processJob({
         timestampStrategy === 'display_annotation' ? [] : [watermark],
       ),
     );
+  }
+  if (inframeOsd) {
+    addHardCheck('inframe_timestamp_replaced', Boolean(osdPlan), {
+      text: osdPlan.text,
+      osd: {
+        left: osdPlan.osd.left,
+        top: osdPlan.osd.top,
+        width: osdPlan.osd.textWidth,
+        height: osdPlan.osd.bandHeight,
+      },
+    });
   }
   addHardCheck(
     'simulated_display_badge_added',
@@ -752,7 +789,9 @@ export async function processJob({
         outputPixels: output.pixels,
         width: source.width,
         height: source.height,
-        excludedRects: timestampStrategy === 'display_annotation'
+        excludedRects: inframeOsd
+          ? [{ left: osdPlan.osd.left - 6, top: osdPlan.osd.top - 6, width: osdPlan.osd.textWidth + 12, height: osdPlan.osd.bandHeight + 12 }]
+          : timestampStrategy === 'display_annotation'
           ? [annotation.plate]
           : [
               watermark,
@@ -778,7 +817,9 @@ export async function processJob({
     profile.calibrated === true &&
     profile.calibration?.method === 'verified_clean_reference' &&
     profile.calibration?.operator_review === 'approved';
-  const timestampOutcome = timestampStrategy === 'display_annotation'
+  const timestampOutcome = inframeOsd
+    ? 'REPLACED_INFRAME_OSD'
+    : timestampStrategy === 'display_annotation'
     ? 'ANNOTATED_DISPLAY_TIME'
     : job.timestamp_enabled
       ? verifiedReference
@@ -792,6 +833,12 @@ export async function processJob({
           verifiedReference
             ? 'Even the registered clean reference must be visually checked against this frame.'
             : 'In-frame timestamp rendering is a simulation. Hidden background pixels are not recovered and mandatory visual review is required.',
+        ]
+      : []),
+    ...(inframeOsd
+      ? [
+          'Synthetic training derivative: the in-frame timestamp was erased and redrawn and the scene was relit for the requested time. It does not show a real capture time.',
+          'Lamps/headlights are only brightened if already visible or operator-placed; no scene content is invented.',
         ]
       : []),
     ...(timestampStrategy === 'display_annotation'
@@ -836,6 +883,15 @@ export async function processJob({
           represents_verified_capture_time: false,
         }]
       : []),
+    ...(inframeOsd
+      ? [{
+          name: 'replace_inframe_timestamp',
+          text: osdPlan.text,
+          method: 'erase_and_redraw_with_camera_glyph_atlas',
+          osd: osdPlan.osd,
+          represents_verified_capture_time: false,
+        }]
+      : []),
     ...(timestampStrategy === 'display_annotation'
       ? [{
           name: 'add_simulated_display_time_overlay',
@@ -851,7 +907,7 @@ export async function processJob({
           plate: annotation.plate,
         }]
       : []),
-    ...(timestampStrategy === 'display_annotation'
+    ...(timestampStrategy === 'display_annotation' || inframeOsd
       ? []
       : [{
       name: 'add_visible_edited_derivative_watermark',
@@ -866,6 +922,8 @@ export async function processJob({
     processor: { name: 'kaata-karo-image-prototype', version: '0.3.0' },
     runtime: { node: process.version, sharp: sharp.versions.sharp },
     edited_derivative: true,
+    synthetic_training_derivative: inframeOsd,
+    visible_label_on_image: !inframeOsd,
     original_source_modified: false,
     source_metadata_preserved_on_original: true,
     job_id: job.job_id,

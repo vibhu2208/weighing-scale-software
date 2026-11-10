@@ -97,6 +97,7 @@ test('previews an uploaded image temporarily and saves a labeled derivative only
     body: JSON.stringify({
       sourceDataUrl: `data:image/png;base64,${source.toString('base64')}`,
       datetimeLocal: '2026-10-21T04:19:15',
+      timestampStrategy: 'display_annotation',
       profileId: 'camera_reviewed',
       // The route must enforce the fixed operation even if a client sends old mode fields.
       timestampEnabled: false,
@@ -222,6 +223,7 @@ test('keeps saved outputs after restart and removes unsaved temporary previews',
     body: JSON.stringify({
       sourceDataUrl: `data:image/png;base64,${source.toString('base64')}`,
       datetimeLocal: '2026-10-21T14:30:00',
+      timestampStrategy: 'display_annotation',
     }),
   });
   const processed = await processResponse.json();
@@ -324,6 +326,7 @@ test('saves a one-frame draft ROI and processes an annotation without a referenc
       sourceDataUrl: `data:image/png;base64,${source.toString('base64')}`,
       profileId: 'single_frame_view',
       datetimeLocal: '2026-10-22T14:30:00',
+      timestampStrategy: 'display_annotation',
     }),
   });
   const result = await processResponse.json();
@@ -368,6 +371,7 @@ test('uses only an explicitly selected camera view and warns when framing differ
       profileId: 'camera_reviewed',
       jobId: 'no-camera-selection',
       datetimeLocal: '2026-10-22T14:30:00',
+      timestampStrategy: 'display_annotation',
     }),
   });
   const automaticProfileResult = await response.json();
@@ -386,6 +390,7 @@ test('uses only an explicitly selected camera view and warns when framing differ
       profileId: 'camera_reviewed',
       jobId: 'remembered-profile',
       datetimeLocal: '2026-10-22T14:30:00',
+      timestampStrategy: 'display_annotation',
     }),
   });
   const result = await selectedProfileResponse.json();
@@ -412,6 +417,7 @@ test('uses only an explicitly selected camera view and warns when framing differ
       profileId: 'camera_reviewed',
       jobId: 'wrong-camera-resolution',
       datetimeLocal: '2026-10-22T14:30:00',
+      timestampStrategy: 'display_annotation',
       timestampEnabled: true,
       lightingMode: 'none',
       outputFormat: 'png',
@@ -435,6 +441,7 @@ test('uses only an explicitly selected camera view and warns when framing differ
     body: JSON.stringify({
       sourceDataUrl: `data:image/png;base64,${source.toString('base64')}`,
       datetimeLocal: '2026-10-22T14:30:00',
+      timestampStrategy: 'display_annotation',
     }),
   });
   const ambiguous = await ambiguousResponse.json();

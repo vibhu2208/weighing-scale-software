@@ -18,7 +18,7 @@ export function validateJob(job) {
   if (!job || typeof job !== 'object') {
     throw new ProcessingError('INVALID_JOB', 'A job object is required.');
   }
-  if (job.timestamp_enabled || job.timestamp_strategy === 'display_annotation' || job.lighting_mode === 'auto') {
+  if (job.timestamp_enabled || job.timestamp_strategy === 'display_annotation' || job.timestamp_strategy === 'inframe_osd' || job.lighting_mode === 'auto') {
     job.datetime_local = normalizeDateTimeLocal(job.datetime_local);
     parseLocalDateTime(job.datetime_local);
   }
@@ -36,7 +36,7 @@ export function validateJob(job) {
   }
   if (
     job.timestamp_strategy !== undefined &&
-    !['none', 'display_annotation', 'reference_patch'].includes(job.timestamp_strategy)
+    !['none', 'display_annotation', 'reference_patch', 'inframe_osd'].includes(job.timestamp_strategy)
   ) {
     throw new ProcessingError('INVALID_TIMESTAMP_STRATEGY', 'Unsupported timestamp strategy.');
   }

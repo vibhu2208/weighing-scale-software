@@ -70,7 +70,7 @@ function describeProcessResult(processed) {
   const lighting = processed.operations?.find((operation) => operation.name === 'adjust_lighting');
   const parts = [
     'Processing completed on a copy. The original CCTV file is unchanged.',
-    `QA status: ${qaStatus}. This derivative is not approved to replace a report image.`,
+    `QA status: ${qaStatus}. Synthetic derivative for model training; not a replacement for a report image.`,
   ];
   if (failed.length) {
     parts.push(`Failed checks: ${failed.map((item) => item.check).join(', ')}.`);
@@ -83,15 +83,16 @@ function describeProcessResult(processed) {
         '. This is a simulation, not a recorded camera condition.',
     );
   }
-  parts.push('The camera timestamp is unchanged. The added label is a requested simulation time.');
+  if (processed.operations?.some((operation) => operation.name === 'replace_inframe_timestamp')) {
+    parts.push('The in-frame camera timestamp was replaced with the requested time.');
+  }
   return { message: parts.join(' '), tone: qaTone(qaStatus), qaStatus };
 }
 
 function testDownloadName(result) {
   const qaStatus = result.qa_status || result.manifest?.qa_status || 'NEEDS_REVIEW';
-  const base = result.saved?.filename || result.output_image_path || 'EDITED_derivative.png';
-  if (qaStatus === 'APPROVED') return base;
-  return `TEST_${qaStatus}_${base}`;
+  const base = result.saved?.filename || `EDITED_${result.preview_id || 'derivative'}.png`;
+  return qaStatus === 'QA_FAILED' ? `FAILED_${base}` : base;
 }
 
 export default function AdminBuilder() {
@@ -109,13 +110,15 @@ export default function AdminBuilder() {
   const [savedPreviews, setSavedPreviews] = useState({});
   const [selectedIds, setSelectedIds] = useState([]);
   const [clearing, setClearing] = useState(false);
+  const [lamps, setLamps] = useState([]);
+  const sourceImgRef = useRef(null);
   const objectUrls = useRef([]);
   const allSelected = savedImages.length > 0 && selectedIds.length === savedImages.length;
   const someSelected = selectedIds.length > 0 && !allSelected;
   const { date, time } = splitDateTime(datetimeLocal);
 
-  const overlay = useMemo(
-    () => result?.operations?.find((operation) => operation.name === 'add_simulated_display_time_overlay'),
+  const stamp = useMemo(
+    () => result?.operations?.find((operation) => operation.name === 'replace_inframe_timestamp'),
     [result],
   );
   const lighting = useMemo(
@@ -158,6 +161,7 @@ export default function AdminBuilder() {
       setSourceDataUrl(dataUrl);
       setResult(null);
       setOutputUrl('');
+      setLamps([]);
       setMessage('Image uploaded. Original remains unchanged. Set the requested time, then process.', 'info');
     } catch (error) {
       setMessage(error.message, 'error');
@@ -182,6 +186,7 @@ export default function AdminBuilder() {
         sourceDataUrl,
         datetimeLocal: requestedTime,
         timezone: CAMERA_TIMEZONE,
+        lamps,
       });
       if (!processed.output_image_base64) {
         throw new Error('Processor did not return an image.');
@@ -204,6 +209,19 @@ export default function AdminBuilder() {
     }
   }
 
+  function onSourceClick(event) {
+    const img = sourceImgRef.current;
+    if (!img || !img.naturalWidth) return;
+    const box = img.getBoundingClientRect();
+    const scale = img.naturalWidth / box.width;
+    const x = Math.round((event.clientX - box.left) * scale);
+    const y = Math.round((event.clientY - box.top) * scale);
+    setLamps((current) => (current.length >= 12 ? current : [
+      ...current,
+      { x, y, radius: Math.round(img.naturalWidth / 40), strength: 0.8 },
+    ]));
+  }
+
   async function onSave() {
     if (!result?.preview_id) {
       setMessage('Process an image before saving it.', 'error');
@@ -215,7 +233,7 @@ export default function AdminBuilder() {
       setResult((current) => (current ? { ...current, saved: saved.saved } : current));
       const qaStatus = result.qa_status || result.manifest?.qa_status || 'NEEDS_REVIEW';
       setMessage(
-        `Saved unapproved test copy ${saved.saved.filename}. QA status remains ${qaStatus}. The original upload was not changed.`,
+        `Saved ${saved.saved.filename}. QA status ${qaStatus}. The original upload was not changed.`,
         qaTone(qaStatus),
       );
       await loadSavedImages();
@@ -234,7 +252,7 @@ export default function AdminBuilder() {
     const filename = testDownloadName(result);
     if (result.saved?.id) {
       await api.downloadAdminBuilderImage(result.saved.id, filename);
-      setMessage(`Downloaded labeled test file ${filename}. It is not an approved report replacement.`, qaTone(result.qa_status));
+      setMessage(`Downloaded ${filename}.`, qaTone(result.qa_status));
       return;
     }
     const link = document.createElement('a');
@@ -243,7 +261,7 @@ export default function AdminBuilder() {
     document.body.appendChild(link);
     link.click();
     link.remove();
-    setMessage(`Downloaded labeled test file ${filename}. It is not an approved report replacement.`, qaTone(result.qa_status));
+    setMessage(`Downloaded ${filename}.`, qaTone(result.qa_status));
   }
 
   async function loadSavedImages() {
@@ -332,7 +350,7 @@ export default function AdminBuilder() {
       <header>
         <h1 className="text-2xl font-semibold">Admin Builder</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Upload a CCTV frame and a requested local time. The copy keeps the camera timestamp, adds a labeled simulated time, and applies a time-dependent lighting grade. A generated image is not an approved replacement for original CCTV. Original files are never overwritten.
+          Upload a CCTV frame and a requested local time. The copy gets the camera timestamp redrawn in the camera's own font and the scene relit to match that time of day (daylight, dusk, night). Output is a synthetic training image, not original CCTV; provenance is kept in the saved manifest. Original files are never overwritten.
         </p>
       </header>
 
@@ -374,8 +392,42 @@ export default function AdminBuilder() {
           </label>
         </div>
         <p className="text-xs text-slate-500">
-          Automatic lighting · Camera defaults · Report-compatible preview
+          Timestamp redrawn in-frame · Automatic time-of-day lighting · Report-compatible preview
         </p>
+
+        {sourceDataUrl && (
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Headlights / lamps (optional, night times)</p>
+            <p className="text-xs text-slate-500">
+              Click the image where a headlight or lamp should glow. Only used when the requested time is at night.
+            </p>
+            <div className="relative inline-block max-w-full">
+              <img
+                ref={sourceImgRef}
+                src={sourceDataUrl}
+                alt="Uploaded CCTV frame. Click to place a lamp glow."
+                className="max-h-72 w-auto max-w-full cursor-crosshair rounded-lg border border-slate-800 bg-slate-950"
+                onClick={onSourceClick}
+              />
+              {sourceImgRef.current?.naturalWidth > 0 && lamps.map((lamp, index) => (
+                <span
+                  key={`${lamp.x}-${lamp.y}-${index}`}
+                  className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-amber-300 bg-amber-300/40"
+                  style={{
+                    left: `${(lamp.x / sourceImgRef.current.naturalWidth) * 100}%`,
+                    top: `${(lamp.y / sourceImgRef.current.naturalHeight) * 100}%`,
+                  }}
+                />
+              ))}
+            </div>
+            {lamps.length > 0 && (
+              <div className="flex items-center gap-3 text-xs text-slate-400">
+                <span>{lamps.length} lamp{lamps.length === 1 ? '' : 's'} placed</span>
+                <button type="button" className="btn-ghost text-xs" onClick={() => setLamps([])}>Clear lamps</button>
+              </div>
+            )}
+          </div>
+        )}
 
         <button
           type="button"
@@ -400,8 +452,8 @@ export default function AdminBuilder() {
               <figcaption className="mb-2 text-sm font-medium text-slate-300">Processed</figcaption>
               <img src={outputUrl} alt="Processed edited derivative" className="w-full rounded-lg border border-slate-800 bg-slate-950" />
               <p className="mt-1 text-xs text-slate-500">
-                Unapproved test derivative
-                {overlay ? ` · simulated ${overlay.requested_time || overlay.text}` : ''}
+                Synthetic training derivative
+                {stamp ? ` · timestamp ${stamp.text}` : ''}
                 {lighting ? ` · ${lighting.preset.replaceAll('_', ' ')} lighting` : ''}
               </p>
             </figure>
@@ -420,8 +472,8 @@ export default function AdminBuilder() {
               />
             </div>
             <p className="mt-1 text-xs text-slate-500">
-              Simulated display time {overlay?.requested_time || overlay?.text || '—'}. This is not the camera capture time.
-              {' '}{REPORT_PHOTO_SLOT.width} × {REPORT_PHOTO_SLOT.height} CSS px, object-fit cover. Read the time in this caption; the thumbnail is too small for the burned-in label.
+              Timestamp {stamp?.text || '—'}.
+              {' '}{REPORT_PHOTO_SLOT.width} × {REPORT_PHOTO_SLOT.height} CSS px, object-fit cover.
             </p>
             {slotCrop.warning && (
               <p className="mt-1 text-xs text-amber-300">
@@ -450,10 +502,10 @@ export default function AdminBuilder() {
 
           <div className="flex flex-wrap gap-3">
             <button type="button" className="btn-primary" onClick={onSave} disabled={saving || Boolean(result.saved)}>
-              {result.saved ? 'Saved test copy' : saving ? 'Saving…' : 'Save unapproved test copy'}
+              {result.saved ? 'Saved' : saving ? 'Saving…' : 'Save copy'}
             </button>
             <button type="button" className="btn-ghost" onClick={onDownload}>
-              Download test derivative
+              Download image
             </button>
             <button type="button" className="btn-ghost" onClick={loadSavedImages}>
               Saved Images
@@ -511,7 +563,7 @@ export default function AdminBuilder() {
                 </label>
                 <p className="mt-1 text-xs text-slate-500">
                   QA {image.qa_status || 'NEEDS_REVIEW'}
-                  {image.visually_approved ? '' : ' · unapproved test copy'}
+                  {image.visually_approved ? '' : ' · synthetic, pending review'}
                 </p>
                 {savedPreviews[image.id] && (
                   <img src={savedPreviews[image.id]} alt="" className="mt-3 w-full rounded border border-slate-800" />
@@ -521,10 +573,10 @@ export default function AdminBuilder() {
                   className="btn-primary mt-3"
                   onClick={() => api.downloadAdminBuilderImage(
                     image.id,
-                    image.visually_approved ? image.filename : `TEST_${image.qa_status || 'NEEDS_REVIEW'}_${image.filename}`,
+                    image.qa_status === 'QA_FAILED' ? `FAILED_${image.filename}` : image.filename,
                   )}
                 >
-                  Download test copy
+                  Download
                 </button>
               </article>
             ))}
@@ -549,7 +601,7 @@ export default function AdminBuilder() {
               </p>
             )}
             <p>
-              Camera profiles and ROI calibration stay in the processor. Routine jobs do not require them and do not recover pixels hidden under the original OSD.
+              The camera timestamp is detected automatically, erased from surrounding pixels and redrawn from glyphs taken from real camera stamps. No camera profile is needed.
             </p>
           </div>
         </details>

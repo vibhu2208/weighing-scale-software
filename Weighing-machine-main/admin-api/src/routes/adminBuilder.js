@@ -64,6 +64,7 @@ router.post('/process', async (req, res) => {
       sourceDataUrl: req.body?.sourceDataUrl,
       datetimeLocal: req.body?.datetimeLocal,
       profileId: req.body?.profileId,
+      lamps: req.body?.lamps,
       timezone: req.body?.timezone || 'Asia/Kolkata',
       operatorEmail: req.user.email,
     });

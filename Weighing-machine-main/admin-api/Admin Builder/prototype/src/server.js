@@ -21,6 +21,52 @@ const TEMPORARY_PREVIEW_TTL_MS = 60 * 60 * 1000;
 const TEMPORARY_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const DATA_URL_PATTERN = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/;
 const ID_PATTERN = /^[a-f0-9]{32}$/;
+// A 17 MP frame peaks near 600 MB; default to one job at a time for small hosts.
+const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.ADMIN_BUILDER_MAX_CONCURRENT) || 1);
+const MAX_QUEUED_JOBS = 6;
+const MAX_PENDING_PREVIEWS = 100;
+
+// Small FIFO limiter so a burst of uploads cannot exhaust memory: every job
+// holds several full-resolution RGB buffers.
+function createJobLimiter(maxActive = MAX_CONCURRENT_JOBS, maxQueued = MAX_QUEUED_JOBS) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= maxActive || queue.length === 0) return;
+    active += 1;
+    queue.shift()();
+  };
+  return function run(task) {
+    return new Promise((resolve, reject) => {
+      if (active >= maxActive && queue.length >= maxQueued) {
+        reject(new ProcessingError('SERVER_BUSY', 'Admin Builder is processing other images. Try again in a moment.'));
+        return;
+      }
+      queue.push(() => {
+        Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            active -= 1;
+            next();
+          });
+      });
+      next();
+    });
+  };
+}
+
+async function evictOldPreviews(paths, pendingPreviews, activePreviews) {
+  if (pendingPreviews.size < MAX_PENDING_PREVIEWS) return;
+  const oldest = [...pendingPreviews.values()]
+    .filter((preview) => !activePreviews.has(preview.previewId))
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .slice(0, pendingPreviews.size - MAX_PENDING_PREVIEWS + 1);
+  for (const preview of oldest) {
+    pendingPreviews.delete(preview.previewId);
+    await rm(path.join(paths.temporary, preview.previewId), { recursive: true, force: true });
+  }
+}
 
 function storagePaths(dataRoot) {
   return {
@@ -271,6 +317,16 @@ async function handleSingleFrameDraft(body, dataRoot = DATA_ROOT) {
   };
 }
 
+function sanitizeLamps(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 12).map((lamp) => ({
+    x: Number(lamp?.x),
+    y: Number(lamp?.y),
+    radius: Number(lamp?.radius),
+    strength: Number(lamp?.strength),
+  })).filter((lamp) => Number.isFinite(lamp.x) && Number.isFinite(lamp.y));
+}
+
 async function handleProcessing(body, { paths, pendingPreviews, activePreviews }) {
   const source = decodeDataUrl(body.sourceDataUrl, 'Source');
   let sourceMetadata;
@@ -327,8 +383,9 @@ async function handleProcessing(body, { paths, pendingPreviews, activePreviews }
         profile_id: profile.profile_id,
         datetime_local: datetimeLocal,
         timestamp_enabled: timestampEnabled,
-        timestamp_strategy: 'display_annotation',
+        timestamp_strategy: body.timestampStrategy === 'display_annotation' ? 'display_annotation' : 'inframe_osd',
         lighting_mode: lightingMode,
+        lamps: sanitizeLamps(body.lamps),
         output_format: outputFormat,
       },
       referencePatchPath: patchPath,
@@ -511,25 +568,30 @@ async function listSavedImages(paths) {
   const images = [];
   for (const entry of entries) {
     const id = entry.name.slice(0, -'.json'.length);
-    const manifest = JSON.parse(await readFile(path.join(paths.manifests, entry.name), 'utf8'));
-    const expectedFilename = `EDITED_${id}.${manifest.output_format}`;
-    if (manifest.output_filename !== expectedFilename || !['png', 'jpeg'].includes(manifest.output_format)) {
-      throw new ProcessingError('INVALID_SAVED_MANIFEST', `Saved image manifest "${entry.name}" has an invalid output filename.`);
+    try {
+      const manifest = JSON.parse(await readFile(path.join(paths.manifests, entry.name), 'utf8'));
+      const expectedFilename = `EDITED_${id}.${manifest.output_format}`;
+      if (manifest.output_filename !== expectedFilename || !['png', 'jpeg'].includes(manifest.output_format)) {
+        throw new ProcessingError('INVALID_SAVED_MANIFEST', 'invalid output filename');
+      }
+      await stat(path.join(paths.outputs, expectedFilename));
+      images.push({
+        id,
+        filename: expectedFilename,
+        download_url: `/api/saved/${id}/image`,
+        source_sha256: manifest.source_sha256,
+        output_sha256: manifest.output_sha256,
+        saved_at_utc: manifest.saved_at_utc || '',
+        output_dimensions: manifest.output_dimensions,
+        operations: manifest.operations,
+        processing_status: manifest.processing_status || 'PROCESSING_COMPLETE',
+        qa_status: manifest.qa_status || 'NEEDS_REVIEW',
+        visually_approved: manifest.visually_approved === true,
+      });
+    } catch (error) {
+      // One damaged record must not hide every other saved image.
+      console.error(`Admin Builder: skipping unreadable saved image ${id}: ${error.message}`);
     }
-    await stat(path.join(paths.outputs, expectedFilename));
-    images.push({
-      id,
-      filename: expectedFilename,
-      download_url: `/api/saved/${id}/image`,
-      source_sha256: manifest.source_sha256,
-      output_sha256: manifest.output_sha256,
-      saved_at_utc: manifest.saved_at_utc,
-      output_dimensions: manifest.output_dimensions,
-      operations: manifest.operations,
-      processing_status: manifest.processing_status || 'PROCESSING_COMPLETE',
-      qa_status: manifest.qa_status || 'NEEDS_REVIEW',
-      visually_approved: manifest.visually_approved === true,
-    });
   }
   return images.sort((left, right) => right.saved_at_utc.localeCompare(left.saved_at_utc));
 }
@@ -602,6 +664,7 @@ export function createBuilderWorkspace({ dataRoot = DATA_ROOT } = {}) {
   const paths = storagePaths(dataRoot);
   const pendingPreviews = new Map();
   const activePreviews = new Set();
+  const limit = createJobLimiter();
   let storageInitialization;
   const ensureStorage = () => {
     storageInitialization ??= initializeStorage(paths);
@@ -612,7 +675,14 @@ export function createBuilderWorkspace({ dataRoot = DATA_ROOT } = {}) {
     ensureStorage,
     async process(body) {
       await ensureStorage();
-      return handleProcessing(body, { paths, pendingPreviews, activePreviews });
+      return limit(async () => {
+        // The embedded API has no background timer: expire stale previews here.
+        await cleanupTemporaryPreviews(paths, pendingPreviews, activePreviews).catch((error) => {
+          console.error(`Admin Builder temporary-preview cleanup failed: ${error.message}`);
+        });
+        await evictOldPreviews(paths, pendingPreviews, activePreviews);
+        return handleProcessing(body, { paths, pendingPreviews, activePreviews });
+      });
     },
     async save(previewId) {
       await ensureStorage();
@@ -655,6 +725,7 @@ export function createLocalTestServer({ dataRoot = DATA_ROOT } = {}) {
     storageInitialization ??= initializeStorage(paths);
     return storageInitialization;
   };
+  const limit = createJobLimiter();
   const cleanupTimer = setInterval(() => {
     cleanupTemporaryPreviews(paths, pendingPreviews, activePreviews).catch((error) => {
       console.error(`Admin Builder temporary-preview cleanup failed: ${error.message}`);
@@ -747,7 +818,7 @@ export function createLocalTestServer({ dataRoot = DATA_ROOT } = {}) {
           : pathname === '/api/calibrate-draft'
             ? await handleSingleFrameDraft(body, dataRoot)
             : pathname === '/api/process'
-            ? await handleProcessing(body, { dataRoot, paths, pendingPreviews, activePreviews })
+            ? await limit(() => handleProcessing(body, { dataRoot, paths, pendingPreviews, activePreviews }))
             : pathname === '/api/profiles/review'
               ? await handleProfileReview(body, paths.profiles)
               : pathname === '/api/saved/delete'
@@ -758,6 +829,8 @@ export function createLocalTestServer({ dataRoot = DATA_ROOT } = {}) {
       const statusCode =
         error.code === 'REQUEST_TOO_LARGE'
           ? 413
+          : error.code === 'SERVER_BUSY'
+            ? 503
           : error.code === 'PROFILE_NOT_FOUND' || error.code === 'PREVIEW_NOT_FOUND'
             ? 404
             : error.code === 'OUTPUT_ALREADY_EXISTS'
