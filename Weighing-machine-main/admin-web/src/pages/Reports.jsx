@@ -315,27 +315,35 @@ export default function Reports() {
                   >
                     Edit
                   </Link>
-                  {row.ticket_status !== 'CANCELLED' && row.ticket_status !== 'DELETED' && (
+                  {row.ticket_status !== 'DELETED' && (
                     <button
                       type="button"
                       className="text-amber-400 hover:underline text-xs disabled:opacity-50"
-                      disabled={Boolean(cancelBusy) || Boolean(pdfBusy)}
+                      disabled={cancelBusy === row.slip_number || pdfBusy === row.slip_number}
                       onClick={async () => {
+                        const already = row.ticket_status === 'CANCELLED';
                         if (
                           !window.confirm(
-                            `Cancel ${row.slip_number}? Sets CANCEL / 0 kg on cloud and the PC.`,
+                            already
+                              ? `Re-queue cancel for ${row.slip_number} on the weighbridge PC?`
+                              : `Cancel ${row.slip_number}? Sets CANCEL / 0 kg on cloud and the PC.`,
                           )
                         ) {
                           return;
                         }
-                        if (!window.confirm(`Confirm cancel ${row.slip_number}?`)) return;
+                        if (
+                          !already &&
+                          !window.confirm(`Confirm cancel ${row.slip_number}?`)
+                        ) {
+                          return;
+                        }
                         setCancelBusy(row.slip_number);
                         setError('');
                         setMessage('');
                         try {
                           const result = await api.cancelReport(row.slip_number);
                           setMessage(
-                            `Cancel queued for ${row.slip_number} (command ${result.command?.id?.slice(0, 8)}…)`,
+                            `${result.requeued ? 'Cancel re-queued' : 'Cancel queued'} for ${row.slip_number} (command ${result.command?.id?.slice(0, 8)}…)`,
                           );
                           await load();
                         } catch (err) {
@@ -345,7 +353,11 @@ export default function Reports() {
                         }
                       }}
                     >
-                      {cancelBusy === row.slip_number ? 'Cancel…' : 'Cancel'}
+                      {cancelBusy === row.slip_number
+                        ? 'Cancel…'
+                        : row.ticket_status === 'CANCELLED'
+                          ? 'Re-queue cancel'
+                          : 'Cancel'}
                     </button>
                   )}
                   {row.ticket_status === 'CLOSED' && (

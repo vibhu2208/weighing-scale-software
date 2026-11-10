@@ -5,8 +5,15 @@ const CONFIRM_MS = 5000;
 
 /**
  * Inline two-step confirm: Cancel → Confirm cancel? → void trip as CANCELLED.
+ * Use `alreadyCancelled` to re-queue PC cancel after a stuck/failed command.
  */
-export default function CancelRemoteTripButton({ tripId, disabled = false, onDone, onError }) {
+export default function CancelRemoteTripButton({
+  tripId,
+  disabled = false,
+  alreadyCancelled = false,
+  onDone,
+  onError,
+}) {
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const timerRef = useRef(null);
@@ -48,7 +55,17 @@ export default function CancelRemoteTripButton({ tripId, disabled = false, onDon
       disabled={busy || disabled}
       onClick={handleClick}
     >
-      {busy ? 'Cancelling…' : armed ? 'Confirm cancel?' : 'Cancel'}
+      {busy
+        ? alreadyCancelled
+          ? 'Re-queuing…'
+          : 'Cancelling…'
+        : armed
+          ? alreadyCancelled
+            ? 'Confirm re-queue?'
+            : 'Confirm cancel?'
+          : alreadyCancelled
+            ? 'Re-queue cancel'
+            : 'Cancel'}
     </button>
   );
 }

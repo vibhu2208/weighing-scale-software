@@ -74,7 +74,7 @@ test('cancel rejects missing trip', async () => {
   await assert.rejects(() => cancelRemoteTrip(queryFn, 'missing', { siteId: 'WB-03' }), /not found/i);
 });
 
-test('cancel rejects already cancelled trip', async () => {
+test('cancel rejects already cancelled trip by default', async () => {
   const { queryFn } = mockQuery({
     id: 'rt-2',
     slip_number: 'WB8106',
@@ -82,4 +82,21 @@ test('cancel rejects already cancelled trip', async () => {
     synced_to_local: false,
   });
   await assert.rejects(() => cancelRemoteTrip(queryFn, 'rt-2', { siteId: 'WB-03' }), /already cancelled/i);
+});
+
+test('cancel can requeue when already cancelled', async () => {
+  const { queryFn } = mockQuery({
+    id: 'rt-3',
+    slip_number: 'WB8107',
+    ticket_status: 'CANCELLED',
+    synced_to_local: true,
+    local_id: 9,
+  });
+  const out = await cancelRemoteTrip(queryFn, 'rt-3', {
+    siteId: 'WB-03',
+    allowAlreadyCancelled: true,
+  });
+  assert.equal(out.alreadyCancelled, true);
+  assert.equal(out.slip_number, 'WB8107');
+  assert.equal(out.wasSynced, true);
 });

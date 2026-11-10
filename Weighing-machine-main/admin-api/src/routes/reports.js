@@ -389,9 +389,9 @@ router.post('/:slip/cancel', async (req, res) => {
       [siteId, slip],
     );
     const mirror = mirrorRes.rows[0] || null;
-    if (mirror && String(mirror.ticket_status || '').toUpperCase() === 'CANCELLED') {
-      return res.status(400).json({ ok: false, error: 'Report is already cancelled' });
-    }
+    // Already-cancelled cloud rows still get a fresh PC command (failed/stuck sync).
+    const alreadyCancelled =
+      mirror && String(mirror.ticket_status || '').toUpperCase() === 'CANCELLED';
 
     const timestampIn = mirror?.timestamp_in || mirror?.timestamp_out || new Date().toISOString();
     const plate = String(mirror?.truck_number || '')
@@ -399,7 +399,7 @@ router.post('/:slip/cancel', async (req, res) => {
       .toUpperCase();
     const truckNumber = plate && plate !== CANCEL ? plate : CANCEL;
 
-    if (mirror) {
+    if (mirror && !alreadyCancelled) {
       await query(
         `UPDATE transactions_mirror
          SET ticket_status = 'CANCELLED',
@@ -426,9 +426,9 @@ router.post('/:slip/cancel', async (req, res) => {
          LIMIT 1`,
         [slip],
       );
-      if (rt.rows[0] && String(rt.rows[0].ticket_status || '').toUpperCase() !== 'CANCELLED') {
+      if (rt.rows[0]) {
         const { cancelRemoteTrip } = require('../services/remoteTripService');
-        await cancelRemoteTrip(query, rt.rows[0].id);
+        await cancelRemoteTrip(query, rt.rows[0].id, { allowAlreadyCancelled: true });
       }
     } catch (err) {
       console.warn('[reports] remote trip cancel sync failed', err.message);
@@ -454,10 +454,14 @@ router.post('/:slip/cancel', async (req, res) => {
       createdBy: req.user?.email,
     });
 
-    return res.json({ ok: true, command: cmd, slip_number: slip });
+    return res.json({
+      ok: true,
+      command: cmd,
+      slip_number: slip,
+      requeued: Boolean(alreadyCancelled),
+    });
   } catch (err) {
-    const status = err.status || (/already cancelled/i.test(err.message) ? 400 : 500);
-    return res.status(status).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 

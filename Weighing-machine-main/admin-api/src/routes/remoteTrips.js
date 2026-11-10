@@ -198,9 +198,13 @@ router.post('/:id/resync', async (req, res) => {
 
 router.post('/:id/cancel', async (req, res) => {
   try {
-    const result = await cancelRemoteTrip(query, req.params.id);
+    const result = await cancelRemoteTrip(query, req.params.id, {
+      allowAlreadyCancelled: true,
+    });
     let localEditQueued = false;
-    if (result.wasSynced && result.slip_number) {
+    // Always queue PC cancel when we have a slip — including re-queue after a
+    // failed/stuck prior command (cloud may already be CANCELLED).
+    if (result.slip_number) {
       await createCommand({
         type: 'edit_report',
         payload: {
@@ -226,6 +230,7 @@ router.post('/:id/cancel', async (req, res) => {
       ok: true,
       trip: await attachTripMedia(result.trip),
       localEditQueued,
+      requeued: Boolean(result.alreadyCancelled),
     });
   } catch (err) {
     const status = err.status || (/not found/i.test(err.message) ? 404 : 400);

@@ -1210,14 +1210,13 @@ export default function RemoteTrips() {
                           ? 'Open'
                           : 'Closed'}
                     </Badge>
-                    {!isCancelledTicket(row.ticket_status) && (
-                      <CancelRemoteTripButton
-                        tripId={row.id}
-                        disabled={Boolean(imageBusyId) || Boolean(pdfBusy)}
-                        onDone={loadTrips}
-                        onError={(err) => setError(err.message)}
-                      />
-                    )}
+                    <CancelRemoteTripButton
+                      tripId={row.id}
+                      alreadyCancelled={isCancelledTicket(row.ticket_status)}
+                      disabled={Boolean(imageBusyId) || Boolean(pdfBusy)}
+                      onDone={loadTrips}
+                      onError={(err) => setError(err.message)}
+                    />
                   </td>
                   <td className="p-3">
                     <Badge

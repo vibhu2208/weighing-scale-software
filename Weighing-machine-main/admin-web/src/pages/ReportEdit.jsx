@@ -234,14 +234,17 @@ export default function ReportEdit() {
   }
 
   async function onCancelTicket() {
+    const already = String(report?.ticket_status || '').toUpperCase() === 'CANCELLED';
     if (
       !window.confirm(
-        `Cancel report ${slip}? Sets fields to CANCEL / 0 kg (same as void slips) on cloud and the weighbridge PC.`,
+        already
+          ? `Re-queue cancel for ${slip} on the weighbridge PC?`
+          : `Cancel report ${slip}? Sets fields to CANCEL / 0 kg (same as void slips) on cloud and the weighbridge PC.`,
       )
     ) {
       return;
     }
-    if (!window.confirm(`Confirm cancel ${slip}? This cannot be undone from here.`)) {
+    if (!already && !window.confirm(`Confirm cancel ${slip}? This cannot be undone from here.`)) {
       return;
     }
     setSaving(true);
@@ -250,7 +253,7 @@ export default function ReportEdit() {
     try {
       const result = await api.cancelReport(slip);
       setMessage(
-        `Cancel queued for weighbridge PC (command ${result.command?.id?.slice(0, 8)}…). Status: ${result.command?.status}.`,
+        `${result.requeued ? 'Cancel re-queued' : 'Cancel queued'} for weighbridge PC (command ${result.command?.id?.slice(0, 8)}…). Status: ${result.command?.status}.`,
       );
       const refreshed = await api.getReport(slip);
       const r = refreshed.report;
@@ -463,16 +466,16 @@ export default function ReportEdit() {
           <button type="submit" className="btn-primary" disabled={saving}>
             {saving ? 'Saving…' : 'Save & regenerate on weighbridge'}
           </button>
-          {String(report?.ticket_status || '').toUpperCase() !== 'CANCELLED' && (
-            <button
-              type="button"
-              className="btn-ghost text-amber-300 border border-amber-700/50"
-              disabled={saving}
-              onClick={onCancelTicket}
-            >
-              Cancel ticket (CANCEL / 0 kg)
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn-ghost text-amber-300 border border-amber-700/50"
+            disabled={saving}
+            onClick={onCancelTicket}
+          >
+            {String(report?.ticket_status || '').toUpperCase() === 'CANCELLED'
+              ? 'Re-queue cancel on PC'
+              : 'Cancel ticket (CANCEL / 0 kg)'}
+          </button>
           <button type="button" className="btn-danger" disabled={saving} onClick={onDelete}>
             Delete report
           </button>

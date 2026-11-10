@@ -1393,7 +1393,11 @@ async function resyncRemoteTrip(queryFn, id) {
  * Void a remote trip like Fill Blocked Slips cancel: CANCEL labels, 0 kg,
  * same tare/gross time, CANCELLED status. Caller should enqueue PC edit when synced.
  */
-async function cancelRemoteTrip(queryFn, id, { siteId = getSiteId() } = {}) {
+async function cancelRemoteTrip(
+  queryFn,
+  id,
+  { siteId = getSiteId(), allowAlreadyCancelled = false } = {},
+) {
   const row = await getRemoteTrip(queryFn, id);
   if (!row) {
     const err = new Error('Remote trip not found');
@@ -1401,6 +1405,14 @@ async function cancelRemoteTrip(queryFn, id, { siteId = getSiteId() } = {}) {
     throw err;
   }
   if (String(row.ticket_status || '').toUpperCase() === 'CANCELLED') {
+    if (allowAlreadyCancelled) {
+      return {
+        trip: row,
+        slip_number: String(row.slip_number || '').trim(),
+        wasSynced: Boolean(row.synced_to_local) || Boolean(row.local_id),
+        alreadyCancelled: true,
+      };
+    }
     const err = new Error('Trip is already cancelled');
     err.status = 400;
     throw err;
