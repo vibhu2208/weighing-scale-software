@@ -148,6 +148,13 @@ export const api = {
     });
   },
 
+  cancelReport(slip) {
+    return request(`/reports/${encodeURIComponent(slip)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
   exportCsvUrl(params = {}) {
     const qs = new URLSearchParams(params).toString();
     return `${API_URL}/reports/export/csv?${qs}`;

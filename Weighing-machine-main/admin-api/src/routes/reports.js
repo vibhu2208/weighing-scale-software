@@ -375,4 +375,90 @@ router.post('/:slip/delete', async (req, res) => {
   }
 });
 
+router.post('/:slip/cancel', async (req, res) => {
+  try {
+    const slip = String(req.params.slip || '').trim();
+    if (!slip) return res.status(400).json({ ok: false, error: 'Slip is required' });
+    const siteId = getSiteId();
+    const CANCEL = 'CANCEL';
+
+    const mirrorRes = await query(
+      `SELECT * FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)
+       LIMIT 1`,
+      [siteId, slip],
+    );
+    const mirror = mirrorRes.rows[0] || null;
+    if (mirror && String(mirror.ticket_status || '').toUpperCase() === 'CANCELLED') {
+      return res.status(400).json({ ok: false, error: 'Report is already cancelled' });
+    }
+
+    const timestampIn = mirror?.timestamp_in || mirror?.timestamp_out || new Date().toISOString();
+    const plate = String(mirror?.truck_number || '')
+      .trim()
+      .toUpperCase();
+    const truckNumber = plate && plate !== CANCEL ? plate : CANCEL;
+
+    if (mirror) {
+      await query(
+        `UPDATE transactions_mirror
+         SET ticket_status = 'CANCELLED',
+             material = $3,
+             customer_name = $3,
+             destination = $3,
+             operator_name = $3,
+             truck_number = $4,
+             gross_weight = 0,
+             tare_weight = 0,
+             timestamp_in = $5,
+             timestamp_out = $5,
+             updated_at = now()
+         WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+        [siteId, slip, CANCEL, truckNumber, timestampIn],
+      );
+    }
+
+    // Keep matching remote_trips voided the same way when one exists.
+    try {
+      const rt = await query(
+        `SELECT id, ticket_status FROM remote_trips
+         WHERE UPPER(slip_number) = UPPER($1)
+         LIMIT 1`,
+        [slip],
+      );
+      if (rt.rows[0] && String(rt.rows[0].ticket_status || '').toUpperCase() !== 'CANCELLED') {
+        const { cancelRemoteTrip } = require('../services/remoteTripService');
+        await cancelRemoteTrip(query, rt.rows[0].id);
+      }
+    } catch (err) {
+      console.warn('[reports] remote trip cancel sync failed', err.message);
+    }
+
+    const cmd = await createCommand({
+      type: 'edit_report',
+      payload: {
+        slipNumber: slip,
+        cancel: true,
+        ticket_status: 'CANCELLED',
+        material: CANCEL,
+        customer_name: CANCEL,
+        destination: CANCEL,
+        operator_name: CANCEL,
+        company: CANCEL,
+        gross_weight: 0,
+        tare_weight: 0,
+        truck_number: truckNumber,
+        timestamp_in: timestampIn,
+        timestamp_out: timestampIn,
+      },
+      createdBy: req.user?.email,
+    });
+
+    return res.json({ ok: true, command: cmd, slip_number: slip });
+  } catch (err) {
+    const status = err.status || (/already cancelled/i.test(err.message) ? 400 : 500);
+    return res.status(status).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;

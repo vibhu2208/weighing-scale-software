@@ -233,6 +233,49 @@ export default function ReportEdit() {
     }
   }
 
+  async function onCancelTicket() {
+    if (
+      !window.confirm(
+        `Cancel report ${slip}? Sets fields to CANCEL / 0 kg (same as void slips) on cloud and the weighbridge PC.`,
+      )
+    ) {
+      return;
+    }
+    if (!window.confirm(`Confirm cancel ${slip}? This cannot be undone from here.`)) {
+      return;
+    }
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api.cancelReport(slip);
+      setMessage(
+        `Cancel queued for weighbridge PC (command ${result.command?.id?.slice(0, 8)}…). Status: ${result.command?.status}.`,
+      );
+      const refreshed = await api.getReport(slip);
+      const r = refreshed.report;
+      if (r) {
+        setReport(r);
+        setForm((prev) => ({
+          ...prev,
+          material: r.material || 'CANCEL',
+          customer_name: r.customer_name || 'CANCEL',
+          destination: r.destination || 'CANCEL',
+          operator_name: r.operator_name || 'CANCEL',
+          truck_number: r.truck_number || prev.truck_number,
+          gross_weight: r.gross_weight ?? 0,
+          tare_weight: r.tare_weight ?? 0,
+          timestamp_in: toDatetimeLocalValue(r.timestamp_in),
+          timestamp_out: toDatetimeLocalValue(r.timestamp_out || r.timestamp_in),
+        }));
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) return <p className="text-slate-400">Loading report…</p>;
   if (error && !report) {
     return (
@@ -416,10 +459,20 @@ export default function ReportEdit() {
         {message && <p className="text-sm text-emerald-400">{message}</p>}
         {error && <p className="text-sm text-red-400">{error}</p>}
 
-        <div className="flex gap-2 pt-2">
+        <div className="flex flex-wrap gap-2 pt-2">
           <button type="submit" className="btn-primary" disabled={saving}>
             {saving ? 'Saving…' : 'Save & regenerate on weighbridge'}
           </button>
+          {String(report?.ticket_status || '').toUpperCase() !== 'CANCELLED' && (
+            <button
+              type="button"
+              className="btn-ghost text-amber-300 border border-amber-700/50"
+              disabled={saving}
+              onClick={onCancelTicket}
+            >
+              Cancel ticket (CANCEL / 0 kg)
+            </button>
+          )}
           <button type="button" className="btn-danger" disabled={saving} onClick={onDelete}>
             Delete report
           </button>
