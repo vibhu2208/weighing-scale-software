@@ -11,6 +11,8 @@ const TransactionService = require('./TransactionService');
 const SettingsService = require('./SettingsService');
 const S3Service = require('./S3Service');
 const AdminReportService = require('./AdminReportService');
+const { looksLikeCancelPayload } = require('../utils/cancelPayload');
+const { mergeOptionListValues } = require('../utils/optionListMerge');
 
 let cronJob = null;
 let catchUpJob = null;
@@ -35,6 +37,15 @@ const REMOTE_SAFE_KEYS = new Set([
   'WEIGHBRIDGE_ID',
   'REPORT_COMPANY_NAME',
   'REPORT_LOGO_PATH',
+  'materials_list',
+  'customers_list',
+  'destinations_list',
+  'operators_list',
+  'companies_list',
+]);
+
+/** Option lists: merge cloud into local so PC-added entries are not wiped. */
+const REMOTE_MERGE_LIST_KEYS = new Set([
   'materials_list',
   'customers_list',
   'destinations_list',
@@ -416,31 +427,50 @@ function isTransientS3Error(err) {
   return /timeout|socket|ECONNRESET|ETIMEDOUT|ENOTFOUND|S3 .+ failed after/i.test(msg);
 }
 
+function parseCommandPayload(raw) {
+  let payload = raw;
+  // jsonb may arrive as object, string, or double-encoded string.
+  for (let i = 0; i < 2; i += 1) {
+    if (typeof payload !== 'string') break;
+    try {
+      payload = JSON.parse(payload);
+    } catch (_e) {
+      return {};
+    }
+  }
+  return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+}
+
 async function applyCommand(row) {
-  const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload || {};
-  if (row.type === 'edit_report') {
+  const payload = parseCommandPayload(row.payload);
+  if (row.type === 'edit_report' || row.type === 'cancel_report') {
     // Apply locally first, then refresh mirror. Never delete-before-push:
     // a failed S3/mirror push used to leave admin Reports empty while the
     // command stayed pending / blocked later syncs.
-    const result = await AdminReportService.applyRemoteUpdate(payload);
+    const asCancel = row.type === 'cancel_report' || looksLikeCancelPayload(payload);
+    const result = asCancel
+      ? AdminReportService.applyRemoteCancel(payload)
+      : await AdminReportService.applyRemoteUpdate(payload);
     const lookupSlip = result?.slip_number || payload.newSlipNumber || payload.slipNumber;
     const txn =
       TransactionService.getById(result?.transactionId) ||
       TransactionService.getBySlipNumber(lookupSlip);
-    const wantTruck = String(
-      payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
-    )
-      .trim()
-      .toUpperCase();
-    if (wantTruck) {
-      const gotTruck = String(txn?.truck_number || '').trim().toUpperCase();
-      if (gotTruck !== wantTruck) {
-        throw new Error(
-          `Vehicle number not applied on PC (wanted ${wantTruck}, got ${gotTruck || 'empty'})`,
-        );
+    if (!asCancel) {
+      const wantTruck = String(
+        payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
+      )
+        .trim()
+        .toUpperCase();
+      if (wantTruck) {
+        const gotTruck = String(txn?.truck_number || '').trim().toUpperCase();
+        if (gotTruck !== wantTruck) {
+          throw new Error(
+            `Vehicle number not applied on PC (wanted ${wantTruck}, got ${gotTruck || 'empty'})`,
+          );
+        }
       }
     }
-    if (txn) {
+    if (txn && txn.ticket_status !== 'DELETED') {
       try {
         await pushTransaction(txn);
       } catch (err) {
@@ -484,10 +514,14 @@ async function pullCommands() {
       logger.info('CloudAdminSync command applied', { id: row.id, type: row.type });
     } catch (err) {
       // Keep transient S3 timeouts pending so the next sync cycle retries.
-      if (row.type === 'edit_report' && isTransientS3Error(err)) {
+      if (
+        (row.type === 'edit_report' || row.type === 'cancel_report') &&
+        isTransientS3Error(err)
+      ) {
         await markCommand(row.id, 'pending', `retry: ${err.message}`);
-        logger.warn('CloudAdminSync edit_report deferred (S3 timeout) — will retry', {
+        logger.warn('CloudAdminSync report command deferred (S3 timeout) — will retry', {
           id: row.id,
+          type: row.type,
           message: err.message,
         });
         continue;
@@ -517,6 +551,16 @@ async function pullSettings() {
         }
       } catch (_e) {
         /* optional */
+      }
+      continue;
+    }
+
+    if (REMOTE_MERGE_LIST_KEYS.has(row.key)) {
+      const local = SettingsService.get(row.key);
+      const merged = mergeOptionListValues(local, row.value);
+      if (local !== merged) {
+        SettingsService.set(row.key, merged);
+        logger.info('CloudAdminSync merged option list', { key: row.key });
       }
       continue;
     }

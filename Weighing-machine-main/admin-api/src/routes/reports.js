@@ -21,6 +21,39 @@ const {
   attachMediaUrls,
   hydratePhotoKeys,
 } = require('../services/reportMedia');
+const { getAdvanceSettings } = require('../services/settingsService');
+
+async function reportCompanyName() {
+  try {
+    const settings = await getAdvanceSettings();
+    return (
+      String(settings.REPORT_COMPANY_NAME || '').trim() || 'DAYA CHARAN & COMPANY'
+    );
+  } catch {
+    return 'DAYA CHARAN & COMPANY';
+  }
+}
+
+function styleWeighbridgeHeader(ws) {
+  const headerRow = ws.getRow(1);
+  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF1E40AF' },
+  };
+  headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+  headerRow.height = 22;
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  ws.columns.forEach((column) => {
+    let maxLength = 10;
+    column.eachCell({ includeEmpty: true }, (cell) => {
+      const len = cell.value ? String(cell.value).length : 0;
+      if (len > maxLength) maxLength = len;
+    });
+    column.width = Math.min(maxLength + 2, 40);
+  });
+}
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -56,6 +89,7 @@ router.get('/filters', async (_req, res) => {
 router.get('/export/csv', async (req, res) => {
   try {
     const siteId = getSiteId();
+    const company = await reportCompanyName();
     const { where, params } = buildWhere(siteId, req.query || {});
     const result = await query(
       `SELECT * FROM (
@@ -68,7 +102,11 @@ router.get('/export/csv', async (req, res) => {
     );
     const lines = [EXPORT_HEADERS.map((h) => `"${h}"`).join(',')];
     for (const row of result.rows) {
-      lines.push(formatExportRow(row).map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+      lines.push(
+        formatExportRow(row, company)
+          .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+          .join(','),
+      );
     }
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="weighbridge-report.csv"');
@@ -81,6 +119,7 @@ router.get('/export/csv', async (req, res) => {
 router.get('/export/excel', async (req, res) => {
   try {
     const siteId = getSiteId();
+    const company = await reportCompanyName();
     const { where, params } = buildWhere(siteId, req.query || {});
     const result = await query(
       `SELECT * FROM (
@@ -95,8 +134,9 @@ router.get('/export/excel', async (req, res) => {
     const ws = wb.addWorksheet('Reports');
     ws.addRow(EXPORT_HEADERS);
     for (const row of result.rows) {
-      ws.addRow(formatExportRow(row));
+      ws.addRow(formatExportRow(row, company));
     }
+    styleWeighbridgeHeader(ws);
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -330,6 +370,97 @@ router.post('/:slip/delete', async (req, res) => {
       createdBy: req.user?.email,
     });
     return res.json({ ok: true, command: cmd });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+router.post('/:slip/cancel', async (req, res) => {
+  try {
+    const slip = String(req.params.slip || '').trim();
+    if (!slip) return res.status(400).json({ ok: false, error: 'Slip is required' });
+    const siteId = getSiteId();
+    const CANCEL = 'CANCEL';
+
+    const mirrorRes = await query(
+      `SELECT * FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)
+       LIMIT 1`,
+      [siteId, slip],
+    );
+    const mirror = mirrorRes.rows[0] || null;
+    // Already-cancelled cloud rows still get a fresh PC command (failed/stuck sync).
+    const alreadyCancelled =
+      mirror && String(mirror.ticket_status || '').toUpperCase() === 'CANCELLED';
+
+    const timestampIn = mirror?.timestamp_in || mirror?.timestamp_out || new Date().toISOString();
+    const plate = String(mirror?.truck_number || '')
+      .trim()
+      .toUpperCase();
+    const truckNumber = plate && plate !== CANCEL ? plate : CANCEL;
+
+    if (mirror && !alreadyCancelled) {
+      await query(
+        `UPDATE transactions_mirror
+         SET ticket_status = 'CANCELLED',
+             material = $3,
+             customer_name = $3,
+             destination = $3,
+             operator_name = $3,
+             truck_number = $4,
+             gross_weight = 0,
+             tare_weight = 0,
+             timestamp_in = $5,
+             timestamp_out = $5,
+             updated_at = now()
+         WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+        [siteId, slip, CANCEL, truckNumber, timestampIn],
+      );
+    }
+
+    // Keep matching remote_trips voided the same way when one exists.
+    try {
+      const rt = await query(
+        `SELECT id, ticket_status FROM remote_trips
+         WHERE UPPER(slip_number) = UPPER($1)
+         LIMIT 1`,
+        [slip],
+      );
+      if (rt.rows[0]) {
+        const { cancelRemoteTrip } = require('../services/remoteTripService');
+        await cancelRemoteTrip(query, rt.rows[0].id, { allowAlreadyCancelled: true });
+      }
+    } catch (err) {
+      console.warn('[reports] remote trip cancel sync failed', err.message);
+    }
+
+    const cmd = await createCommand({
+      // Dedicated type so PC never runs cancel voids through weight validation.
+      type: 'cancel_report',
+      payload: {
+        slipNumber: slip,
+        cancel: true,
+        ticket_status: 'CANCELLED',
+        material: CANCEL,
+        customer_name: CANCEL,
+        destination: CANCEL,
+        operator_name: CANCEL,
+        company: CANCEL,
+        gross_weight: 0,
+        tare_weight: 0,
+        truck_number: truckNumber,
+        timestamp_in: timestampIn,
+        timestamp_out: timestampIn,
+      },
+      createdBy: req.user?.email,
+    });
+
+    return res.json({
+      ok: true,
+      command: cmd,
+      slip_number: slip,
+      requeued: Boolean(alreadyCancelled),
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

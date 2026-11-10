@@ -543,9 +543,21 @@ const NEIGHBOR_SLIP_RANGE = 1000;
  * Blocked (held, unfilled) slips with the nearest real ticket below and above
  * each one, so a fill can place its first-weigh time between them. Held slips
  * have no ticket yet, so runs of consecutive blocked slips share neighbours.
+ * Optional `from` / `to` ISO bounds filter on COALESCE(blocked_at, planned_at).
  */
-async function listHeldWithNeighbors() {
+async function listHeldWithNeighbors(filters = {}) {
   await ensureSchema();
+  const params = [getSiteId(), NEIGHBOR_SLIP_RANGE];
+  const dateClauses = [];
+  if (filters.from) {
+    params.push(filters.from);
+    dateClauses.push(`COALESCE(r.blocked_at, r.planned_at) >= $${params.length}`);
+  }
+  if (filters.to) {
+    params.push(filters.to);
+    dateClauses.push(`COALESCE(r.blocked_at, r.planned_at) <= $${params.length}`);
+  }
+  const dateSql = dateClauses.length ? ` AND ${dateClauses.join(' AND ')}` : '';
   const res = await query(
     `WITH held AS (
        SELECT r.id, r.slip_number, r.planned_at, r.note, r.blocked_at,
@@ -554,19 +566,20 @@ async function listHeldWithNeighbors() {
        WHERE r.status = 'held'
          AND r.slip_number ~* '^WB[0-9]+$'
          AND NOT EXISTS (SELECT 1 ${weighbridgeTicketOnSlipSql('$1')})
+         ${dateSql}
      ),
      bounds AS (
        SELECT MIN(n) - $2 AS lo, MAX(n) + $2 AS hi FROM held
      ),
      tickets AS (
-       SELECT t.slip_number, t.timestamp_in, t.operator_name, t.n
+       SELECT t.slip_number, t.timestamp_in, t.timestamp_out, t.operator_name, t.n
        FROM (
-         SELECT UPPER(m.slip_number) AS slip_number, m.timestamp_in, m.operator_name,
+         SELECT UPPER(m.slip_number) AS slip_number, m.timestamp_in, m.timestamp_out, m.operator_name,
                 CAST(substring(m.slip_number from '[0-9]+$') AS bigint) AS n
          FROM transactions_mirror m
          WHERE m.site_id = $1 AND m.slip_number ~* '^WB[0-9]+$' AND m.timestamp_in IS NOT NULL
          UNION
-         SELECT UPPER(rt.slip_number), rt.timestamp_in, rt.operator_name,
+         SELECT UPPER(rt.slip_number), rt.timestamp_in, rt.timestamp_out, rt.operator_name,
                 CAST(substring(rt.slip_number from '[0-9]+$') AS bigint)
          FROM remote_trips rt
          WHERE rt.slip_number ~* '^WB[0-9]+$' AND rt.timestamp_in IS NOT NULL
@@ -574,23 +587,25 @@ async function listHeldWithNeighbors() {
        WHERE t.n BETWEEN b.lo AND b.hi
      )
      SELECT h.id, h.slip_number, h.planned_at, h.note, h.blocked_at,
-            p.slip_number AS prev_slip, p.timestamp_in AS prev_in, p.operator_name AS prev_operator,
-            x.slip_number AS next_slip, x.timestamp_in AS next_in, x.operator_name AS next_operator
+            p.slip_number AS prev_slip, p.timestamp_in AS prev_in, p.timestamp_out AS prev_out,
+            p.operator_name AS prev_operator,
+            x.slip_number AS next_slip, x.timestamp_in AS next_in, x.timestamp_out AS next_out,
+            x.operator_name AS next_operator
      FROM held h
      LEFT JOIN LATERAL (
-       SELECT slip_number, timestamp_in, operator_name FROM tickets t
+       SELECT slip_number, timestamp_in, timestamp_out, operator_name FROM tickets t
        WHERE t.n < h.n
        ORDER BY t.n DESC, (t.operator_name IS NULL OR t.operator_name = ''), t.timestamp_in DESC
        LIMIT 1
      ) p ON true
      LEFT JOIN LATERAL (
-       SELECT slip_number, timestamp_in, operator_name FROM tickets t
+       SELECT slip_number, timestamp_in, timestamp_out, operator_name FROM tickets t
        WHERE t.n > h.n
        ORDER BY t.n ASC, (t.operator_name IS NULL OR t.operator_name = ''), t.timestamp_in ASC
        LIMIT 1
      ) x ON true
      ORDER BY h.n ASC`,
-    [getSiteId(), NEIGHBOR_SLIP_RANGE],
+    params,
   );
   return (res.rows || []).map((r) => ({
     id: r.id,
@@ -599,10 +614,20 @@ async function listHeldWithNeighbors() {
     note: r.note,
     blocked_at: r.blocked_at,
     prev: r.prev_slip
-      ? { slip_number: r.prev_slip, timestamp_in: r.prev_in, operator_name: r.prev_operator || null }
+      ? {
+          slip_number: r.prev_slip,
+          timestamp_in: r.prev_in,
+          timestamp_out: r.prev_out || null,
+          operator_name: r.prev_operator || null,
+        }
       : null,
     next: r.next_slip
-      ? { slip_number: r.next_slip, timestamp_in: r.next_in, operator_name: r.next_operator || null }
+      ? {
+          slip_number: r.next_slip,
+          timestamp_in: r.next_in,
+          timestamp_out: r.next_out || null,
+          operator_name: r.next_operator || null,
+        }
       : null,
   }));
 }

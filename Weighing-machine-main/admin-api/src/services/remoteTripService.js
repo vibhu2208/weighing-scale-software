@@ -8,6 +8,17 @@ const ALLOWED_VEHICLE_TYPES = ['HYWA', 'TRUCK', 'TANKER', 'CONTAINER'];
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
 const SLIP_RE = /^WB[0-9]+$/;
 const MAX_WEIGHT_KG = 200000;
+const CANCEL_LABEL = 'CANCEL';
+
+function isCancelToken(value) {
+  return compactToken(value) === CANCEL_LABEL;
+}
+
+function normalizeTicketStatus(status) {
+  const s = String(status || 'CLOSED').trim().toUpperCase();
+  if (s === 'OPEN' || s === 'CANCELLED') return s;
+  return 'CLOSED';
+}
 
 function compactToken(value) {
   return String(value || '')
@@ -51,14 +62,15 @@ function looksLikeWeightText(value) {
   return Number.isFinite(n) && n > 0 && n <= MAX_WEIGHT_KG;
 }
 
-function readWeightKg(value, fieldName, errors, key) {
+function readWeightKg(value, fieldName, errors, key, { allowZero = false } = {}) {
   if (value === null || value === undefined || String(value).trim() === '') {
     errors[key] = `${fieldName} is required`;
     return null;
   }
   const n = Math.round(Number(value));
-  if (!Number.isFinite(n) || n <= 0 || n > MAX_WEIGHT_KG) {
-    errors[key] = `${fieldName} must be a weight from 1 to ${MAX_WEIGHT_KG} kg`;
+  const min = allowZero ? 0 : 1;
+  if (!Number.isFinite(n) || n < min || n > MAX_WEIGHT_KG) {
+    errors[key] = `${fieldName} must be a weight from ${min} to ${MAX_WEIGHT_KG} kg`;
     return null;
   }
   return n;
@@ -118,11 +130,13 @@ function readMaster(raw, fieldName, listName, lists, errors, key) {
  */
 function validateRemoteTripFields(body = {}, lists = {}) {
   const errors = {};
-  const openStatus = String(body.ticket_status || 'CLOSED').trim().toUpperCase();
-  if (openStatus !== 'OPEN' && openStatus !== 'CLOSED') {
-    errors.ticket_status = 'Ticket must be Open or Closed';
+  const rawStatus = String(body.ticket_status || 'CLOSED').trim().toUpperCase();
+  if (rawStatus !== 'OPEN' && rawStatus !== 'CLOSED' && rawStatus !== 'CANCELLED') {
+    errors.ticket_status = 'Ticket must be Open, Closed, or Cancelled';
   }
-  const open = openStatus === 'OPEN';
+  const ticketStatus = normalizeTicketStatus(rawStatus);
+  const open = ticketStatus === 'OPEN';
+  const cancelled = ticketStatus === 'CANCELLED';
 
   const vehicleType = String(body.vehicle_type || '').trim().toUpperCase();
   if (!ALLOWED_VEHICLE_TYPES.includes(vehicleType)) {
@@ -139,8 +153,11 @@ function validateRemoteTripFields(body = {}, lists = {}) {
   }
 
   const plate = compactToken(body.truck_number);
+  const cancelPlate = cancelled && isCancelToken(plate);
   if (!plate) {
     errors.truck_number = 'Vehicle number is required';
+  } else if (cancelPlate) {
+    // Cancelled tickets may use CANCEL instead of a registration.
   } else if (!PLATE_RE.test(plate)) {
     errors.truck_number =
       'Vehicle number must be a registration (e.g. HR38AH6118)';
@@ -165,9 +182,13 @@ function validateRemoteTripFields(body = {}, lists = {}) {
     }
     tare = readWeightKg(body.tare_weight, 'Tare weight', errors, 'tare_weight');
   } else {
-    gross = readWeightKg(body.gross_weight, 'Gross weight', errors, 'gross_weight');
-    tare = readWeightKg(body.tare_weight, 'Tare weight', errors, 'tare_weight');
-    if (gross != null && tare != null && gross <= tare) {
+    gross = readWeightKg(body.gross_weight, 'Gross weight', errors, 'gross_weight', {
+      allowZero: cancelled,
+    });
+    tare = readWeightKg(body.tare_weight, 'Tare weight', errors, 'tare_weight', {
+      allowZero: cancelled,
+    });
+    if (gross != null && tare != null && !(cancelled && gross === 0 && tare === 0) && gross <= tare) {
       errors.gross_weight = 'Gross weight must be greater than tare weight';
     }
   }
@@ -179,6 +200,9 @@ function validateRemoteTripFields(body = {}, lists = {}) {
     if (body.timestamp_out) {
       errors.timestamp_out = 'An open ticket carries the first weigh time only';
     }
+  } else if (cancelled) {
+    // Void slips have one weigh event — gross time is the tare time.
+    timestampOut = timestampIn;
   } else {
     const outLabel = hywa ? 'Tare time' : 'Close time';
     timestampOut = readRequiredTime(body.timestamp_out, outLabel, errors, 'timestamp_out');
@@ -215,36 +239,44 @@ function validateRemoteTripFields(body = {}, lists = {}) {
     }
   }
 
-  const material = readMaster(body.material, 'Material', 'materials', lists, errors, 'material');
-  const customer = readMaster(
-    body.customer_name,
-    'Customer',
-    'customers',
-    lists,
-    errors,
-    'customer_name',
-  );
-  const destination = readMaster(
-    body.destination,
-    'Destination',
-    'destinations',
-    lists,
-    errors,
-    'destination',
-  );
-  const operator = readMaster(
-    body.operator_name,
-    'Operator',
-    'operators',
-    lists,
-    errors,
-    'operator_name',
-  );
+  const material = cancelled && isCancelToken(body.material)
+    ? CANCEL_LABEL
+    : readMaster(body.material, 'Material', 'materials', lists, errors, 'material');
+  const customer = cancelled && isCancelToken(body.customer_name)
+    ? CANCEL_LABEL
+    : readMaster(
+        body.customer_name,
+        'Customer',
+        'customers',
+        lists,
+        errors,
+        'customer_name',
+      );
+  const destination = cancelled && isCancelToken(body.destination)
+    ? CANCEL_LABEL
+    : readMaster(
+        body.destination,
+        'Destination',
+        'destinations',
+        lists,
+        errors,
+        'destination',
+      );
+  const operator = cancelled && isCancelToken(body.operator_name)
+    ? CANCEL_LABEL
+    : readMaster(
+        body.operator_name,
+        'Operator',
+        'operators',
+        lists,
+        errors,
+        'operator_name',
+      );
 
   return {
     errors,
     values: {
-      truck_number: plate,
+      truck_number: cancelPlate ? CANCEL_LABEL : plate,
       customer_name: customer,
       destination,
       material,
@@ -253,8 +285,8 @@ function validateRemoteTripFields(body = {}, lists = {}) {
       gross_weight: gross,
       timestamp_in: timestampIn,
       timestamp_out: timestampOut,
-      ticket_status: open ? 'OPEN' : 'CLOSED',
-      status: open ? 'weighing' : 'captured',
+      ticket_status: ticketStatus,
+      status: cancelled ? 'cancelled' : open ? 'weighing' : 'captured',
       rfid_tag: rfid || null,
       transporter: transporter || null,
       vehicle_type: ALLOWED_VEHICLE_TYPES.includes(vehicleType) ? vehicleType : null,
@@ -279,6 +311,7 @@ function buildCreatePayload(body = {}, lists = {}) {
   if (messages.length) throw new Error(messages.join(' '));
 
   const open = values.ticket_status === 'OPEN';
+  const cancelled = values.ticket_status === 'CANCELLED';
   const payload = {
     truck_number: values.truck_number,
     customer_name: values.customer_name,
@@ -298,6 +331,9 @@ function buildCreatePayload(body = {}, lists = {}) {
 
   if (open) {
     // Open tickets are not posted to MCG until the weighbridge closes them.
+    payload.mcg_status = 'skipped';
+  }
+  if (cancelled) {
     payload.mcg_status = 'skipped';
   }
 
@@ -947,7 +983,7 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId()) {
       row.departure_photo_2 || null,
       row.departure_photo_3 || null,
       row.report_s3_key || null,
-      String(row.ticket_status || 'CLOSED').toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSED',
+      normalizeTicketStatus(row.ticket_status),
     ],
   );
   return res.rows[0] || null;
@@ -1308,6 +1344,148 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   return trip;
 }
 
+/**
+ * Clear PC sync flags so the weighbridge re-imports this remote trip.
+ */
+async function resyncRemoteTrip(queryFn, id) {
+  const row = await getRemoteTrip(queryFn, id);
+  if (!row) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!row.synced_to_local) {
+    const err = new Error('Trip is not synced');
+    err.status = 400;
+    throw err;
+  }
+  if (isHeldUntilOutTime(row)) {
+    const err = new Error('Trip is waiting until close time');
+    err.status = 400;
+    throw err;
+  }
+
+  const res = await queryFn(
+    `UPDATE remote_trips
+     SET synced_to_local = false,
+         synced_at = NULL,
+         local_id = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id],
+  );
+  const trip = res.rows[0];
+  if (!trip) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    await queryFn(`SELECT pg_notify('new_remote_trip', $1)`, [String(trip.id)]);
+  } catch (err) {
+    console.warn('[remoteTrip] resync notify failed', err.message);
+  }
+  return trip;
+}
+
+/**
+ * Void a remote trip like Fill Blocked Slips cancel: CANCEL labels, 0 kg,
+ * same tare/gross time, CANCELLED status. Caller should enqueue PC edit when synced.
+ */
+async function cancelRemoteTrip(
+  queryFn,
+  id,
+  { siteId = getSiteId(), allowAlreadyCancelled = false } = {},
+) {
+  const row = await getRemoteTrip(queryFn, id);
+  if (!row) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+  if (String(row.ticket_status || '').toUpperCase() === 'CANCELLED') {
+    if (allowAlreadyCancelled) {
+      return {
+        trip: row,
+        slip_number: String(row.slip_number || '').trim(),
+        wasSynced: Boolean(row.synced_to_local) || Boolean(row.local_id),
+        alreadyCancelled: true,
+      };
+    }
+    const err = new Error('Trip is already cancelled');
+    err.status = 400;
+    throw err;
+  }
+
+  const slip = String(row.slip_number || '').trim();
+  const wasSynced = Boolean(row.synced_to_local) || Boolean(row.local_id);
+  const plate = compactToken(row.truck_number);
+  const truckNumber = plate && !isCancelToken(plate) ? plate : CANCEL_LABEL;
+  const timestampIn = row.timestamp_in || row.timestamp_out || new Date().toISOString();
+
+  const res = await queryFn(
+    `UPDATE remote_trips
+     SET ticket_status = 'CANCELLED',
+         status = 'cancelled',
+         material = $2,
+         customer_name = $2,
+         destination = $2,
+         operator_name = $2,
+         truck_number = $3,
+         gross_weight = 0,
+         tare_weight = 0,
+         timestamp_in = $4,
+         timestamp_out = $4,
+         mcg_status = 'skipped',
+         mcg_error = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id, CANCEL_LABEL, truckNumber, timestampIn],
+  );
+  const trip = res.rows[0];
+  if (!trip) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    await upsertMirrorFromRemoteTrip(queryFn, trip, siteId);
+  } catch (err) {
+    console.warn('[remoteTrip] mirror upsert on cancel failed', err.message);
+  }
+
+  return { trip, slip_number: slip, wasSynced };
+}
+
+/**
+ * Permanently remove a remote trip and its mirror row.
+ * Caller should enqueue delete_report when wasSynced is true.
+ */
+async function deleteRemoteTrip(queryFn, id, { siteId = getSiteId() } = {}) {
+  const row = await getRemoteTrip(queryFn, id);
+  if (!row) {
+    const err = new Error('Remote trip not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const slip = String(row.slip_number || '').trim();
+  const wasSynced = Boolean(row.synced_to_local);
+
+  await queryFn(`DELETE FROM remote_trips WHERE id = $1`, [id]);
+  if (slip) {
+    await queryFn(
+      `DELETE FROM transactions_mirror
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+      [siteId, slip],
+    );
+  }
+
+  return { slip_number: slip, wasSynced };
+}
+
 module.exports = {
   buildCreatePayload,
   validateRemoteTripFields,
@@ -1317,6 +1495,9 @@ module.exports = {
   listRemoteTrips,
   getRemoteTrip,
   attachPhotos,
+  resyncRemoteTrip,
+  cancelRemoteTrip,
+  deleteRemoteTrip,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,
   reconcileRemoteTripsFromMirror,

@@ -151,7 +151,31 @@ async function getFilterOptions(queryFn, siteId) {
   };
 }
 
-function formatExportRow(row) {
+function isHywa(vehicleType) {
+  return String(vehicleType || '')
+    .trim()
+    .toLowerCase() === 'hywa';
+}
+
+/** Same mapping as weighbridge ReportService / vehicleTypes helpers. */
+function grossWeightTimestamp(row) {
+  return isHywa(row?.vehicle_type) ? row?.timestamp_in : row?.timestamp_out;
+}
+
+function tareWeightTimestamp(row) {
+  return isHywa(row?.vehicle_type) ? row?.timestamp_out : row?.timestamp_in;
+}
+
+function reportListingTimestamp(row) {
+  if (!row) return null;
+  if (String(row.ticket_status || '').toUpperCase() === 'CLOSED') {
+    return row.timestamp_out || row.updated_at || null;
+  }
+  return row.timestamp_out || row.timestamp_in || null;
+}
+
+/** Match weighbridge Excel: DD/MM/YYYY and HH:mm:ss local. */
+function formatExportRow(row, companyName = 'DAYA CHARAN & COMPANY') {
   const fmtDate = (iso) => {
     if (!iso) return { date: '', time: '' };
     const d = new Date(iso);
@@ -159,19 +183,20 @@ function formatExportRow(row) {
     const pad = (n) => String(n).padStart(2, '0');
     return {
       date: `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`,
-      time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+      time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
     };
   };
-  const gross = fmtDate(row.timestamp_out);
-  const tare = fmtDate(row.timestamp_in);
-  const net = fmtDate(row.timestamp_out);
-  const entry = fmtDate(row.timestamp_in);
+  const gross = fmtDate(grossWeightTimestamp(row));
+  const tare = fmtDate(tareWeightTimestamp(row));
+  const net = fmtDate(reportListingTimestamp(row));
+  const reportCompany =
+    String(companyName || '').trim() || 'DAYA CHARAN & COMPANY';
   return [
     row.slip_number || '',
     row.customer_name || '',
     row.truck_number || '',
     row.material || '',
-    row.customer_name || '',
+    reportCompany,
     row.operator_name || '',
     row.destination || '',
     row.gross_weight ?? '',
@@ -183,7 +208,7 @@ function formatExportRow(row) {
     tare.time,
     net.date,
     net.time,
-    entry.date,
+    net.date,
   ];
 }
 

@@ -62,6 +62,10 @@ function isOpenRemoteRow(row) {
   return String(row?.ticket_status || '').toUpperCase() === 'OPEN';
 }
 
+function isCancelledRemoteRow(row) {
+  return String(row?.ticket_status || '').toUpperCase() === 'CANCELLED';
+}
+
 function localPhotoExists(filePath) {
   if (!filePath) return false;
   try {
@@ -298,7 +302,7 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       vehicleNumber: truckNumber,
     });
     const key = String(s3Key).trim();
-    if (localPhotoExists(localPath)) {
+    if (localPhotoExists(localPath) && isJpegFile(localPath)) {
       paths[slot.col] = localPath;
       usedS3Keys[slot.col] = key;
       continue;
@@ -317,7 +321,7 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       date,
       { vehicleNumber: truckNumber },
     );
-    if (localPhotoExists(localPath)) {
+    if (localPhotoExists(localPath) && isJpegFile(localPath)) {
       paths[inferred.col] = localPath;
       usedS3Keys[inferred.col] = s3Key;
       continue;
@@ -362,12 +366,21 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
   return { ...paths, report_path: reportPath, _s3Keys: usedS3Keys };
 }
 
-function assertPhotosReady(row, photoPaths) {
+async function s3PhotoStillAvailable(s3Key) {
+  if (!isS3ObjectKey(s3Key) || !S3Service.isConfigured()) return false;
+  try {
+    return await S3Service.objectExists(s3Key);
+  } catch (_e) {
+    return false;
+  }
+}
+
+async function assertPhotosReady(row, photoPaths) {
   const missing = [];
   for (const slot of PHOTO_SLOTS) {
     const key = row[slot.col];
     if (!isS3ObjectKey(key)) continue;
-    if (!localPhotoExists(photoPaths?.[slot.col])) missing.push(slot.col);
+    if (!localPhotoExists(photoPaths?.[slot.col])) missing.push(slot);
   }
   if (!missing.length) {
     photoMissCounts.delete(row.id);
@@ -375,15 +388,27 @@ function assertPhotosReady(row, photoPaths) {
   }
   const attempt = (photoMissCounts.get(row.id) || 0) + 1;
   photoMissCounts.set(row.id, attempt);
-  if (attempt <= MAX_PHOTO_MISS_CYCLES) {
+
+  let availableOnS3 = false;
+  for (const slot of missing) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await s3PhotoStillAvailable(row[slot.col])) {
+      availableOnS3 = true;
+      break;
+    }
+  }
+
+  if (availableOnS3 || attempt <= MAX_PHOTO_MISS_CYCLES) {
     throw new Error(
-      `Photos not on the weighbridge yet for ${row.slip_number}: ${missing.join(', ')} (attempt ${attempt})`,
+      `Photos not on the weighbridge yet for ${row.slip_number}: ${missing
+        .map((slot) => slot.col)
+        .join(', ')} (attempt ${attempt})`,
     );
   }
   logger.error('Remote trip continuing with photos still missing', {
     remoteId: row.id,
     slip: row.slip_number,
-    missing,
+    missing: missing.map((slot) => slot.col),
   });
 }
 
@@ -436,7 +461,8 @@ function applyLocalPhotoUpdates(txn, photoPaths) {
     for (const slot of PHOTO_SLOTS.filter((item) => item.pass === pass)) {
       const nextPath = photoPaths[slot.col];
       if (!localPhotoExists(nextPath)) continue;
-      if (localPhotoExists(txn[slot.col])) continue;
+      const existing = txn[slot.col];
+      if (localPhotoExists(existing) && !isS3ObjectKey(existing)) continue;
       updates[slot.col] = nextPath;
       newSnapshots.push({
         id: slot.cam,
@@ -637,12 +663,43 @@ async function markRemoteTripSynced(remoteId, localId, mcgResult, row = {}) {
 async function processRemoteRow(row, attempt = 0) {
   const remoteId = row.id;
 
+  // Admin Remove can delete the RDS row while this process still holds a stale
+  // in-memory copy from loadPendingRows(). Re-check before creating a local ticket.
+  try {
+    const live = await pg.query('SELECT id FROM remote_trips WHERE id = $1 LIMIT 1', [remoteId]);
+    if (!live.rows[0]) {
+      pendingLocalIds.delete(remoteId);
+      photoMissCounts.delete(remoteId);
+      logger.info('Remote trip disappeared before import — skipping', {
+        remoteId,
+        slip: row.slip_number,
+      });
+      return { ok: true, reason: 'remote_deleted' };
+    }
+  } catch (err) {
+    logger.warn('Remote trip existence check failed', {
+      remoteId,
+      message: err.message,
+    });
+  }
+
   const alreadyImported = TransactionService.getByRemotePgId(remoteId);
   if (alreadyImported) {
+    // Soft-deleted locals must not be revived by photo sync / mirror push.
+    if (String(alreadyImported.ticket_status || '').toUpperCase() === 'DELETED') {
+      pendingLocalIds.delete(remoteId);
+      photoMissCounts.delete(remoteId);
+      logger.info('Remote trip matches a deleted local ticket — skipping revive', {
+        remoteId,
+        slip: row.slip_number,
+        localId: alreadyImported.id,
+      });
+      return { ok: true, reason: 'local_deleted', transactionId: alreadyImported.id };
+    }
     const photoSync = await syncImportedTripPhotos(row, alreadyImported, {
       regeneratePdf: !isOpenRemoteRow(row),
     });
-    assertPhotosReady(row, photoSync.localPaths);
+    await assertPhotosReady(row, photoSync.localPaths);
     const marked = await markRemoteTripSynced(remoteId, alreadyImported.id, {
       ok: true,
       skipped: true,
@@ -680,10 +737,11 @@ async function processRemoteRow(row, attempt = 0) {
   pendingLocalIds.set(remoteId, localTxnId);
   const extraKeys = await collectCandidateS3Keys(row);
   const photoPaths = await downloadRemotePhotos(row, localTxnId, extraKeys);
-  assertPhotosReady(row, photoPaths);
+  await assertPhotosReady(row, photoPaths);
   const vType = row.vehicle_type ? String(row.vehicle_type).trim() : 'HYWA';
 
   const openTicket = isOpenRemoteRow(row);
+  const cancelledTicket = isCancelledRemoteRow(row);
   const importResult = openTicket
     ? TransactionService.importOpenTrip({
         id: localTxnId,
@@ -715,7 +773,11 @@ async function processRemoteRow(row, attempt = 0) {
         material: row.material,
         operator_name: row.operator_name,
         // Remote trips are DCC-only — never import as another company
-        company: 'DCC',
+        company: cancelledTicket ? 'CANCEL' : 'DCC',
+        ticket_status: cancelledTicket ? 'CANCELLED' : 'CLOSED',
+        status: cancelledTicket ? 'cancelled' : undefined,
+        notes: cancelledTicket ? 'Cancelled ticket' : null,
+        driver: cancelledTicket ? 'CANCEL' : null,
         gross_weight: row.gross_weight,
         tare_weight: row.tare_weight,
         timestamp_in: toIso(row.timestamp_in),
@@ -735,28 +797,31 @@ async function processRemoteRow(row, attempt = 0) {
   }
 
   // Ensure vehicle type is set (HYWA needs timestamp_in = gross on reports).
-  try {
-    const VehicleService = require('./VehicleService');
-    const existing = VehicleService.findByNumber(row.truck_number);
-    if (!existing) {
-      VehicleService.create({
-        vehicle_number: row.truck_number,
-        rfid_tag: row.rfid_tag || null,
-        transporter: row.transporter || null,
-        vehicle_type: vType,
-        status: 'active',
+  const cancelVehicle = String(row.truck_number || '').trim().toUpperCase() === 'CANCEL';
+  if (!cancelledTicket && !cancelVehicle) {
+    try {
+      const VehicleService = require('./VehicleService');
+      const existing = VehicleService.findByNumber(row.truck_number);
+      if (!existing) {
+        VehicleService.create({
+          vehicle_number: row.truck_number,
+          rfid_tag: row.rfid_tag || null,
+          transporter: row.transporter || null,
+          vehicle_type: vType,
+          status: 'active',
+        });
+      } else if (
+        vType &&
+        String(existing.vehicle_type || '').toLowerCase() !== vType.toLowerCase()
+      ) {
+        VehicleService.update(existing.id, { vehicle_type: vType });
+      }
+    } catch (err) {
+      logger.warn('Remote trip vehicle type sync failed', {
+        truck: row.truck_number,
+        message: err.message,
       });
-    } else if (
-      vType &&
-      String(existing.vehicle_type || '').toLowerCase() !== vType.toLowerCase()
-    ) {
-      VehicleService.update(existing.id, { vehicle_type: vType });
     }
-  } catch (err) {
-    logger.warn('Remote trip vehicle type sync failed', {
-      truck: row.truck_number,
-      message: err.message,
-    });
   }
 
   if (!importResult.imported && transaction.remote_pg_id !== remoteId) {
@@ -779,9 +844,9 @@ async function processRemoteRow(row, attempt = 0) {
   let mcgResult = {
     ok: true,
     skipped: true,
-    reason: openTicket ? 'open_ticket' : 'already_sent',
+    reason: openTicket ? 'open_ticket' : cancelledTicket ? 'cancelled_ticket' : 'already_sent',
   };
-  if (!openTicket && row.mcg_status !== 'sent') {
+  if (!openTicket && !cancelledTicket && row.mcg_status !== 'sent') {
     try {
       mcgResult = await McgPortalService.postClosedTicket(transaction.id);
     } catch (err) {

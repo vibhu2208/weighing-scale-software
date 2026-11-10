@@ -17,8 +17,9 @@ const {
   setPassSnapshots,
 } = require('../utils/tripPhotos');
 const { resolveVehicleType, isHywa } = require('../utils/vehicleTypes');
-const { TICKET_STATUS } = require('../utils/constants');
+const { TICKET_STATUS, TRANSACTION_STATUS } = require('../utils/constants');
 const { toPublicTransaction } = require('../utils/transactionPublic');
+const { looksLikeCancelPayload } = require('../utils/cancelPayload');
 const logger = require('../utils/logger');
 
 const { getDb } = require('../database/db');
@@ -147,6 +148,11 @@ function getClosedReportBySlip(slipNumber) {
 }
 
 async function performClosedReportUpdate(data = {}) {
+  // Never validate cancel voids (0 kg) as normal weight edits.
+  if (looksLikeCancelPayload(data)) {
+    return applyRemoteCancel({ ...data, cancel: true, remote: !!data.remote });
+  }
+
   const slip = String(data.slipNumber || '').trim() || String(data.slip_number || '').trim();
   const txn = requireClosedReport(
     data.transactionId
@@ -163,21 +169,32 @@ async function performClosedReportUpdate(data = {}) {
 
   if (data.gross_weight != null && data.gross_weight !== '') {
     const gross = Math.round(Number(data.gross_weight));
-    if (!Number.isFinite(gross) || gross <= 0) throw new Error('Valid gross weight is required');
+    if (!Number.isFinite(gross) || gross < 0) throw new Error('Valid gross weight is required');
+    if (gross === 0 && !looksLikeCancelPayload(data)) {
+      throw new Error('Valid gross weight is required');
+    }
     updates.gross_weight = gross;
     updates.raw_gross_weight = gross;
   }
 
   if (data.tare_weight != null && data.tare_weight !== '') {
     const tare = Math.round(Number(data.tare_weight));
-    if (!Number.isFinite(tare) || tare <= 0) throw new Error('Valid tare weight is required');
+    if (!Number.isFinite(tare) || tare < 0) throw new Error('Valid tare weight is required');
+    if (tare === 0 && !looksLikeCancelPayload(data)) {
+      throw new Error('Valid tare weight is required');
+    }
     updates.tare_weight = tare;
     updates.raw_tare_weight = tare;
   }
 
   const gross = updates.gross_weight ?? txn.gross_weight;
   const tare = updates.tare_weight ?? txn.tare_weight;
-  if (gross != null && tare != null && Number(gross) < Number(tare)) {
+  if (
+    gross != null &&
+    tare != null &&
+    Number(gross) < Number(tare) &&
+    !(Number(gross) === 0 && Number(tare) === 0 && looksLikeCancelPayload(data))
+  ) {
     throw new Error('Gross weight must be greater than tare weight');
   }
 
@@ -457,6 +474,34 @@ function performClosedReportDelete(data = {}) {
   };
 }
 
+/**
+ * Hard-remove a local ticket when admin deletes the cloud remote_trips row.
+ * Missing / already-gone tickets are success so Remove stays idempotent.
+ */
+function performPurgedReportDelete(data = {}) {
+  const slip = String(data.slipNumber || data.slip_number || '').trim();
+  const txn = data.transactionId
+    ? TransactionService.getById(data.transactionId)
+    : TransactionService.getBySlipNumber(slip);
+
+  if (!txn) {
+    logger.info('Remote purge skipped — no local ticket', { slip });
+    return { ok: true, skipped: true, slip_number: slip || null };
+  }
+
+  const purged = TransactionService.purgeById(txn.id);
+  logger.info('Local ticket purged after remote trip remove', {
+    transactionId: purged.id,
+    slip: purged.slip_number,
+  });
+  return {
+    ok: true,
+    purged: true,
+    slip_number: purged.slip_number,
+    transactionId: purged.id,
+  };
+}
+
 function deleteClosedReport(data = {}) {
   OperatorAuthService.assertManualHywaSectionAccess();
   const result = performClosedReportDelete(data);
@@ -467,6 +512,19 @@ function deleteClosedReport(data = {}) {
 }
 
 async function applyRemoteUpdate(data = {}) {
+  // Cancel must not go through performClosedReportUpdate — it rejects 0 kg.
+  if (looksLikeCancelPayload(data)) {
+    logger.info('Applying remote report update as cancel', {
+      slip: data.slipNumber || data.slip_number,
+    });
+    const result = applyRemoteCancel({ ...data, cancel: true, remote: true });
+    if (result?.transactionId) {
+      try {
+        require('./CloudAdminSyncService').enqueuePush(result.transactionId);
+      } catch (_e) { /* optional */ }
+    }
+    return result;
+  }
   logger.info('Applying remote report update', { slip: data.slipNumber || data.slip_number });
   const result = await performClosedReportUpdate({ ...data, remote: true });
   try {
@@ -476,8 +534,64 @@ async function applyRemoteUpdate(data = {}) {
 }
 
 function applyRemoteDelete(data = {}) {
-  logger.info('Applying remote report delete', { slip: data.slipNumber || data.slip_number });
+  logger.info('Applying remote report delete', {
+    slip: data.slipNumber || data.slip_number,
+    purge: !!data.purge,
+  });
+  if (data.purge) {
+    return performPurgedReportDelete({ ...data, remote: true });
+  }
   return performClosedReportDelete({ ...data, remote: true });
+}
+
+/**
+ * Apply admin "cancel remote trip" — CANCEL labels, 0 kg, CANCELLED status.
+ * Missing / deleted local tickets are success (cloud-only cancel).
+ */
+function applyRemoteCancel(data = {}) {
+  const slip = String(data.slipNumber || data.slip_number || '').trim();
+  logger.info('Applying remote report cancel', { slip });
+  const txn = data.transactionId
+    ? TransactionService.getById(data.transactionId)
+    : TransactionService.getBySlipNumber(slip);
+
+  if (!txn) {
+    return { ok: true, skipped: true, slip_number: slip || null };
+  }
+  if (txn.ticket_status === TICKET_STATUS.DELETED) {
+    return { ok: true, skipped: true, slip_number: txn.slip_number, transactionId: txn.id };
+  }
+
+  const cancel = 'CANCEL';
+  const timestampIn = txn.timestamp_in || txn.timestamp_out || new Date().toISOString();
+  const plate = String(txn.truck_number || '').trim().toUpperCase();
+  const truckNumber =
+    plate && plate !== cancel ? plate : data.truck_number || data.truckNumber || cancel;
+
+  const updated = TransactionService.updateFields(txn.id, {
+    ticket_status: TICKET_STATUS.CANCELLED,
+    status: TRANSACTION_STATUS.CANCELLED,
+    material: cancel,
+    customer_name: cancel,
+    destination: cancel,
+    operator_name: cancel,
+    company: cancel,
+    driver: cancel,
+    truck_number: truckNumber,
+    gross_weight: 0,
+    tare_weight: 0,
+    raw_gross_weight: 0,
+    raw_tare_weight: 0,
+    timestamp_in: timestampIn,
+    timestamp_out: timestampIn,
+    notes: txn.notes ? `${txn.notes}; Cancelled by admin` : 'Cancelled by admin',
+  });
+
+  return {
+    ok: true,
+    slip_number: updated.slip_number,
+    transactionId: updated.id,
+  };
 }
 
 module.exports = {
@@ -488,4 +602,6 @@ module.exports = {
   deleteClosedReport,
   applyRemoteUpdate,
   applyRemoteDelete,
+  applyRemoteCancel,
+  looksLikeCancelPayload,
 };

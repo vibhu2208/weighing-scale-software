@@ -4,6 +4,8 @@ import JSZip from 'jszip';
 import blankPhotoUrl from '../assets/blank-photo.png';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
+import CreateTripImagesButton from '../components/CreateTripImagesButton.jsx';
+import RemoveRemoteTripButton from '../components/RemoveRemoteTripButton.jsx';
 import {
   fmtDate,
   fmtKg,
@@ -156,6 +158,7 @@ export default function BulkPhotoUpload() {
   const [results, setResults] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [zipBusy, setZipBusy] = useState(false);
+  const [imageBusyId, setImageBusyId] = useState('');
   const [zipOpen, setZipOpen] = useState(false);
   const [zipVehicles, setZipVehicles] = useState([]);
   const [lightbox, setLightbox] = useState(null);
@@ -714,6 +717,7 @@ export default function BulkPhotoUpload() {
               <th className="p-3">Operator</th>
               <th className="p-3">In / Out</th>
               <th className="p-3">Sync</th>
+              <th className="p-3">Images</th>
               <th className="p-3">Photos</th>
             </tr>
           </thead>
@@ -756,6 +760,20 @@ export default function BulkPhotoUpload() {
                         {fmtDate(row.synced_at)}
                       </div>
                     )}
+                    <RemoveRemoteTripButton
+                      tripId={row.id}
+                      disabled={busy || Boolean(imageBusyId)}
+                      onDone={load}
+                      onError={(err) => setError(err.message)}
+                    />
+                  </td>
+                  <td className="p-3">
+                    <CreateTripImagesButton
+                      trip={row}
+                      disabled={busy || (Boolean(imageBusyId) && imageBusyId !== row.id)}
+                      onBusy={(active) => setImageBusyId(active ? row.id : '')}
+                      onDone={load}
+                    />
                   </td>
                   <td className="p-3">
                     <div className="text-[11px] text-slate-500 mb-1">
@@ -816,7 +834,7 @@ export default function BulkPhotoUpload() {
             })}
             {!loading && filteredRows.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-6 text-center text-slate-500">
+                <td colSpan={7} className="p-6 text-center text-slate-500">
                   No remote trips for {dayLabel(day, customDate)}
                   {rows.length ? ' with these filters' : ''}.{' '}
                   <Link to="/plan-gaps/fill" className="text-brand-300 hover:underline">

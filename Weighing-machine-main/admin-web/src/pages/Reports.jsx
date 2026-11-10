@@ -31,7 +31,9 @@ export default function Reports() {
   const [loading, setLoading] = useState(true);
   const tableView = reportsTableView({ loading, rows });
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
   const [pdfBusy, setPdfBusy] = useState('');
+  const [cancelBusy, setCancelBusy] = useState('');
   const recentMonths = listRecentMonths(4);
   const listQuery = searchParams.toString();
   const editSuffix = listQuery ? `?${listQuery}` : '';
@@ -253,6 +255,7 @@ export default function Reports() {
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {message && <p className="text-sm text-emerald-400">{message}</p>}
       {loading && (
         <p className="text-sm text-slate-400" role="status">
           Loading reports…
@@ -297,7 +300,9 @@ export default function Reports() {
                         ? 'success'
                         : row.ticket_status === 'OPEN'
                           ? 'warning'
-                          : 'default'
+                          : row.ticket_status === 'CANCELLED'
+                            ? 'danger'
+                            : 'default'
                     }
                   >
                     {row.ticket_status}
@@ -310,6 +315,51 @@ export default function Reports() {
                   >
                     Edit
                   </Link>
+                  {row.ticket_status !== 'DELETED' && (
+                    <button
+                      type="button"
+                      className="text-amber-400 hover:underline text-xs disabled:opacity-50"
+                      disabled={cancelBusy === row.slip_number || pdfBusy === row.slip_number}
+                      onClick={async () => {
+                        const already = row.ticket_status === 'CANCELLED';
+                        if (
+                          !window.confirm(
+                            already
+                              ? `Re-queue cancel for ${row.slip_number} on the weighbridge PC?`
+                              : `Cancel ${row.slip_number}? Sets CANCEL / 0 kg on cloud and the PC.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        if (
+                          !already &&
+                          !window.confirm(`Confirm cancel ${row.slip_number}?`)
+                        ) {
+                          return;
+                        }
+                        setCancelBusy(row.slip_number);
+                        setError('');
+                        setMessage('');
+                        try {
+                          const result = await api.cancelReport(row.slip_number);
+                          setMessage(
+                            `${result.requeued ? 'Cancel re-queued' : 'Cancel queued'} for ${row.slip_number} (command ${result.command?.id?.slice(0, 8)}…)`,
+                          );
+                          await load();
+                        } catch (err) {
+                          setError(err.message);
+                        } finally {
+                          setCancelBusy('');
+                        }
+                      }}
+                    >
+                      {cancelBusy === row.slip_number
+                        ? 'Cancel…'
+                        : row.ticket_status === 'CANCELLED'
+                          ? 'Re-queue cancel'
+                          : 'Cancel'}
+                    </button>
+                  )}
                   {row.ticket_status === 'CLOSED' && (
                     <button
                       type="button"

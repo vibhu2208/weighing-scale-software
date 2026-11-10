@@ -415,6 +415,7 @@ const TransactionService = {
     const timestampIn = data.timestamp_in || now;
     const timestampOut = data.timestamp_out || now;
 
+    const cancelled = String(data.ticket_status || '').toUpperCase() === TICKET_STATUS.CANCELLED;
     const db = getDb();
     const insert = db.transaction(() => {
       db.prepare(
@@ -439,11 +440,11 @@ const TransactionService = {
         data.operator_id || null,
         slipNumber,
         SYNC_STATUS.SYNCED,
-        data.status || TRANSACTION_STATUS.CAPTURED,
-        data.notes || null,
+        data.status || (cancelled ? TRANSACTION_STATUS.CANCELLED : TRANSACTION_STATUS.CAPTURED),
+        data.notes || (cancelled ? 'Cancelled ticket' : null),
         now,
         now,
-        TICKET_STATUS.CLOSED,
+        cancelled ? TICKET_STATUS.CANCELLED : TICKET_STATUS.CLOSED,
         data.material || null,
         data.driver || null,
         data.customer_name || null,
@@ -708,10 +709,27 @@ const TransactionService = {
       : 'Deleted by admin';
     db.prepare(
       `UPDATE transactions
-       SET ticket_status = ?, deleted_at = ?, updated_at = ?, notes = ?
+       SET ticket_status = ?, deleted_at = ?, updated_at = ?, notes = ?, remote_pg_id = NULL
        WHERE id = ?`,
     ).run(TICKET_STATUS.DELETED, now, now, notes, id);
     return this.getById(id);
+  },
+
+  /**
+   * Permanently remove a local ticket (used when admin removes a remote trip).
+   * Soft-delete alone can leave remote_pg_id / slip links that sync can revive.
+   */
+  purgeById(id) {
+    const existing = this.getById(id);
+    if (!existing) throw new Error(`Transaction not found: ${id}`);
+    const db = getDb();
+    db.prepare('DELETE FROM sync_queue WHERE transaction_id = ?').run(id);
+    db.prepare('DELETE FROM transactions WHERE id = ?').run(id);
+    return {
+      id: existing.id,
+      slip_number: existing.slip_number,
+      purged: true,
+    };
   },
 
   cancelTicket(id) {

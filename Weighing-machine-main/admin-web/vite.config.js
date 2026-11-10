@@ -34,6 +34,9 @@ export default defineConfig({
         prefix,
         {
           target: 'http://127.0.0.1:3001',
+          // Local FLUX Kontext edits can take many minutes per camera.
+          timeout: 3_600_000,
+          proxyTimeout: 3_600_000,
           bypass(req) {
             if (req.headers.accept?.includes('text/html')) return '/index.html';
             return undefined;

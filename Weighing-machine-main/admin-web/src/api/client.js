@@ -148,6 +148,13 @@ export const api = {
     });
   },
 
+  cancelReport(slip) {
+    return request(`/reports/${encodeURIComponent(slip)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
   exportCsvUrl(params = {}) {
     const qs = new URLSearchParams(params).toString();
     return `${API_URL}/reports/export/csv?${qs}`;
@@ -209,6 +216,35 @@ export const api = {
   retryFailedSyncCommands() {
     return request('/sync/commands/retry-failed', {
       method: 'POST',
+    });
+  },
+
+  presignMedia(key) {
+    return request(`/media/presign?${new URLSearchParams({ key }).toString()}`);
+  },
+
+  async uploadFillVehicleStill(plate, pass, slot, file) {
+    const imageBase64 = await fileToDataUrl(file);
+    return request('/media/fill-vehicle-still', {
+      method: 'POST',
+      body: JSON.stringify({
+        plate,
+        pass,
+        slot,
+        contentType: file.type || 'image/jpeg',
+        imageBase64,
+      }),
+    });
+  },
+
+  getTripImagePrompt() {
+    return request('/settings/trip-image-prompt');
+  },
+
+  generateRemoteTripPhoto(id, { pass, slot }) {
+    return request(`/remote-trips/${encodeURIComponent(id)}/generate-photo`, {
+      method: 'POST',
+      body: JSON.stringify({ pass, slot }),
     });
   },
 
@@ -280,6 +316,26 @@ export const api = {
     });
   },
 
+  resyncRemoteTrip(id) {
+    return request(`/remote-trips/${encodeURIComponent(id)}/resync`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  deleteRemoteTrip(id) {
+    return request(`/remote-trips/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  cancelRemoteTrip(id) {
+    return request(`/remote-trips/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
   async downloadRemoteTripPdf(id, slipNumber) {
     return downloadPdfBlob(
       `/remote-trips/${encodeURIComponent(id)}/pdf`,
@@ -300,8 +356,9 @@ export const api = {
     return request(`/slip-reservations?${qs}`);
   },
 
-  getHeldSlipWindows() {
-    return request('/slip-reservations/held-windows');
+  getHeldSlipWindows(params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/slip-reservations/held-windows${qs ? `?${qs}` : ''}`);
   },
 
   getVehicleTares(trucks, since) {

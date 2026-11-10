@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
+import CancelRemoteTripButton from '../components/CancelRemoteTripButton.jsx';
+import CreateTripImagesButton from '../components/CreateTripImagesButton.jsx';
+import RemoveRemoteTripButton from '../components/RemoveRemoteTripButton.jsx';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 
 const PHOTO_SLOTS = [1, 2, 3];
@@ -15,6 +18,19 @@ function isHywa(vehicleType) {
 
 function isOpenTicket(status) {
   return String(status || '').toUpperCase() === 'OPEN';
+}
+
+function isCancelledTicket(status) {
+  return String(status || '').toUpperCase() === 'CANCELLED';
+}
+
+/** HYWA: 1st weigh = gross (in), 2nd = tare (out). Others: in = tare, out = gross. */
+function grossAt(row) {
+  return isHywa(row?.vehicle_type) ? row?.timestamp_in : row?.timestamp_out;
+}
+
+function tareAt(row) {
+  return isHywa(row?.vehicle_type) ? row?.timestamp_out : row?.timestamp_in;
 }
 
 function photoPassesFor(vehicleType, ticketStatus) {
@@ -549,6 +565,7 @@ export default function RemoteTrips() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [pdfBusy, setPdfBusy] = useState('');
+  const [imageBusyId, setImageBusyId] = useState('');
   const [createdTrip, setCreatedTrip] = useState(null);
   const [listsReady, setListsReady] = useState(false);
 
@@ -1152,9 +1169,12 @@ export default function RemoteTrips() {
                 <th className="p-3">Vehicle</th>
                 <th className="p-3">Customer</th>
                 <th className="p-3">Net</th>
+                <th className="p-3">Gross time</th>
+                <th className="p-3">Tare time</th>
                 <th className="p-3">Status</th>
                 <th className="p-3">Sync</th>
                 <th className="p-3">MCG</th>
+                <th className="p-3">Images</th>
                 <th className="p-3">PDF</th>
               </tr>
             </thead>
@@ -1162,16 +1182,41 @@ export default function RemoteTrips() {
               {rows.map((row) => (
                 <tr key={row.id} className="border-b border-slate-800/60">
                   <td className="p-3 font-mono text-xs">{row.slip_number}</td>
-                  <td className="p-3">{row.truck_number}</td>
+                  <td className="p-3">
+                    {row.truck_number}
+                    <div className="text-xs text-slate-500">{row.vehicle_type || ''}</div>
+                  </td>
                   <td className="p-3">{row.customer_name}</td>
                   <td className="p-3">{fmtKg(row.net_weight)}</td>
+                  <td className="p-3 text-xs text-slate-300 whitespace-nowrap">
+                    {grossAt(row) ? fmtDate(grossAt(row)) : '—'}
+                  </td>
+                  <td className="p-3 text-xs text-slate-300 whitespace-nowrap">
+                    {tareAt(row) ? fmtDate(tareAt(row)) : '—'}
+                  </td>
                   <td className="p-3">
-                    <Badge tone={isOpenTicket(row.ticket_status) ? 'warning' : 'success'}>
-                      {isOpenTicket(row.ticket_status) ? 'Open' : 'Closed'}
+                    <Badge
+                      tone={
+                        isCancelledTicket(row.ticket_status)
+                          ? 'danger'
+                          : isOpenTicket(row.ticket_status)
+                            ? 'warning'
+                            : 'success'
+                      }
+                    >
+                      {isCancelledTicket(row.ticket_status)
+                        ? 'Cancelled'
+                        : isOpenTicket(row.ticket_status)
+                          ? 'Open'
+                          : 'Closed'}
                     </Badge>
-                    <div className="text-xs text-slate-500 mt-1">
-                      {fmtDate(isOpenTicket(row.ticket_status) ? row.timestamp_in : row.timestamp_out)}
-                    </div>
+                    <CancelRemoteTripButton
+                      tripId={row.id}
+                      alreadyCancelled={isCancelledTicket(row.ticket_status)}
+                      disabled={Boolean(imageBusyId) || Boolean(pdfBusy)}
+                      onDone={loadTrips}
+                      onError={(err) => setError(err.message)}
+                    />
                   </td>
                   <td className="p-3">
                     <Badge
@@ -1189,8 +1234,22 @@ export default function RemoteTrips() {
                           ? 'Synced'
                           : 'Pending'}
                     </Badge>
+                    <RemoveRemoteTripButton
+                      tripId={row.id}
+                      disabled={Boolean(imageBusyId) || Boolean(pdfBusy)}
+                      onDone={loadTrips}
+                      onError={(err) => setError(err.message)}
+                    />
                   </td>
                   <td className="p-3 text-xs text-slate-400">{row.mcg_status || '—'}</td>
+                  <td className="p-3">
+                    <CreateTripImagesButton
+                      trip={row}
+                      disabled={Boolean(imageBusyId) && imageBusyId !== row.id}
+                      onBusy={(active) => setImageBusyId(active ? row.id : '')}
+                      onDone={loadTrips}
+                    />
+                  </td>
                   <td className="p-3">
                     <button
                       type="button"
@@ -1215,7 +1274,7 @@ export default function RemoteTrips() {
               ))}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="p-6 text-center text-slate-500">
+                  <td colSpan={11} className="p-6 text-center text-slate-500">
                     No remote trips yet.
                   </td>
                 </tr>
