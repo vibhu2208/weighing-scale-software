@@ -8,6 +8,8 @@ const {
   getList,
   putList,
 } = require('../services/settingsService');
+const { loadPromptTemplate } = require('../services/tripImageService');
+const { DEFAULT_TRIP_IMAGE_PROMPT } = require('../services/tripImagePrompt');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -27,6 +29,19 @@ router.put('/advance', async (req, res) => {
     return res.json({ ok: true, settings });
   } catch (err) {
     return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+router.get('/trip-image-prompt', async (_req, res) => {
+  try {
+    const prompt = await loadPromptTemplate();
+    return res.json({
+      ok: true,
+      prompt,
+      customized: prompt !== DEFAULT_TRIP_IMAGE_PROMPT,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 

@@ -11,6 +11,7 @@ const TransactionService = require('./TransactionService');
 const SettingsService = require('./SettingsService');
 const S3Service = require('./S3Service');
 const AdminReportService = require('./AdminReportService');
+const { looksLikeCancelPayload } = require('../utils/cancelPayload');
 const { mergeOptionListValues } = require('../utils/optionListMerge');
 
 let cronJob = null;
@@ -426,20 +427,35 @@ function isTransientS3Error(err) {
   return /timeout|socket|ECONNRESET|ETIMEDOUT|ENOTFOUND|S3 .+ failed after/i.test(msg);
 }
 
+function parseCommandPayload(raw) {
+  let payload = raw;
+  // jsonb may arrive as object, string, or double-encoded string.
+  for (let i = 0; i < 2; i += 1) {
+    if (typeof payload !== 'string') break;
+    try {
+      payload = JSON.parse(payload);
+    } catch (_e) {
+      return {};
+    }
+  }
+  return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+}
+
 async function applyCommand(row) {
-  const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload || {};
-  if (row.type === 'edit_report') {
+  const payload = parseCommandPayload(row.payload);
+  if (row.type === 'edit_report' || row.type === 'cancel_report') {
     // Apply locally first, then refresh mirror. Never delete-before-push:
     // a failed S3/mirror push used to leave admin Reports empty while the
     // command stayed pending / blocked later syncs.
-    const result = payload.cancel
+    const asCancel = row.type === 'cancel_report' || looksLikeCancelPayload(payload);
+    const result = asCancel
       ? AdminReportService.applyRemoteCancel(payload)
       : await AdminReportService.applyRemoteUpdate(payload);
     const lookupSlip = result?.slip_number || payload.newSlipNumber || payload.slipNumber;
     const txn =
       TransactionService.getById(result?.transactionId) ||
       TransactionService.getBySlipNumber(lookupSlip);
-    if (!payload.cancel) {
+    if (!asCancel) {
       const wantTruck = String(
         payload.truck_number || payload.truckNumber || payload.vehicle_number || '',
       )
@@ -498,10 +514,14 @@ async function pullCommands() {
       logger.info('CloudAdminSync command applied', { id: row.id, type: row.type });
     } catch (err) {
       // Keep transient S3 timeouts pending so the next sync cycle retries.
-      if (row.type === 'edit_report' && isTransientS3Error(err)) {
+      if (
+        (row.type === 'edit_report' || row.type === 'cancel_report') &&
+        isTransientS3Error(err)
+      ) {
         await markCommand(row.id, 'pending', `retry: ${err.message}`);
-        logger.warn('CloudAdminSync edit_report deferred (S3 timeout) — will retry', {
+        logger.warn('CloudAdminSync report command deferred (S3 timeout) — will retry', {
           id: row.id,
+          type: row.type,
           message: err.message,
         });
         continue;

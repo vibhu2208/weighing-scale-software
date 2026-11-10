@@ -15,6 +15,7 @@ import { generateFillTimes, timesCollide } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
 import {
   FILL_OPERATORS as OPERATORS,
+  FILL_CAMERA_SLOTS,
   FILL_KIND_COMPOST,
   FILL_KIND_RDF,
   FILL_KINDS,
@@ -27,6 +28,7 @@ import {
   fillVehiclePlates,
   fillVehicleProfile,
   lookupFillVehicle,
+  mergeDestinationNames,
   normalizeFillDestinations,
   normalizeFillKind,
   normalizeFillVehicles,
@@ -184,6 +186,10 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
   const [destinationKind, setDestinationKind] = useState(FILL_KIND_RDF);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [promptLoaded, setPromptLoaded] = useState(false);
+  const [uploadingStill, setUploadingStill] = useState('');
+  const [stillPreviews, setStillPreviews] = useState({});
 
   useEffect(() => {
     if (!open) return;
@@ -197,20 +203,70 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
     setDestinationInput('');
     setDestinationKind(FILL_KIND_RDF);
     setError('');
+    setUploadingStill('');
+    setPromptLoaded(false);
+    let cancelled = false;
+    api
+      .getTripImagePrompt()
+      .then((data) => {
+        if (cancelled) return;
+        setImagePrompt(data.prompt || '');
+        setPromptLoaded(true);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message || 'Could not load image prompt');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open, vehicles, destinations]);
+
+  const cameraKeySig = draftVehicles
+    .map((vehicle) =>
+      FILL_CAMERA_SLOTS.map((cam) => vehicle[cam.field] || '').join(','),
+    )
+    .join('|');
+
+  useEffect(() => {
+    if (!open) return undefined;
+    let cancelled = false;
+    for (const vehicle of draftVehicles) {
+      for (const cam of FILL_CAMERA_SLOTS) {
+        const key = vehicle[cam.field];
+        const id = `${vehicle.truck_number}:${cam.field}`;
+        if (!key) continue;
+        api
+          .presignMedia(key)
+          .then((data) => {
+            if (!cancelled && data.url) {
+              setStillPreviews((prev) => ({ ...prev, [id]: data.url }));
+            }
+          })
+          .catch(() => {});
+      }
+    }
+    return () => {
+      cancelled = true;
+    };
+    // cameraKeySig is the still keys; draftVehicles is read for the current list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, cameraKeySig]);
 
   if (!open) return null;
 
   function addVehicle() {
     const plate = compactPlate(vehicleInput);
     if (!plate) return;
-    if (!(Number(vehicleDefaultTare) > 0)) {
-      setError('Enter a fixed tare (kg) for this vehicle');
+    const tareText = String(vehicleDefaultTare).trim();
+    if (tareText && !(Number(vehicleDefaultTare) > 0)) {
+      setError('Fixed tare must be a positive weight in kg, or leave it blank');
       return;
     }
     if (vehicleKind === FILL_KIND_COMPOST) {
-      if (!(Number(vehicleNetMin) > 0) || !(Number(vehicleNetMax) > 0)) {
-        setError('Compost vehicles need net min and max (kg), e.g. 30000–33000');
+      const hasMin = String(vehicleNetMin).trim();
+      const hasMax = String(vehicleNetMax).trim();
+      if ((hasMin || hasMax) && (!(Number(vehicleNetMin) > 0) || !(Number(vehicleNetMax) > 0))) {
+        setError('Compost net range needs both min and max (kg), or leave both blank');
         return;
       }
     }
@@ -248,7 +304,7 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
           };
         }
         return {
-          truck_number: v.truck_number,
+          ...v,
           kind: nextKind,
           default_tare: v.default_tare || null,
         };
@@ -273,6 +329,30 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
     setDestinationInput('');
   }
 
+  async function uploadStill(plate, cam, file) {
+    const id = `${plate}:${cam.field}`;
+    setUploadingStill(id);
+    setError('');
+    try {
+      const data = await api.uploadFillVehicleStill(plate, cam.pass, cam.slot, file);
+      patchVehicle(plate, { [cam.field]: data.key });
+      if (data.url) setStillPreviews((prev) => ({ ...prev, [id]: data.url }));
+    } catch (err) {
+      setError(err.message || 'Could not upload camera still');
+    } finally {
+      setUploadingStill('');
+    }
+  }
+
+  function clearStill(plate, field) {
+    patchVehicle(plate, { [field]: '' });
+    setStillPreviews((prev) => {
+      const next = { ...prev };
+      delete next[`${plate}:${field}`];
+      return next;
+    });
+  }
+
   function setDestinationItemKind(name, kind, prevKind) {
     setDraftDestinations((prev) =>
       normalizeFillDestinations(
@@ -293,23 +373,26 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
       const nextDestinations = normalizeFillDestinations(draftDestinations);
       if (!nextVehicles.length) throw new Error('Add at least one vehicle');
       if (!nextDestinations.length) throw new Error('Add at least one destination');
-      for (const v of nextVehicles) {
-        if (!(v.default_tare > 0)) {
-          throw new Error(`Vehicle ${v.truck_number} needs a fixed tare (kg)`);
-        }
-        if (v.kind === FILL_KIND_COMPOST && (!(v.net_min > 0) || !(v.net_max > 0))) {
-          throw new Error(
-            `Compost vehicle ${v.truck_number} needs net min/max (kg)`,
-          );
-        }
-      }
-      const masterNames = fillDestinationNames(nextDestinations);
+      // Merge into existing master destinations — never replace. Cloud sync
+      // pushes destinations_list to the weighbridge PC; replacing wiped PC-added names.
+      const existingMaster = await api.getList('destinations');
+      const masterNames = mergeDestinationNames(
+        existingMaster?.items || [],
+        fillDestinationNames(nextDestinations),
+      );
       await Promise.all([
         api.putList('fill_vehicles', nextVehicles),
         api.putList('fill_destinations', nextDestinations),
         api.putList('destinations', masterNames),
+        promptLoaded
+          ? api.putAdvanceSettings({ trip_image_prompt: imagePrompt })
+          : Promise.resolve(),
       ]);
-      onSaved({ vehicles: nextVehicles, destinations: nextDestinations });
+      onSaved({
+        vehicles: nextVehicles,
+        destinations: nextDestinations,
+        masterDestinations: masterNames,
+      });
       onClose();
     } catch (err) {
       setError(err.message || 'Could not save configuration');
@@ -325,8 +408,11 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
           <div>
             <h3 className="text-xl font-semibold sm:text-2xl">Fill configuration</h3>
             <p className="text-sm text-slate-400 mt-1 max-w-3xl">
-              Tag vehicles and destinations as RDF or Compost. Every vehicle needs a fixed tare.
-              Compost also needs a net weight range (min–max kg).
+              Tag vehicles and destinations as RDF or Compost. Add or change one or two, then save —
+              you do not have to update the rest. Fixed tare is optional. Compost can also take a net
+              weight range (min–max kg). Those values are used only when weights are generated for
+              that vehicle. Arrival and departure cam 1 and cam 2 are the original frames used when
+              a remote trip creates images.
             </p>
           </div>
           <button type="button" className="btn-ghost shrink-0" onClick={onClose} disabled={saving}>
@@ -335,6 +421,20 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
         </div>
 
         {error && <p className="shrink-0 text-sm text-red-400">{error}</p>}
+
+        <label className="shrink-0 flex flex-col gap-1 text-xs text-slate-400">
+          Image prompt
+          <textarea
+            className="field-input text-xs font-mono min-h-[7.5rem]"
+            rows={6}
+            value={imagePrompt}
+            onChange={(e) => setImagePrompt(e.target.value)}
+          />
+          <span className="text-[11px] text-slate-500">
+            {'{{TIMESTAMP}}'} is replaced with the trip time. From 06:00 to 17:59 the night lighting
+            lines are swapped for daylight. 18:00 to 05:59 keeps the night text.
+          </span>
+        </label>
 
         <div className="grid min-h-0 flex-1 gap-5 overflow-hidden lg:grid-cols-2">
           <section className="flex min-h-0 flex-col space-y-3 overflow-hidden rounded-lg border border-slate-800 p-4 sm:p-5">
@@ -408,8 +508,9 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
               )}
             </div>
             <p className="text-xs text-slate-500">
-              RDF → fixed tare ±50–200 kg, gross 65,000–65,500. Compost → fixed tare ±30–70 kg; net
-              random in min–max; gross = tare + net.
+              Leave tare blank to keep a vehicle on the list. RDF with a tare uses ±50–200 kg and
+              gross 65,000–65,500; without one, fill uses earlier tare history. Compost with tare and
+              a net range uses tare ±30–70 kg and a random net in min–max.
             </p>
             <ul className="min-h-0 flex-1 space-y-2 overflow-auto text-sm pr-1">
               {draftVehicles.map((item) => (
@@ -482,6 +583,58 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
                         </label>
                       </>
                     )}
+                  </div>
+                  {!(item.default_tare > 0) && (
+                    <p className="text-[11px] text-slate-500">No fixed tare yet — still saved.</p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    {FILL_CAMERA_SLOTS.map((cam) => {
+                      const stillId = `${item.truck_number}:${cam.field}`;
+                      const preview = stillPreviews[stillId] || '';
+                      const busy = uploadingStill === stillId;
+                      return (
+                        <div key={cam.field} className="space-y-1">
+                          <div className="text-[10px] text-slate-500">{cam.label}</div>
+                          {preview ? (
+                            <img
+                              src={preview}
+                              alt=""
+                              className="h-14 w-full rounded object-cover bg-slate-800 border border-slate-700"
+                            />
+                          ) : (
+                            <div className="h-14 rounded border border-dashed border-slate-700 bg-slate-800/40" />
+                          )}
+                          <div className="flex gap-2 text-[10px]">
+                            <label
+                              className={`text-brand-300 ${busy || saving ? 'opacity-50' : 'cursor-pointer hover:text-brand-200'}`}
+                            >
+                              {busy ? 'Uploading…' : item[cam.field] ? 'Replace' : 'Upload'}
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                disabled={busy || saving}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = '';
+                                  if (file) uploadStill(item.truck_number, cam, file);
+                                }}
+                              />
+                            </label>
+                            {item[cam.field] && (
+                              <button
+                                type="button"
+                                className="text-red-300 hover:text-red-200"
+                                disabled={busy || saving}
+                                onClick={() => clearStill(item.truck_number, cam.field)}
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </li>
               ))}
@@ -1160,15 +1313,21 @@ export default function FillBlockedSlips() {
     }
   }
 
-  function handleConfigSaved({ vehicles: nextVehicles, destinations: nextDestinations }) {
+  function handleConfigSaved({
+    vehicles: nextVehicles,
+    destinations: nextDestinations,
+    masterDestinations,
+  }) {
     const typedVehicles = normalizeFillVehicles(nextVehicles);
     const typedDestinations = normalizeFillDestinations(nextDestinations);
-    const destNames = fillDestinationNames(typedDestinations);
     setLists((prev) => ({
       ...(prev || {}),
       fill_vehicles: typedVehicles,
       fill_destinations: typedDestinations,
-      destinations: destNames,
+      destinations: mergeDestinationNames(
+        masterDestinations || prev?.destinations || [],
+        fillDestinationNames(typedDestinations),
+      ),
     }));
     setEntries((prev) => {
       const next = { ...prev };

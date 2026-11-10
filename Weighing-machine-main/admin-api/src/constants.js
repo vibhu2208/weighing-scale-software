@@ -20,6 +20,7 @@ const REMOTE_SAFE_KEYS = new Set([
   'companies_list',
   'fill_vehicles_list',
   'fill_destinations_list',
+  'trip_image_prompt',
 ]);
 
 const LIST_KEYS = {

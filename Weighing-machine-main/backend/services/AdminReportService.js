@@ -19,6 +19,7 @@ const {
 const { resolveVehicleType, isHywa } = require('../utils/vehicleTypes');
 const { TICKET_STATUS, TRANSACTION_STATUS } = require('../utils/constants');
 const { toPublicTransaction } = require('../utils/transactionPublic');
+const { looksLikeCancelPayload } = require('../utils/cancelPayload');
 const logger = require('../utils/logger');
 
 const { getDb } = require('../database/db');
@@ -146,16 +147,12 @@ function getClosedReportBySlip(slipNumber) {
   return toPublicTransaction(txn);
 }
 
-function looksLikeCancelPayload(data = {}) {
-  if (data.cancel) return true;
-  if (String(data.ticket_status || '').toUpperCase() === 'CANCELLED') return true;
-  const material = String(data.material || '').trim().toUpperCase();
-  const gross = Number(data.gross_weight);
-  const tare = Number(data.tare_weight);
-  return material === 'CANCEL' && gross === 0 && tare === 0;
-}
-
 async function performClosedReportUpdate(data = {}) {
+  // Never validate cancel voids (0 kg) as normal weight edits.
+  if (looksLikeCancelPayload(data)) {
+    return applyRemoteCancel({ ...data, cancel: true, remote: !!data.remote });
+  }
+
   const slip = String(data.slipNumber || '').trim() || String(data.slip_number || '').trim();
   const txn = requireClosedReport(
     data.transactionId
@@ -606,4 +603,5 @@ module.exports = {
   applyRemoteUpdate,
   applyRemoteDelete,
   applyRemoteCancel,
+  looksLikeCancelPayload,
 };

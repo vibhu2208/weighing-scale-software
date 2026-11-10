@@ -206,7 +206,8 @@ router.post('/:id/cancel', async (req, res) => {
     // failed/stuck prior command (cloud may already be CANCELLED).
     if (result.slip_number) {
       await createCommand({
-        type: 'edit_report',
+        // Dedicated type so PC never runs cancel voids through weight validation.
+        type: 'cancel_report',
         payload: {
           slipNumber: result.slip_number,
           cancel: true,

@@ -219,6 +219,35 @@ export const api = {
     });
   },
 
+  presignMedia(key) {
+    return request(`/media/presign?${new URLSearchParams({ key }).toString()}`);
+  },
+
+  async uploadFillVehicleStill(plate, pass, slot, file) {
+    const imageBase64 = await fileToDataUrl(file);
+    return request('/media/fill-vehicle-still', {
+      method: 'POST',
+      body: JSON.stringify({
+        plate,
+        pass,
+        slot,
+        contentType: file.type || 'image/jpeg',
+        imageBase64,
+      }),
+    });
+  },
+
+  getTripImagePrompt() {
+    return request('/settings/trip-image-prompt');
+  },
+
+  generateRemoteTripPhoto(id, { pass, slot }) {
+    return request(`/remote-trips/${encodeURIComponent(id)}/generate-photo`, {
+      method: 'POST',
+      body: JSON.stringify({ pass, slot }),
+    });
+  },
+
   getUploadUrl(slip, slot, contentType, pass = 'departure') {
     return request('/media/upload-url', {
       method: 'POST',

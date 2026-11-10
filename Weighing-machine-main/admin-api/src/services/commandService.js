@@ -4,11 +4,14 @@ const { query, getSiteId } = require('../db');
 
 async function createCommand({ type, payload, createdBy }) {
   const siteId = getSiteId();
+  // Pass a plain object — node-pg serializes jsonb. JSON.stringify here
+  // double-encodes and can make PC see a string payload without .cancel.
+  const body = payload && typeof payload === 'object' ? payload : {};
   const res = await query(
     `INSERT INTO admin_commands (site_id, type, payload, status, created_by)
-     VALUES ($1, $2, $3, 'pending', $4)
+     VALUES ($1, $2, $3::jsonb, 'pending', $4)
      RETURNING *`,
-    [siteId, type, JSON.stringify(payload || {}), createdBy || null],
+    [siteId, type, JSON.stringify(body), createdBy || null],
   );
   return res.rows[0];
 }

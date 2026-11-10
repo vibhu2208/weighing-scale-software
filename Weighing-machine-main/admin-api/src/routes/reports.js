@@ -435,7 +435,8 @@ router.post('/:slip/cancel', async (req, res) => {
     }
 
     const cmd = await createCommand({
-      type: 'edit_report',
+      // Dedicated type so PC never runs cancel voids through weight validation.
+      type: 'cancel_report',
       payload: {
         slipNumber: slip,
         cancel: true,

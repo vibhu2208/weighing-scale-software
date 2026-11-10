@@ -107,6 +107,15 @@ function remoteTripPhotoKey(slip, slot, pass = 'departure') {
   return `remote-trips/${slip}/${tag}_cam-${slot}.jpg`;
 }
 
+function fillVehicleStillKey(plate, pass = 'departure', slot = 1) {
+  const safe = String(plate || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+  const tag = pass === 'arrival' ? 'arrival' : 'departure';
+  const slotNum = Number(slot) === 2 ? 2 : 1;
+  return `fill-vehicles/${safe}/${tag}_cam-${slotNum}.jpg`;
+}
+
 async function listKeys(prefix, maxKeys = 40) {
   if (!isConfigured() || !prefix) return [];
   try {
@@ -152,5 +161,6 @@ module.exports = {
   mirrorPhotoKey,
   mirrorReportKey,
   remoteTripPhotoKey,
+  fillVehicleStillKey,
   getBucket,
 };

@@ -25,6 +25,14 @@ export const FILL_KIND_RDF = 'RDF';
 export const FILL_KIND_COMPOST = 'COMPOST';
 export const FILL_KINDS = [FILL_KIND_RDF, FILL_KIND_COMPOST];
 
+/** Reference CCTV stills used to generate a remote trip's cam 1 and cam 2. */
+export const FILL_CAMERA_SLOTS = [
+  { pass: 'arrival', slot: 1, field: 'arrival_cam_1', label: 'Arrival cam 1' },
+  { pass: 'arrival', slot: 2, field: 'arrival_cam_2', label: 'Arrival cam 2' },
+  { pass: 'departure', slot: 1, field: 'departure_cam_1', label: 'Departure cam 1' },
+  { pass: 'departure', slot: 2, field: 'departure_cam_2', label: 'Departure cam 2' },
+];
+
 /** Shared with Fill Blocked Slips and Bulk Photos. Default kind is RDF (TRUCK / tare first). */
 export const FILL_VEHICLES = [
   'HR65A7668',
@@ -91,6 +99,18 @@ function positiveKg(value) {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 }
 
+function fillCameraFields(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const fields = {};
+  for (const cam of FILL_CAMERA_SLOTS) {
+    const key = String(raw[cam.field] || '').trim();
+    if (!key || key.length > 512) continue;
+    if (!key.startsWith('fill-vehicles/') || key.includes('..') || key.includes('\\')) continue;
+    fields[cam.field] = key;
+  }
+  return fields;
+}
+
 /** Normalize saved fill_vehicles (strings or { truck_number, kind, ... }) into typed entries. */
 export function normalizeFillVehicles(items, fallbackKind = FILL_KIND_RDF) {
   const out = [];
@@ -130,7 +150,12 @@ export function normalizeFillVehicles(items, fallbackKind = FILL_KIND_RDF) {
     }
     if (!plate || seen.has(plate)) continue;
     seen.add(plate);
-    const entry = { truck_number: plate, kind, default_tare: defaultTare };
+    const entry = {
+      truck_number: plate,
+      kind,
+      default_tare: defaultTare,
+      ...fillCameraFields(raw),
+    };
     if (kind === FILL_KIND_COMPOST) {
       if (netMin && netMax && netMin > netMax) {
         const swap = netMin;
@@ -208,4 +233,22 @@ export function fillDestinationNames(destinations) {
     names.push(item.name);
   }
   return names;
+}
+
+/**
+ * Union master destinations with fill names so saving fill config never wipes
+ * destinations added on the weighbridge PC (those sync from destinations_list).
+ */
+export function mergeDestinationNames(existing, additions) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of [...(existing || []), ...(additions || [])]) {
+    const name = String(raw || '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
 }

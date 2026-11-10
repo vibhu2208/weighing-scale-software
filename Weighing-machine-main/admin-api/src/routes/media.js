@@ -9,8 +9,11 @@ const {
   putObject,
   mirrorPhotoKey,
   remoteTripPhotoKey,
+  fillVehicleStillKey,
   isConfigured,
 } = require('../services/s3Presign');
+
+const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -97,6 +100,34 @@ router.post('/remote-trip-upload', async (req, res) => {
     return res.json({ ok: true, key, slot: slotNum, pass: photoPass });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** Original weighbridge stills for a fill vehicle (arrival/departure cam 1 and 2). */
+router.post('/fill-vehicle-still', async (req, res) => {
+  try {
+    if (!isConfigured()) {
+      return res.status(503).json({ ok: false, error: 'S3 not configured' });
+    }
+    const { plate, slot, contentType, pass, imageBase64 } = req.body || {};
+    const truck = String(plate || '')
+      .toUpperCase()
+      .replace(/[\s-]/g, '');
+    const slotNum = Number(slot);
+    const photoPass = pass === 'arrival' || pass === 'departure' ? pass : '';
+    if (!PLATE_RE.test(truck) || (slotNum !== 1 && slotNum !== 2) || !photoPass) {
+      return res.status(400).json({
+        ok: false,
+        error: 'plate, pass (arrival|departure), and slot (1-2) required',
+      });
+    }
+    const key = fillVehicleStillKey(truck, photoPass, slotNum);
+    const body = parseImageBuffer(imageBase64);
+    await putObject(key, body, contentType || 'image/jpeg');
+    const url = await presignGet(key);
+    return res.json({ ok: true, key, url, slot: slotNum, pass: photoPass });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
   }
 });
 
