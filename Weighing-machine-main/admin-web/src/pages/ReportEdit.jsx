@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { reportsListPath } from '../lib/reportsListState.js';
+import { reportEditBackLabel, reportEditBackPath } from '../lib/reportsListState.js';
 import { api } from '../api/client.js';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 import blankPhotoUrl from '../assets/blank-photo.png';
@@ -85,7 +85,8 @@ export default function ReportEdit() {
   const { slip } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const reportsBackTo = reportsListPath(searchParams);
+  const reportsBackTo = reportEditBackPath(searchParams);
+  const reportsBackLabel = reportEditBackLabel(searchParams);
   const [report, setReport] = useState(null);
   const [form, setForm] = useState({});
   const [photos, setPhotos] = useState({});
@@ -301,7 +302,7 @@ export default function ReportEdit() {
       <div>
         <p className="text-red-400">{error}</p>
         <Link to={reportsBackTo} className="text-brand-400 text-sm mt-2 inline-block">
-          Back to reports
+          {reportsBackLabel === '← Back' ? 'Back' : 'Back to reports'}
         </Link>
       </div>
     );
@@ -314,7 +315,7 @@ export default function ReportEdit() {
       <div className="flex items-center justify-between">
         <div>
           <Link to={reportsBackTo} className="text-xs text-brand-400 hover:underline">
-            ← Reports
+            {reportsBackLabel}
           </Link>
           <h2 className="text-xl font-semibold mt-1">Edit report {slip}</h2>
           <p className="text-sm text-slate-400">

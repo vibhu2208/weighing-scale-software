@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api/client.js';
 import Badge from './Badge.jsx';
 import RemoveRemoteTripButton from './RemoveRemoteTripButton.jsx';
 import { fmtDate, fmtKg } from '../lib/format.js';
+import { reportEditPath } from '../lib/reportsListState.js';
 
 const REFRESH_MS = 30_000;
 
@@ -40,8 +42,13 @@ function syncState(row) {
 /**
  * Recent remote trips with when the weighbridge PC imported each one.
  * `highlightIds` marks trips created on this page; bump `refreshKey` to reload.
+ * `editFrom` is an in-app path Report Edit uses for Back (e.g. /plan-gaps/fill).
  */
-export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) {
+export default function CreatedTripsSync({
+  highlightIds = [],
+  refreshKey = 0,
+  editFrom = '',
+}) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -121,6 +128,7 @@ export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) 
               <th className="p-3">Created</th>
               <th className="p-3">Sync</th>
               <th className="p-3">Synced to PC at</th>
+              <th className="p-3">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -129,6 +137,7 @@ export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) 
               const delay = row.synced_at
                 ? fmtDelay(new Date(row.synced_at).getTime() - readyAt(row))
                 : '';
+              const slip = String(row.slip_number || '').trim();
               return (
                 <tr
                   key={row.id}
@@ -204,12 +213,24 @@ export default function CreatedTripsSync({ highlightIds = [], refreshKey = 0 }) 
                       </span>
                     )}
                   </td>
+                  <td className="p-3">
+                    {slip ? (
+                      <Link
+                        to={reportEditPath(slip, { from: editFrom })}
+                        className="text-brand-400 hover:underline text-xs"
+                      >
+                        Edit
+                      </Link>
+                    ) : (
+                      <span className="text-slate-600 text-xs">—</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
             {!loading && sorted.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-6 text-center text-slate-500">
+                <td colSpan={9} className="p-6 text-center text-slate-500">
                   No remote trips to show.
                 </td>
               </tr>
