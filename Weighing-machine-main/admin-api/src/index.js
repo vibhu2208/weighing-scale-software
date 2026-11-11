@@ -14,6 +14,7 @@ const syncRoutes = require('./routes/sync');
 const mediaRoutes = require('./routes/media');
 const remoteTripsRoutes = require('./routes/remoteTrips');
 const slipReservationsRoutes = require('./routes/slipReservations');
+const adminBuilderRoutes = require('./routes/adminBuilder');
 const {
   ensureSchema: ensureSlipReservationsSchema,
   startFireWorker,
@@ -35,7 +36,8 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json({ limit: '25mb' }));
+// Base64 photos can exceed 12 MB before server-side resize; allow intake then normalize.
+app.use(express.json({ limit: '40mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -52,6 +54,7 @@ app.use('/sync', syncRoutes);
 app.use('/media', mediaRoutes);
 app.use('/remote-trips', remoteTripsRoutes);
 app.use('/slip-reservations', slipReservationsRoutes);
+app.use('/admin-builder', adminBuilderRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error('[api] error', err);
@@ -82,6 +85,16 @@ async function bootstrap() {
     );
   }
   try {
+    const { ensurePerfSchema } = require('./services/perfSchema');
+    await ensurePerfSchema();
+    console.log('[api] perf indexes / PDF fingerprint schema ready');
+  } catch (err) {
+    console.error(
+      '[api] perf schema setup failed — run scripts/rds/004_perf_indexes.sql:',
+      err.message,
+    );
+  }
+  try {
     startMirrorReconcileWorker(query, 60);
     startOutTimeReleaseWorker(query, 15000);
     console.log('[api] remote trip → mirror reconcile worker started');
@@ -104,6 +117,17 @@ function start() {
   bootstrap().catch((err) => {
     console.error('[api] bootstrap error', err);
   });
+
+  const shutdown = () => {
+    try {
+      const { closeBrowserPool } = require('./services/browserPool');
+      closeBrowserPool().catch(() => {});
+    } catch {
+      /* optional */
+    }
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 start();

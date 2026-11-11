@@ -263,16 +263,52 @@ export const api = {
   },
 
   async uploadRemoteTripPhoto(slip, slot, file, pass = 'departure') {
-    const imageBase64 = await fileToDataUrl(file);
-    return request('/media/remote-trip-upload', {
+    // Prefer direct S3 PUT when CORS allows; fall back to API base64 upload.
+    try {
+      const signed = await request('/media/remote-trip-upload-url', {
+        method: 'POST',
+        body: JSON.stringify({
+          slip,
+          slot,
+          pass,
+          contentType: file.type || 'image/jpeg',
+        }),
+      });
+      const putRes = await fetch(signed.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'image/jpeg' },
+        body: file,
+      });
+      if (!putRes.ok) throw new Error(`S3 PUT failed (${putRes.status})`);
+      try {
+        await request('/media/remote-trip-thumb', {
+          method: 'POST',
+          body: JSON.stringify({ key: signed.key }),
+        });
+      } catch {
+        /* thumb optional */
+      }
+      return { ok: true, key: signed.key, slot, pass };
+    } catch {
+      const imageBase64 = await fileToDataUrl(file);
+      return request('/media/remote-trip-upload', {
+        method: 'POST',
+        body: JSON.stringify({
+          slip,
+          slot,
+          pass,
+          contentType: file.type || 'image/jpeg',
+          imageBase64,
+        }),
+      });
+    }
+  },
+
+  /** S3 server-side copy for mapped bulk slots (no second base64 upload). */
+  copyRemoteTripPhoto(sourceKey, slip, slot, pass = 'departure') {
+    return request('/media/remote-trip-copy', {
       method: 'POST',
-      body: JSON.stringify({
-        slip,
-        slot,
-        pass,
-        contentType: file.type || 'image/jpeg',
-        imageBase64,
-      }),
+      body: JSON.stringify({ sourceKey, slip, slot, pass }),
     });
   },
 
@@ -349,6 +385,42 @@ export const api = {
     return fetchPdfBlob(`/remote-trips/${encodeURIComponent(id)}/pdf${suffix}`);
   },
 
+  /** Server-side ZIP of remote-trip PDFs (streams; STORE compression). */
+  async downloadRemoteTripsZip(ids, params = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let res;
+    try {
+      res = await fetch(`${API_URL}/remote-trips/zip`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ids,
+          print: params.print || undefined,
+        }),
+        signal: params.signal,
+      });
+    } catch (err) {
+      if (err?.name === 'AbortError') throw new Error('Zip cancelled');
+      throw new Error(
+        import.meta.env.DEV
+          ? 'Cannot reach admin API — run "npm run dev" in the admin-api folder (port 3001)'
+          : 'Network error — check VITE_API_URL and that the API is online',
+      );
+    }
+    if (res.status === 401) {
+      setToken(null);
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error(json.error || `Zip failed (${res.status})`);
+    }
+    return res.blob();
+  },
+
   saveBlob,
 
   getSlipReservations(params = {}) {
@@ -390,6 +462,64 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     });
+  },
+
+  processAdminBuilder(body) {
+    return request('/admin-builder/process', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  saveAdminBuilderPreview(previewId) {
+    return request(`/admin-builder/previews/${encodeURIComponent(previewId)}/save`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  listAdminBuilderSaved() {
+    return request('/admin-builder/saved');
+  },
+
+  deleteAdminBuilderSaved(ids) {
+    return request('/admin-builder/saved/delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  async fetchAdminBuilderImage(id) {
+    const headers = { 'Cache-Control': 'no-store' };
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let res;
+    try {
+      res = await fetch(`${API_URL}/admin-builder/saved/${encodeURIComponent(id)}/image`, {
+        headers,
+        cache: 'no-store',
+      });
+    } catch {
+      throw new Error(
+        import.meta.env.DEV
+          ? 'Cannot reach admin API — run "npm run dev" in the admin-api folder (port 3001)'
+          : 'Network error — check VITE_API_URL and that the API is online',
+      );
+    }
+    if (res.status === 401) {
+      setToken(null);
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error(json.error || `Image download failed (${res.status})`);
+    }
+    return res.blob();
+  },
+
+  async downloadAdminBuilderImage(id, filename) {
+    saveBlob(await this.fetchAdminBuilderImage(id), filename || `EDITED_${id}.png`);
   },
 };
 

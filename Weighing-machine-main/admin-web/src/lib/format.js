@@ -24,9 +24,12 @@ export function reportPdfFilename(truckNumber, reportDate) {
   const date = new Date(reportDate);
   const datePart = Number.isNaN(date.getTime())
     ? 'unknown-date'
-    : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
-        date.getDate(),
-      ).padStart(2, '0')}`;
+    : new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(date);
   return `${last4}-${datePart}.pdf`;
 }
 

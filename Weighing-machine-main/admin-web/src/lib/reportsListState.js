@@ -68,6 +68,39 @@ export function reportsListPath(searchOrState) {
   return text ? `/reports?${text}` : '/reports';
 }
 
+/** In-app relative paths only — blocks //host and scheme-based open redirects. */
+export function isSafeAppPath(path) {
+  if (typeof path !== 'string') return false;
+  const value = path.trim();
+  if (!value.startsWith('/') || value.startsWith('//')) return false;
+  if (value.includes('://') || value.includes('\\')) return false;
+  if (/[\r\n\0]/.test(value)) return false;
+  return true;
+}
+
+/** Edit URL; optional `from` returns the operator to the page that opened edit. */
+export function reportEditPath(slip, { from } = {}) {
+  const base = `/reports/${encodeURIComponent(String(slip || '').trim())}/edit`;
+  if (!isSafeAppPath(from)) return base;
+  const params = new URLSearchParams();
+  params.set('from', from);
+  return `${base}?${params.toString()}`;
+}
+
+/** Prefer safe `from`; otherwise Reports list (filters minus `from`). */
+export function reportEditBackPath(searchOrParams) {
+  const params = readSearchParams(searchOrParams);
+  const from = params.get('from');
+  if (isSafeAppPath(from)) return from.trim();
+  params.delete('from');
+  return reportsListPath(params);
+}
+
+export function reportEditBackLabel(searchOrParams) {
+  const params = readSearchParams(searchOrParams);
+  return isSafeAppPath(params.get('from')) ? '← Back' : '← Reports';
+}
+
 export function isDefaultReportsState(state) {
   return reportsSearchString(state) === '';
 }

@@ -1,21 +1,19 @@
 'use strict';
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const {
-  isConfigured,
-  getObjectBuffer,
-  putObject,
-  mirrorReportKey,
-  presignGet,
-} = require('./s3Presign');
-const { getSiteId } = require('../db');
+const { isConfigured, getObjectBuffer } = require('./s3Presign');
+const { getSiteId, query } = require('../db');
 const {
   buildVehicleReportHtml,
   bufferToDataUrl,
 } = require('./vehicleReportHtml');
 const { hydratePhotoKeys } = require('./reportMedia');
+const { shrinkReportPdf } = require('./pdfShrink');
+const { withPdfPage } = require('./browserPool');
+const {
+  pdfContentFingerprint,
+  readCachedPdf,
+  writeCachedPdf,
+} = require('./pdfContentCache');
 
 const PHOTO_FIELDS = [
   { col: 'arrival_photo_1', pass: 'arrival', slot: 1 },
@@ -48,21 +46,18 @@ function companySettings() {
   };
 }
 
-function ensureTempDir() {
-  const dir = path.join(os.tmpdir(), 'weighbridge-admin-pdf');
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-async function loadPhotoDataUrls(row) {
+async function loadPhotoDataUrls(row, options = {}) {
   const photos = {
     arrival: [null, null, null],
     departure: [null, null, null],
   };
-  if (!isConfigured()) return photos;
+  const failedKeys = [];
+  if (!isConfigured()) return { photos, failedKeys };
 
-  // Resolve missing/stale keys the same way the edit UI does.
-  const hydrated = await hydratePhotoKeys(row);
+  // Prefer caller-provided hydration. Skip HEAD verifies — GetObject 404 is enough.
+  const hydrated = options.photosHydrated
+    ? row
+    : await hydratePhotoKeys(row, { verifyExists: false });
 
   await Promise.all(
     PHOTO_FIELDS.map(async ({ col, pass, slot }) => {
@@ -72,33 +67,21 @@ async function loadPhotoDataUrls(row) {
         const buf = await getObjectBuffer(key);
         const src = bufferToDataUrl(buf, 'image/jpeg');
         if (src) photos[pass][slot - 1] = src;
+        else failedKeys.push(col);
       } catch (err) {
+        failedKeys.push(col);
         console.warn('[reportPdf] photo download failed', col, err.message);
       }
     }),
   );
-  return photos;
+  return { photos, failedKeys };
 }
 
 async function renderHtmlToPdfBuffer(html) {
-  const puppeteer = require('puppeteer');
-  const tempDir = ensureTempDir();
-  const tempHtml = path.join(
-    tempDir,
-    `render_${Date.now()}_${process.pid}.html`,
-  );
-  fs.writeFileSync(tempHtml, html, 'utf8');
-
-  let browser;
-  try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
-    const page = await browser.newPage();
-    // file:// + data: images — match Electron loadFile + printToPDF flow
-    await page.goto(`file://${tempHtml}`, {
-      waitUntil: 'networkidle0',
+  return withPdfPage(async (page) => {
+    // data: images are inline — no network; avoid file:// + networkidle0 + 300ms.
+    await page.setContent(html, {
+      waitUntil: 'domcontentloaded',
       timeout: 60000,
     });
     await page.evaluate(async () => {
@@ -115,6 +98,13 @@ async function renderHtmlToPdfBuffer(html) {
                 }
                 resolve();
               };
+              if (typeof img.decode === 'function') {
+                img
+                  .decode()
+                  .then(finish)
+                  .catch(finish);
+                return;
+              }
               if (img.complete) finish();
               else {
                 img.addEventListener('load', finish, { once: true });
@@ -123,8 +113,8 @@ async function renderHtmlToPdfBuffer(html) {
             }),
         ),
       );
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     });
-    await new Promise((r) => setTimeout(r, 300));
 
     // Same paper size as backend/utils/htmlToPdf.js (Electron printToPDF).
     const pdf = await page.pdf({
@@ -134,30 +124,72 @@ async function renderHtmlToPdfBuffer(html) {
       margin: { top: '0', right: '0', bottom: '0', left: '0' },
       preferCSSPageSize: true,
     });
-    return Buffer.from(pdf);
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch {
-        /* ignore */
-      }
+    // Chrome re-embeds every photo as a raw RGB Flate stream, which turns six
+    // camera frames into a ~20 MB file. Re-encode those streams as JPEG at the
+    // same pixel dimensions: identical page, a fraction of the bytes.
+    return shrinkReportPdf(Buffer.from(pdf));
+  });
+}
+
+async function persistPdfFingerprint(row, cached, options = {}) {
+  if (!cached?.fingerprint || !row?.slip_number) return;
+  const siteId = options.siteId || getSiteId();
+  // Always key remote_trips by slip — report routes merge mirror rows whose `id`
+  // is not a remote_trips primary key.
+  try {
+    if (options.grossPrint) {
+      await query(
+        `UPDATE remote_trips
+         SET report_gross_content_fp = $2,
+             report_gross_s3_key = COALESCE($3, report_gross_s3_key)
+         WHERE UPPER(slip_number) = UPPER($1)`,
+        [row.slip_number, cached.fingerprint, cached.report_s3_key || null],
+      );
+      return;
     }
-    try {
-      fs.unlinkSync(tempHtml);
-    } catch {
-      /* ignore */
-    }
+    await query(
+      `UPDATE remote_trips
+       SET report_content_fp = $2,
+           report_s3_key = COALESCE($3, report_s3_key)
+       WHERE UPPER(slip_number) = UPPER($1)`,
+      [row.slip_number, cached.fingerprint, cached.report_s3_key || null],
+    );
+    // Do not touch updated_at — for CLOSED slips report_date falls back to it.
+    await query(
+      `UPDATE transactions_mirror
+       SET report_content_fp = $3,
+           report_s3_key = COALESCE($4, report_s3_key)
+       WHERE site_id = $1 AND UPPER(slip_number) = UPPER($2)`,
+      [siteId, row.slip_number, cached.fingerprint, cached.report_s3_key || null],
+    );
+  } catch (err) {
+    console.warn('[reportPdf] fingerprint persist failed', err.message);
   }
 }
 
 /**
  * Build a slip PDF matching the weighbridge PC layout (same HTML/CSS).
+ * Uses content-fingerprint cache: unchanged trips reuse the S3 PDF.
  */
 async function generateTripPdf(row, options = {}) {
   if (!row?.slip_number) throw new Error('Trip row with slip_number is required');
 
-  const photoDataUrls = await loadPhotoDataUrls(row);
+  if (options.useCache !== false) {
+    const cached = await readCachedPdf(row, options);
+    if (cached.hit) {
+      return {
+        pdf: cached.pdf,
+        report_s3_key: cached.report_s3_key,
+        report_url: cached.report_url,
+        slip_number: row.slip_number,
+        filename: `${row.slip_number}_report.pdf`,
+        fromCache: true,
+        fingerprint: cached.fingerprint,
+      };
+    }
+  }
+
+  const { photos: photoDataUrls, failedKeys } = await loadPhotoDataUrls(row, options);
   const html = buildVehicleReportHtml(
     {
       ...row,
@@ -169,14 +201,32 @@ async function generateTripPdf(row, options = {}) {
     photoDataUrls,
   );
   const pdf = await renderHtmlToPdfBuffer(html);
+  const fingerprint = pdfContentFingerprint(row, options);
+  // Missing photos → still return PDF, but never cache as a permanent HIT.
+  const cacheable = failedKeys.length === 0;
 
   let reportS3Key = null;
   let reportUrl = null;
-  if (options.upload !== false && isConfigured()) {
-    const siteId = options.siteId || getSiteId();
-    reportS3Key = mirrorReportKey(siteId, row.slip_number);
-    await putObject(reportS3Key, pdf, 'application/pdf');
-    reportUrl = await presignGet(reportS3Key);
+  if (cacheable && options.upload !== false && isConfigured()) {
+    const written = await writeCachedPdf(row, pdf, {
+      ...options,
+      fingerprint,
+    });
+    reportS3Key = written.report_s3_key;
+    reportUrl = written.report_url;
+    if (options.persistFingerprint !== false) {
+      await persistPdfFingerprint(
+        row,
+        { fingerprint, report_s3_key: reportS3Key },
+        options,
+      );
+    }
+  } else if (failedKeys.length) {
+    console.warn(
+      '[reportPdf] skipping cache — photo fetch failed',
+      row.slip_number,
+      failedKeys.join(','),
+    );
   }
 
   return {
@@ -185,10 +235,14 @@ async function generateTripPdf(row, options = {}) {
     report_url: reportUrl,
     slip_number: row.slip_number,
     filename: `${row.slip_number}_report.pdf`,
+    fromCache: false,
+    fingerprint,
   };
 }
 
 module.exports = {
   generateTripPdf,
+  loadPhotoDataUrls,
+  pdfContentFingerprint,
   PHOTO_FIELDS,
 };

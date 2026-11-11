@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "product": "Admin Builder image editor",
+  "integration_state": "isolated_prototype",
+  "network_service_enabled": false,
+  "never_overwrite_source": true,
+  "require_edited_derivative_label": true,
+  "require_source_output_hashes": true,
+  "require_human_visual_review": true,
+  "input_limits": {
+    "max_bytes": 26214400,
+    "max_pixels": 20000000,
+    "allowed_formats": ["jpeg", "png"]
+  },
+  "timestamp": {
+    "enabled": true,
+    "requires_dimension_matched_reference_patch": true,
+    "unsupported_recovery_fails_safely": true
+  },
+  "lighting": {
+    "default_mode": "none",
+    "synthetic_scene_content": false,
+    "presets": {
+      "deep_night": {
+        "exposure_ev": -2.2,
+        "min_exposure_ev": -2.7,
+        "max_exposure_ev": 0,
+        "target_luminance": 34,
+        "gamma": 1,
+        "saturation": 0.78,
+        "contrast": 1,
+        "red_gain": 0.94,
+        "blue_gain": 1.08
+      },
+      "night": {
+        "exposure_ev": -1.6,
+        "min_exposure_ev": -2.2,
+        "max_exposure_ev": 0.05,
+        "target_luminance": 48,
+        "gamma": 1,
+        "saturation": 0.84,
+        "contrast": 1,
+        "red_gain": 0.96,
+        "blue_gain": 1.05
+      },
+      "dawn": {
+        "exposure_ev": -0.2,
+        "min_exposure_ev": -0.8,
+        "max_exposure_ev": 0.35,
+        "target_luminance": 78,
+        "gamma": 1,
+        "saturation": 0.92,
+        "contrast": 1,
+        "red_gain": 1.03,
+        "blue_gain": 0.98
+      },
+      "day": {
+        "exposure_ev": 0.15,
+        "min_exposure_ev": 0,
+        "max_exposure_ev": 0.85,
+        "target_luminance": 100,
+        "gamma": 1,
+        "saturation": 1,
+        "contrast": 1,
+        "red_gain": 1,
+        "blue_gain": 1
+      },
+      "dusk": {
+        "exposure_ev": -0.85,
+        "min_exposure_ev": -1.5,
+        "max_exposure_ev": 0,
+        "target_luminance": 62,
+        "gamma": 1,
+        "saturation": 0.9,
+        "contrast": 1,
+        "red_gain": 1.04,
+        "blue_gain": 0.96
+      }
+    }
+  },
+  "quality": {
+    "preserve_dimensions": true,
+    "upscale": false,
+    "sharpen": false,
+    "denoise": false
+  }
+}

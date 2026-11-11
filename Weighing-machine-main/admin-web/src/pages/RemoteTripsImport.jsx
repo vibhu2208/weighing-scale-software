@@ -377,7 +377,11 @@ export default function RemoteTripsImport() {
         </div>
       )}
 
-      <CreatedTripsSync highlightIds={createdIds} refreshKey={refreshKey} />
+      <CreatedTripsSync
+        highlightIds={createdIds}
+        refreshKey={refreshKey}
+        editFrom="/remote-trips/import"
+      />
     </div>
   );
 }

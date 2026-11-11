@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "profile_id": "camera_a_demo",
+  "profile_version": 1,
+  "display_name": "DEMO - UNCALIBRATED - Not a real camera",
+  "calibrated": false,
+  "expected_width": 1280,
+  "expected_height": 720,
+  "timezone": "Asia/Kolkata",
+  "timestamp": {
+    "roi": {
+      "x": 8,
+      "y": 8,
+      "width": 300,
+      "height": 32
+    },
+    "format": "%d-%m-%Y %H:%M:%S",
+    "font_size_px": 19,
+    "font_family": "monospace",
+    "color_rgb": [235, 235, 235],
+    "reference_patch_required": true
+  },
+  "lighting": {
+    "presets": {
+      "deep_night": {
+        "exposure_ev": -2.2,
+        "min_exposure_ev": -2.7,
+        "max_exposure_ev": 0,
+        "target_luminance": 34,
+        "gamma": 1,
+        "saturation": 0.78,
+        "contrast": 1,
+        "red_gain": 0.94,
+        "blue_gain": 1.08
+      },
+      "night": {
+        "exposure_ev": -1.6,
+        "min_exposure_ev": -2.2,
+        "max_exposure_ev": 0.05,
+        "target_luminance": 48,
+        "gamma": 1,
+        "saturation": 0.84,
+        "contrast": 1,
+        "red_gain": 0.96,
+        "blue_gain": 1.05
+      },
+      "dawn": {
+        "exposure_ev": -0.2,
+        "min_exposure_ev": -0.8,
+        "max_exposure_ev": 0.35,
+        "target_luminance": 78,
+        "gamma": 1,
+        "saturation": 0.92,
+        "contrast": 1,
+        "red_gain": 1.03,
+        "blue_gain": 0.98
+      },
+      "day": {
+        "exposure_ev": 0.15,
+        "min_exposure_ev": 0,
+        "max_exposure_ev": 0.85,
+        "target_luminance": 100,
+        "gamma": 1,
+        "saturation": 1,
+        "contrast": 1,
+        "red_gain": 1,
+        "blue_gain": 1
+      },
+      "dusk": {
+        "exposure_ev": -0.85,
+        "min_exposure_ev": -1.5,
+        "max_exposure_ev": 0,
+        "target_luminance": 62,
+        "gamma": 1,
+        "saturation": 0.9,
+        "contrast": 1,
+        "red_gain": 1.04,
+        "blue_gain": 0.96
+      }
+    }
+  },
+  "notes": "Every value is illustrative. Calibrate against approved camera samples before use."
+}

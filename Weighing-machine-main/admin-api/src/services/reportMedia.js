@@ -23,9 +23,15 @@ const PHOTO_FIELDS = [
  * Resolve usable S3 photo keys for a trip row.
  * Fills from remote_trips + S3 listings when mirror columns are empty or point
  * at missing objects — same logic the edit UI uses for previews.
+ *
+ * @param {object} row
+ * @param {{ verifyExists?: boolean }} [options]
+ *   verifyExists (default true): HEAD each key. PDF generation sets false and
+ *   relies on GetObject 404 instead (avoids HEAD+GET double round-trips).
  */
-async function hydratePhotoKeys(row) {
+async function hydratePhotoKeys(row, options = {}) {
   if (!row) return row;
+  const verifyExists = options.verifyExists !== false;
   const out = { ...row };
 
   try {
@@ -49,16 +55,18 @@ async function hydratePhotoKeys(row) {
     /* remote_trips fallback is best-effort */
   }
 
-  if (isConfigured()) {
-    for (const field of PHOTO_FIELDS) {
-      const key = out[field];
-      if (!key) continue;
-      try {
-        if (!(await objectExists(key))) out[field] = null;
-      } catch {
-        out[field] = null;
-      }
-    }
+  if (verifyExists && isConfigured()) {
+    await Promise.all(
+      PHOTO_FIELDS.map(async (field) => {
+        const key = out[field];
+        if (!key) return;
+        try {
+          if (!(await objectExists(key))) out[field] = null;
+        } catch {
+          out[field] = null;
+        }
+      }),
+    );
   }
 
   const stillMissing = PHOTO_FIELDS.filter((field) => !out[field]);
@@ -67,9 +75,8 @@ async function hydratePhotoKeys(row) {
     for (const siteId of siteIdAliases(getSiteId())) {
       prefixes.push(`sites/${siteId}/mirror/${out.slip_number}/`);
     }
-    for (const prefix of prefixes) {
-      // eslint-disable-next-line no-await-in-loop
-      const listed = await listKeys(prefix, 40);
+    const listings = await Promise.all(prefixes.map((prefix) => listKeys(prefix, 40)));
+    for (const listed of listings) {
       for (const key of listed) {
         if (!/\.(jpe?g|png|webp|gif)$/i.test(key)) continue;
         const field = inferPhotoFieldFromKey(key);
@@ -85,27 +92,21 @@ async function attachMediaUrls(row) {
   const hydrated = await hydratePhotoKeys(row);
   if (!hydrated || !isConfigured()) return hydrated;
   const out = { ...hydrated };
-  for (const field of PHOTO_FIELDS) {
-    const key = out[field];
-    if (!key) continue;
-    try {
-      if (!(await objectExists(key))) {
-        out[field] = null;
+  await Promise.all(
+    PHOTO_FIELDS.map(async (field) => {
+      const key = out[field];
+      if (!key) return;
+      try {
+        // Presign without a prior HEAD — broken keys simply fail at image load.
+        out[`${field}_url`] = await presignGet(key);
+      } catch {
         out[`${field}_url`] = null;
-        continue;
       }
-      out[`${field}_url`] = await presignGet(key);
-    } catch {
-      out[`${field}_url`] = null;
-    }
-  }
+    }),
+  );
   if (out.report_s3_key) {
     try {
-      if (await objectExists(out.report_s3_key)) {
-        out.report_url = await presignGet(out.report_s3_key);
-      } else {
-        out.report_url = null;
-      }
+      out.report_url = await presignGet(out.report_s3_key);
     } catch {
       out.report_url = null;
     }

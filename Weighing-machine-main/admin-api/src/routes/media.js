@@ -2,16 +2,25 @@
 
 const express = require('express');
 const { authMiddleware } = require('../auth');
-const { getSiteId } = require('../db');
+const { getSiteId, query } = require('../db');
 const {
   presignGet,
   presignPut,
   putObject,
+  copyObject,
+  getObjectBuffer,
   mirrorPhotoKey,
+  mirrorPhotoThumbKey,
   remoteTripPhotoKey,
+  remoteTripPhotoThumbKey,
   fillVehicleStillKey,
   isConfigured,
 } = require('../services/s3Presign');
+const { clearPdfFingerprints } = require('../services/pdfContentCache');
+const {
+  ABSOLUTE_MAX_BYTES,
+  normalizeReportPhoto,
+} = require('../services/photoNormalize');
 
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
 
@@ -22,11 +31,48 @@ function parseImageBuffer(imageBase64) {
   if (!imageBase64 || typeof imageBase64 !== 'string') {
     throw new Error('imageBase64 is required');
   }
+  // Base64 expands ~4/3; keep intake under absolute decoded ceiling.
+  if (imageBase64.length > ABSOLUTE_MAX_BYTES * 1.4) {
+    throw new Error('Image too large to process (max ~28 MB)');
+  }
   const match = imageBase64.match(/^data:image\/[\w+.-]+;base64,(.+)$/);
   const raw = match ? match[1] : imageBase64;
   const buf = Buffer.from(raw, 'base64');
   if (!buf.length) throw new Error('Invalid image data');
+  if (buf.length > ABSOLUTE_MAX_BYTES) {
+    throw new Error('Image too large to process (max ~28 MB)');
+  }
   return buf;
+}
+
+/** Decode → optional resize (>12 MB) → store only the final report-sized bytes. */
+async function storeReportPhoto(key, rawBody, preferredType) {
+  const normalized = await normalizeReportPhoto(rawBody);
+  const contentType = normalized.contentType || preferredType || 'image/jpeg';
+  await putObject(key, normalized.body, contentType);
+  if (normalized.resized) {
+    console.log(
+      '[media] resized oversized photo',
+      key,
+      `${normalized.originalBytes}→${normalized.storedBytes}`,
+    );
+  }
+  return normalized;
+}
+
+/** Small JPEG for list grids — original stays untouched for PDFs. */
+async function writePhotoThumb(fullKey, body, thumbKey) {
+  try {
+    const sharp = require('sharp');
+    const thumb = await sharp(body)
+      .rotate()
+      .resize({ width: 320, height: 240, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 70, mozjpeg: true })
+      .toBuffer();
+    await putObject(thumbKey || fullKey.replace(/\.jpe?g$/i, '.thumb.jpg'), thumb, 'image/jpeg');
+  } catch (err) {
+    console.warn('[media] thumb skipped', err.message);
+  }
 }
 
 router.get('/presign', async (req, res) => {
@@ -95,9 +141,57 @@ router.post('/remote-trip-upload', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'slip and slot (1-3) required' });
     }
     const key = remoteTripPhotoKey(slipNum, slotNum, photoPass);
-    const body = parseImageBuffer(imageBase64);
-    await putObject(key, body, contentType || 'image/jpeg');
-    return res.json({ ok: true, key, slot: slotNum, pass: photoPass });
+    const thumbKey = remoteTripPhotoThumbKey(slipNum, slotNum, photoPass);
+    const raw = parseImageBuffer(imageBase64);
+    const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
+    await writePhotoThumb(key, stored.body, thumbKey);
+    await clearPdfFingerprints(query, slipNum).catch(() => {});
+    return res.json({
+      ok: true,
+      key,
+      thumbKey,
+      slot: slotNum,
+      pass: photoPass,
+      resized: stored.resized,
+      bytes: stored.storedBytes,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** Build/refresh a list thumb after a direct S3 PUT upload. */
+router.post('/remote-trip-thumb', async (req, res) => {
+  try {
+    if (!isConfigured()) {
+      return res.status(503).json({ ok: false, error: 'S3 not configured' });
+    }
+    const key = String(req.body?.key || '').trim();
+    if (!key.startsWith('remote-trips/') && !key.startsWith('sites/')) {
+      return res.status(400).json({ ok: false, error: 'key not allowed' });
+    }
+    let body = await getObjectBuffer(key);
+    if (!body) return res.status(404).json({ ok: false, error: 'object not found' });
+    // Direct S3 PUTs can leave oversized originals — replace in place, then thumb.
+    const normalized = await normalizeReportPhoto(body);
+    if (normalized.resized) {
+      await putObject(key, normalized.body, 'image/jpeg');
+      body = normalized.body;
+      console.log(
+        '[media] replaced oversized S3 photo',
+        key,
+        `${normalized.originalBytes}→${normalized.storedBytes}`,
+      );
+    }
+    const thumbKey = key.replace(/\.jpe?g$/i, '.thumb.jpg');
+    await writePhotoThumb(key, body, thumbKey);
+    return res.json({
+      ok: true,
+      key,
+      thumbKey,
+      resized: normalized.resized,
+      bytes: normalized.storedBytes,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
@@ -122,12 +216,59 @@ router.post('/fill-vehicle-still', async (req, res) => {
       });
     }
     const key = fillVehicleStillKey(truck, photoPass, slotNum);
-    const body = parseImageBuffer(imageBase64);
-    await putObject(key, body, contentType || 'image/jpeg');
+    const raw = parseImageBuffer(imageBase64);
+    const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
     const url = await presignGet(key);
-    return res.json({ ok: true, key, url, slot: slotNum, pass: photoPass });
+    return res.json({
+      ok: true,
+      key,
+      url,
+      slot: slotNum,
+      pass: photoPass,
+      resized: stored.resized,
+      bytes: stored.storedBytes,
+    });
   } catch (err) {
     return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Server-side S3 copy for mapped bulk-photo slots (same bytes, new key).
+ * Avoids re-uploading the same base64 image for AC1→AC1+AC2 style mappings.
+ */
+router.post('/remote-trip-copy', async (req, res) => {
+  try {
+    if (!isConfigured()) {
+      return res.status(503).json({ ok: false, error: 'S3 not configured' });
+    }
+    const { sourceKey, slip, slot, pass } = req.body || {};
+    const slipNum = String(slip || '').trim();
+    const slotNum = Number(slot);
+    const photoPass = pass === 'arrival' ? 'arrival' : 'departure';
+    const fromKey = String(sourceKey || '').trim();
+    if (!fromKey || !slipNum || !Number.isFinite(slotNum) || slotNum < 1 || slotNum > 3) {
+      return res.status(400).json({
+        ok: false,
+        error: 'sourceKey, slip, and slot (1-3) required',
+      });
+    }
+    if (!fromKey.startsWith('remote-trips/') && !fromKey.startsWith('sites/')) {
+      return res.status(400).json({ ok: false, error: 'sourceKey not allowed' });
+    }
+    const key = remoteTripPhotoKey(slipNum, slotNum, photoPass);
+    const thumbKey = remoteTripPhotoThumbKey(slipNum, slotNum, photoPass);
+    await copyObject(fromKey, key);
+    const fromThumb = fromKey.replace(/\.jpe?g$/i, '.thumb.jpg');
+    try {
+      await copyObject(fromThumb, thumbKey);
+    } catch {
+      /* source may predate thumbs */
+    }
+    await clearPdfFingerprints(query, slipNum).catch(() => {});
+    return res.json({ ok: true, key, thumbKey, slot: slotNum, pass: photoPass, copiedFrom: fromKey });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -146,9 +287,20 @@ router.post('/upload', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'slip and slot (1-3) required' });
     }
     const key = mirrorPhotoKey(siteId, slipNum, slotNum, photoPass);
-    const body = parseImageBuffer(imageBase64);
-    await putObject(key, body, contentType || 'image/jpeg');
-    return res.json({ ok: true, key, slot: slotNum, pass: photoPass });
+    const thumbKey = mirrorPhotoThumbKey(siteId, slipNum, slotNum, photoPass);
+    const raw = parseImageBuffer(imageBase64);
+    const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
+    await writePhotoThumb(key, stored.body, thumbKey);
+    await clearPdfFingerprints(query, slipNum, siteId).catch(() => {});
+    return res.json({
+      ok: true,
+      key,
+      thumbKey,
+      slot: slotNum,
+      pass: photoPass,
+      resized: stored.resized,
+      bytes: stored.storedBytes,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

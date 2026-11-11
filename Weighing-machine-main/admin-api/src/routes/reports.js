@@ -17,10 +17,7 @@ const {
 const { createCommand } = require('../services/commandService');
 const { siteIdAliases } = require('../siteId');
 const { generateTripPdf } = require('../services/reportPdfService');
-const {
-  attachMediaUrls,
-  hydratePhotoKeys,
-} = require('../services/reportMedia');
+const { attachMediaUrls } = require('../services/reportMedia');
 const { getAdvanceSettings } = require('../services/settingsService');
 
 async function reportCompanyName() {
@@ -61,17 +58,25 @@ router.use(authMiddleware);
 router.get('/', async (req, res) => {
   try {
     const siteId = getSiteId();
-    try {
-      const { reassertVehicleFromAppliedEdits } = require('../services/commandService');
-      await reassertVehicleFromAppliedEdits({ hours: 72, limit: 80 });
-    } catch (_e) {
-      /* optional */
-    }
     const filters = req.query || {};
-    const result = await queryPaginated(query, siteId, filters);
-    const summary = await summarise(query, siteId, filters);
-    const rows = await Promise.all(result.rows.map(attachMediaUrls));
-    return res.json({ ok: true, rows, pagination: result.pagination, summary });
+    // List UI does not use photo URLs — skip S3 enrichment here.
+    // Vehicle plate reassert stays on the 20s background worker only.
+    const [result, summary] = await Promise.all([
+      queryPaginated(query, siteId, filters, { skipCount: true }),
+      summarise(query, siteId, filters),
+    ]);
+    const total = Number(summary?.total) || 0;
+    const pageSize = result.pagination.pageSize;
+    return res.json({
+      ok: true,
+      rows: result.rows,
+      pagination: {
+        ...result.pagination,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+      summary,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
@@ -197,30 +202,23 @@ router.get('/:slip/pdf', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Report not found' });
     }
 
-    // Prefer mirror fields, then hydrate missing/stale keys from remote + S3
-    // (same path as GET /:slip edit previews).
-    row = await hydratePhotoKeys({ ...(remote || {}), ...(row || {}) });
-
-    const built = await generateTripPdf(row, { siteId, upload: true });
-
-    if (built.report_s3_key) {
-      await query(
-        `UPDATE transactions_mirror
-         SET report_s3_key = $3, updated_at = now()
-         WHERE site_id = ANY($1::text[]) AND slip_number = $2`,
-        [aliases, row.slip_number, built.report_s3_key],
-      );
-      await query(
-        `UPDATE remote_trips SET report_s3_key = $2 WHERE UPPER(slip_number) = UPPER($1)`,
-        [row.slip_number, built.report_s3_key],
-      );
-    }
+    // Prefer mirror fields over remote. Do not hydrate before the cache check —
+    // fingerprint uses DB photo keys; hydrate only runs on a cache miss inside
+    // generateTripPdf → loadPhotoDataUrls.
+    const built = await generateTripPdf(
+      { ...(remote || {}), ...(row || {}) },
+      {
+        siteId,
+        upload: true,
+      },
+    );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${built.filename}"`,
     );
+    res.setHeader('X-PDF-Cache', built.fromCache ? 'HIT' : 'MISS');
     return res.send(built.pdf);
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });

@@ -11,6 +11,7 @@ import {
   toDatetimeLocalValue,
   ymd,
 } from '../lib/format.js';
+import { reportEditPath } from '../lib/reportsListState.js';
 import { generateFillTimes, timesCollide } from '../lib/slipFillTimes.js';
 import { generateFillWeights } from '../lib/slipFillWeights.js';
 import {
@@ -599,6 +600,8 @@ function FillListsConfigModal({ open, vehicles, destinations, onClose, onSaved }
                             <img
                               src={preview}
                               alt=""
+                              loading="lazy"
+                              decoding="async"
                               className="h-14 w-full rounded object-cover bg-slate-800 border border-slate-700"
                             />
                           ) : (
@@ -1805,6 +1808,7 @@ export default function FillBlockedSlips() {
                   <th className="p-3">Status</th>
                   <th className="p-3">Vehicle</th>
                   <th className="p-3">Details</th>
+                  <th className="p-3">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1832,6 +1836,18 @@ export default function FillBlockedSlips() {
                         </span>
                       )}
                     </td>
+                    <td className="p-3">
+                      {r.status === 'created' && r.slip_number ? (
+                        <Link
+                          to={reportEditPath(r.slip_number, { from: '/plan-gaps/fill' })}
+                          className="text-brand-400 hover:underline text-xs"
+                        >
+                          Edit
+                        </Link>
+                      ) : (
+                        <span className="text-slate-600 text-xs">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1840,7 +1856,11 @@ export default function FillBlockedSlips() {
         </div>
       )}
 
-      <CreatedTripsSync highlightIds={createdIds} refreshKey={refreshKey} />
+      <CreatedTripsSync
+        highlightIds={createdIds}
+        refreshKey={refreshKey}
+        editFrom="/plan-gaps/fill"
+      />
     </div>
   );
 }

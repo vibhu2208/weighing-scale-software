@@ -28,6 +28,7 @@ export default defineConfig({
         '/media',
         '/remote-trips',
         '/slip-reservations',
+        '/admin-builder',
         '/health',
       ].map((prefix) => [
         prefix,

@@ -15,6 +15,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1061.0",
     "@aws-sdk/s3-request-presigner": "^3.1061.0",
+    "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -22,6 +23,7 @@
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.22.0",
-    "puppeteer": "^23.11.1"
+    "puppeteer": "^23.11.1",
+    "sharp": "^0.35.5"
   }
 }

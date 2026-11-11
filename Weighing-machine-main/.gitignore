@@ -36,6 +36,7 @@ backups/*
 !backups/.gitkeep
 logs/*
 !logs/.gitkeep
+admin-api/admin-builder-data/
 
 # OS / Editor
 .DS_Store

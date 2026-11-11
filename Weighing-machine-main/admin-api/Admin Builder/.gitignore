@@ -1,0 +1,9 @@
+prototype/node_modules/
+prototype/runs/
+prototype/local-data/
+prototype/.test-tmp/
+prototype/.coverage/
+private_samples/
+Test-images/
+/research/
+.DS_Store

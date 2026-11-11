@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { reportsListPath } from '../lib/reportsListState.js';
+import { reportEditBackLabel, reportEditBackPath } from '../lib/reportsListState.js';
 import { api } from '../api/client.js';
 import { fmtDate, fmtKg, toDatetimeLocalValue } from '../lib/format.js';
 import blankPhotoUrl from '../assets/blank-photo.png';
@@ -48,9 +48,21 @@ function PhotoSlot({
       />
       <div className="mt-2 h-24 rounded border border-slate-700 bg-slate-900/50 overflow-hidden flex items-center justify-center">
         {previewUrl ? (
-          <img src={previewUrl} alt={title} className="h-full w-full object-cover" />
+          <img
+            src={previewUrl}
+            alt={title}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover"
+          />
         ) : existingUrl ? (
-          <img src={existingUrl} alt={title} className="h-full w-full object-cover" />
+          <img
+            src={existingUrl}
+            alt={title}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover"
+          />
         ) : (
           <div className="flex flex-col items-center gap-2">
             <span className="text-[10px] text-slate-500 px-2 text-center">No photo</span>
@@ -73,7 +85,8 @@ export default function ReportEdit() {
   const { slip } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const reportsBackTo = reportsListPath(searchParams);
+  const reportsBackTo = reportEditBackPath(searchParams);
+  const reportsBackLabel = reportEditBackLabel(searchParams);
   const [report, setReport] = useState(null);
   const [form, setForm] = useState({});
   const [photos, setPhotos] = useState({});
@@ -184,13 +197,17 @@ export default function ReportEdit() {
     setMessage('');
     try {
       const photoS3Keys = [];
+      const uploadJobs = [];
       for (const { pass } of PHOTO_PASSES) {
         for (const slot of PHOTO_SLOTS) {
           const file = photos[photoKey(pass, slot)];
-          if (file) {
-            const uploaded = await uploadPhoto(pass, slot, file);
-            if (uploaded) photoS3Keys.push(uploaded);
-          }
+          if (file) uploadJobs.push(uploadPhoto(pass, slot, file));
+        }
+      }
+      if (uploadJobs.length) {
+        const uploaded = await Promise.all(uploadJobs);
+        for (const item of uploaded) {
+          if (item) photoS3Keys.push(item);
         }
       }
 
@@ -285,7 +302,7 @@ export default function ReportEdit() {
       <div>
         <p className="text-red-400">{error}</p>
         <Link to={reportsBackTo} className="text-brand-400 text-sm mt-2 inline-block">
-          Back to reports
+          {reportsBackLabel === '← Back' ? 'Back' : 'Back to reports'}
         </Link>
       </div>
     );
@@ -298,7 +315,7 @@ export default function ReportEdit() {
       <div className="flex items-center justify-between">
         <div>
           <Link to={reportsBackTo} className="text-xs text-brand-400 hover:underline">
-            ← Reports
+            {reportsBackLabel}
           </Link>
           <h2 className="text-xl font-semibold mt-1">Edit report {slip}</h2>
           <p className="text-sm text-slate-400">

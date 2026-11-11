@@ -32,6 +32,18 @@ async function verifyLogin(email, password) {
   };
 }
 
+function requireAdmin(req, res, next) {
+  const role = String(req.user?.role || '').trim().toLowerCase();
+  if (role !== 'admin') {
+    return res.status(403).json({
+      ok: false,
+      error: 'Administrator role required',
+      code: 'ADMIN_ROLE_REQUIRED',
+    });
+  }
+  return next();
+}
+
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -65,5 +77,6 @@ async function bootstrapAdminUser() {
 module.exports = {
   verifyLogin,
   authMiddleware,
+  requireAdmin,
   bootstrapAdminUser,
 };

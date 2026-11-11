@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const ts = require('./timestamp');
 const { ensureDir } = require('./fileStorage');
+const { shrinkReportPdf } = require('./pdfShrink');
 
 let BrowserWindow = null;
 try {
@@ -86,7 +87,11 @@ async function renderHtmlToPdf(html, options = {}) {
         setTimeout(() => reject(new Error('PDF render timed out')), pdfTimeoutMs);
       }),
     ]);
-    return { ok: true, pdf };
+    // Chromium re-embeds every photo as a raw RGB Flate stream, which inflates
+    // a slip page from ~20 KB of JPEG to well over a megabyte. Re-encode those
+    // streams as JPEG at the same pixel dimensions: identical page, far fewer
+    // bytes. Returns the original buffer if anything is off.
+    return { ok: true, pdf: await shrinkReportPdf(Buffer.from(pdf)) };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
   } finally {
