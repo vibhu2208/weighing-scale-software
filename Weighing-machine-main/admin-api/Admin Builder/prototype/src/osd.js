@@ -443,61 +443,71 @@ export function formatOsdText(datetimeLocal) {
   return `${d}-${mo}-${y} ${h}:${mi}:${s}`;
 }
 
-// Erase the old stamp: fill from surrounding pixels (distance-weighted) and
-// add matching sensor noise so the patch is not flat.
-export function eraseOsd(pixels, width, height, osd) {
+function osdWipeBounds(osd, width, height) {
   const f = sizeScale(height);
-  // Wide enough that the fill never samples glyph edges the band estimate missed.
-  const pad = Math.max(4, Math.round(osd.bandHeight * 0.35));
+  // Cover soft glyph halos, black outlines (~2px atlas), and WINDOW_OFFSET overhang.
+  const pad = Math.max(
+    6,
+    Math.round(osd.bandHeight * 0.55),
+    Math.round(Math.abs(WINDOW_OFFSET) * osd.pitch + 6 * f),
+  );
   const x0 = Math.max(0, osd.left - pad);
   const x1 = Math.min(width - 1, osd.right + pad);
   const y0 = Math.max(0, osd.top - pad);
   const y1 = Math.min(height - 1, osd.bottom + pad);
+  return { x0, x1, y0, y1, f };
+}
+
+// Copy the wiped stamp band from `source` into `dest` (same dimensions).
+// Used after relight so the stamp never sits on a lifted flat plate.
+export function restoreOsdBand(dest, source, width, height, osd) {
+  const { x0, x1, y0, y1 } = osdWipeBounds(osd, width, height);
+  const out = Buffer.from(dest);
+  for (let y = y0; y <= y1; y += 1) {
+    const row = (y * width + x0) * 3;
+    const bytes = (x1 - x0 + 1) * 3;
+    source.copy(out, row, row, row + bytes);
+  }
+  return out;
+}
+
+// Erase the old stamp: wipe the full padded stamp rectangle, fill from
+// surrounding pixels (distance-weighted), and add matching sensor noise.
+export function eraseOsd(pixels, width, height, osd) {
+  const { x0, x1, y0, y1, f } = osdWipeBounds(osd, width, height);
   const w = x1 - x0 + 1;
   const h = y1 - y0 + 1;
-  // Threshold from the local background, not a fixed level: the soft halo of a
-  // glyph on a near-black background is faint here but a later lift to daylight
-  // would magnify it into a readable ghost of the old time.
-  const lumas = new Float32Array(w * h);
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) lumas[y * w + x] = luma(pixels, ((y0 + y) * width + (x0 + x)) * 3);
-  }
-  const sorted = Float32Array.from(lumas).sort();
-  const dark = osd.polarity === 'dark';
-  const background = sorted[Math.floor(sorted.length * (dark ? 0.65 : 0.4))];
-  const textLuma = 0.2126 * osd.textColor[0] + 0.7152 * osd.textColor[1] + 0.0722 * osd.textColor[2];
-  const reach = Math.max(12, Math.min(0.22 * Math.abs(textLuma - background), dark ? background : 120 - background));
-  const hot = new Uint8Array(w * h);
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      const o = ((y0 + y) * width + (x0 + x)) * 3;
-      // Both sides: white text carries a dark outline that shows on bright scenes.
-      if (Math.abs(lumas[y * w + x] - background) > reach && isNearWhite(pixels, o, 70)) hot[y * w + x] = 1;
-    }
-  }
-  const grow = Math.max(3, Math.round(3 * f));
+  // Full-band mask: glyph-only hot masks leave soft edges that lift into
+  // readable ghost digits (e.g. leftover strokes beside a new day "16").
   const mask = new Uint8Array(w * h);
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      if (!hot[y * w + x]) continue;
-      for (let dy = -grow; dy <= grow; dy += 1) {
-        for (let dx = -grow; dx <= grow; dx += 1) {
-          const yy = y + dy;
-          const xx = x + dx;
-          if (yy >= 0 && yy < h && xx >= 0 && xx < w) mask[yy * w + xx] = 1;
-        }
-      }
+  mask.fill(1);
+
+  // Background from a ring outside the wipe box; used so inpaint never samples
+  // leftover bright/dark glyph halo just beyond the pad.
+  const bgSamples = [];
+  for (let y = Math.max(0, y0 - 3); y <= Math.min(height - 1, y1 + 3); y += 1) {
+    for (let x = Math.max(0, x0 - 3); x <= Math.min(width - 1, x1 + 3); x += 1) {
+      if (x >= x0 && x <= x1 && y >= y0 && y <= y1) continue;
+      bgSamples.push(luma(pixels, (y * width + x) * 3));
     }
   }
+  bgSamples.sort((a, b) => a - b);
+  const dark = osd.polarity === 'dark';
+  const background = bgSamples.length
+    ? bgSamples[Math.floor(bgSamples.length * (dark ? 0.65 : 0.35))]
+    : dark
+      ? 200
+      : 20;
+  const inkSlack = Math.max(14, Math.round(0.18 * Math.abs((dark ? 0 : 255) - background)));
+
   let sum = 0;
   let sum2 = 0;
   let count = 0;
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 1; x < w; x += 1) {
-      if (mask[y * w + x] || mask[y * w + x - 1]) continue;
-      const d = luma(pixels, ((y0 + y) * width + x0 + x) * 3) - luma(pixels, ((y0 + y) * width + x0 + x - 1) * 3);
-      sum += d; sum2 += d * d; count += 1;
-    }
+  for (let i = 1; i < bgSamples.length; i += 1) {
+    const d = bgSamples[i] - bgSamples[i - 1];
+    sum += d;
+    sum2 += d * d;
+    count += 1;
   }
   const noise = count > 10 ? Math.sqrt(Math.max(0, sum2 / count - (sum / count) ** 2) / 2) : 0;
   let seed = 1234567;
@@ -511,7 +521,7 @@ export function eraseOsd(pixels, width, height, osd) {
     for (let x = 0; x < w; x += 1) {
       if (!mask[y * w + x]) continue;
       let value = null;
-      for (const radius of [3, 8, 18, 40].map((v) => Math.round(v * f))) {
+      for (const radius of [3, 8, 18, 40, 70].map((v) => Math.round(v * f))) {
         let r = 0;
         let g = 0;
         let b = 0;
@@ -526,14 +536,19 @@ export function eraseOsd(pixels, width, height, osd) {
             if (gx < 0 || gx >= width) continue;
             const inBox = yy >= 0 && yy < h && xx >= 0 && xx < w;
             if (inBox && mask[yy * w + xx]) continue;
-            const wt = 1 / (1 + dx * dx + dy * dy);
             const o = (gy * width + gx) * 3;
+            // Skip residual stamp ink / blur halo outside the wipe box.
+            if (Math.abs(luma(pixels, o) - background) > inkSlack) continue;
+            const wt = 1 / (1 + dx * dx + dy * dy);
             r += pixels[o] * wt; g += pixels[o + 1] * wt; b += pixels[o + 2] * wt; wsum += wt;
           }
         }
         if (wsum > 0.3) { value = [r / wsum, g / wsum, b / wsum]; break; }
       }
-      if (!value) continue;
+      if (!value) {
+        // Fall back to neutral background estimate when the ring is empty.
+        value = [background, background, background];
+      }
       const o = ((y0 + y) * width + (x0 + x)) * 3;
       const n = gauss() * noise;
       out[o] = clamp8(value[0] + n);

@@ -1,5 +1,10 @@
 import React, { useState } from 'react';
 import { api } from '../api/client.js';
+import {
+  destinationSlotsFor,
+  isOpenTicket,
+  loadPhotoMapping,
+} from '../lib/bulkVehiclePhotos.js';
 
 const JOBS = [
   { pass: 'arrival', slot: 1, label: 'Arrival cam 1', timeField: 'timestamp_in' },
@@ -8,12 +13,36 @@ const JOBS = [
   { pass: 'departure', slot: 2, label: 'Departure cam 2', timeField: 'timestamp_out' },
 ];
 
-const STOP_RE = /GEMINI_API_KEY|not in the fill vehicle list|S3 not configured|free tier|Enable billing/i;
+const STOP_RE =
+  /Admin Builder is processing|not in the fill vehicle list|S3 not configured|Missing .+ still|Reference image not found/i;
 
 export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone }) {
   const [status, setStatus] = useState('');
   const [note, setNote] = useState('');
   const busy = Boolean(status);
+
+  async function applyMappingCopies(result, job, mapping) {
+    const sourceKey = result?.key;
+    if (!sourceKey || !trip?.slip_number) return;
+    const destinations = destinationSlotsFor(job.pass, job.slot, mapping);
+    const photoS3Keys = [{ slot: job.slot, pass: job.pass, key: sourceKey }];
+    for (const dest of destinations) {
+      if (dest === job.slot) continue;
+      if (isOpenTicket(trip.ticket_status) && job.pass === 'departure') continue;
+      const copied = await api.copyRemoteTripPhoto(
+        sourceKey,
+        trip.slip_number,
+        dest,
+        job.pass,
+      );
+      if (copied?.key) {
+        photoS3Keys.push({ slot: dest, pass: job.pass, key: copied.key });
+      }
+    }
+    if (photoS3Keys.length > 1) {
+      await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+    }
+  }
 
   async function run() {
     setNote('');
@@ -21,6 +50,7 @@ export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone 
     const notes = [];
     let changed = false;
     let toldDeparture = false;
+    const mapping = loadPhotoMapping();
     try {
       for (const job of JOBS) {
         if (!trip?.[job.timeField]) {
@@ -35,7 +65,11 @@ export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone 
         }
         setStatus(`${job.label}…`);
         try {
-          await api.generateRemoteTripPhoto(trip.id, { pass: job.pass, slot: job.slot });
+          const result = await api.generateRemoteTripPhoto(trip.id, {
+            pass: job.pass,
+            slot: job.slot,
+          });
+          await applyMappingCopies(result, job, mapping);
           changed = true;
         } catch (err) {
           const message = err.message || 'Could not create image';

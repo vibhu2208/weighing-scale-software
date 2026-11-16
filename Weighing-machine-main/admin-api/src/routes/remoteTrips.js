@@ -349,7 +349,10 @@ router.post('/', async (req, res) => {
 
 router.post('/:id/generate-photo', async (req, res) => {
   try {
-    const result = await generateRemoteTripPhoto(query, req.params.id, req.body || {});
+    const result = await generateRemoteTripPhoto(query, req.params.id, {
+      ...(req.body || {}),
+      operatorEmail: req.user?.email,
+    });
     return res.json({
       ok: true,
       trip: await attachTripMedia(result.trip),
@@ -358,7 +361,12 @@ router.post('/:id/generate-photo', async (req, res) => {
       key: result.key,
     });
   } catch (err) {
-    const status = /Gemini image edit failed|timed out/.test(err.message) ? 502 : 400;
+    const status =
+      /Admin Builder|processing other images|did not return an image|unchanged image|OSD_NOT_FOUND|timed out/i.test(
+        err.message,
+      )
+        ? 502
+        : 400;
     return res.status(status).json({ ok: false, error: err.message });
   }
 });

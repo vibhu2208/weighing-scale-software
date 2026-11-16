@@ -1,28 +1,12 @@
 'use strict';
 
-const path = require('path');
-const { pathToFileURL } = require('url');
 const express = require('express');
 const { authMiddleware, requireAdmin } = require('../auth');
+const { getAdminBuilderWorkspace } = require('../services/adminBuilderWorkspace');
 
 const router = express.Router();
 router.use(authMiddleware);
 router.use(requireAdmin);
-
-const WORKSPACE_MODULE = path.resolve(
-  __dirname,
-  '../../Admin Builder/prototype/src/server.js',
-);
-const DATA_ROOT = path.resolve(__dirname, '../../admin-builder-data');
-
-let workspacePromise;
-
-function getWorkspace() {
-  workspacePromise ??= import(pathToFileURL(WORKSPACE_MODULE).href).then((module) =>
-    module.createBuilderWorkspace({ dataRoot: DATA_ROOT }),
-  );
-  return workspacePromise;
-}
 
 function sendError(res, error) {
   const statusCode =
@@ -49,7 +33,7 @@ function sendError(res, error) {
 
 router.get('/profiles', async (_req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const profiles = await workspace.listProfiles();
     return res.json({ ok: true, profiles });
   } catch (error) {
@@ -59,7 +43,7 @@ router.get('/profiles', async (_req, res) => {
 
 router.post('/process', async (req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const result = await workspace.process({
       sourceDataUrl: req.body?.sourceDataUrl,
       datetimeLocal: req.body?.datetimeLocal,
@@ -90,7 +74,7 @@ router.post('/process', async (req, res) => {
 
 router.post('/previews/:previewId/save', async (req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const result = await workspace.save(req.params.previewId);
     return res.json({ ok: true, ...result });
   } catch (error) {
@@ -100,7 +84,7 @@ router.post('/previews/:previewId/save', async (req, res) => {
 
 router.get('/saved', async (_req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const images = await workspace.list();
     return res.json({ ok: true, images });
   } catch (error) {
@@ -110,7 +94,7 @@ router.get('/saved', async (_req, res) => {
 
 router.post('/saved/delete', async (req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const result = await workspace.deleteSaved(req.body?.ids);
     return res.json({ ok: true, ...result });
   } catch (error) {
@@ -120,7 +104,7 @@ router.post('/saved/delete', async (req, res) => {
 
 router.delete('/saved/:id', async (req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const result = await workspace.deleteSaved([req.params.id]);
     return res.json({ ok: true, ...result });
   } catch (error) {
@@ -130,7 +114,7 @@ router.delete('/saved/:id', async (req, res) => {
 
 router.get('/saved/:id', async (req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const saved = await workspace.readSaved(req.params.id);
     return res.json({ ok: true, manifest: saved.manifest });
   } catch (error) {
@@ -140,7 +124,7 @@ router.get('/saved/:id', async (req, res) => {
 
 router.get('/saved/:id/image', async (req, res) => {
   try {
-    const workspace = await getWorkspace();
+    const workspace = await getAdminBuilderWorkspace();
     const saved = await workspace.readSaved(req.params.id);
     const contentType = saved.manifest.output_format === 'jpeg' ? 'image/jpeg' : 'image/png';
     res.set({

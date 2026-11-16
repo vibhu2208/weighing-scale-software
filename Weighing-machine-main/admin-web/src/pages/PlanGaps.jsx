@@ -24,6 +24,42 @@ function defaultSlotTimes(count) {
   });
 }
 
+/** Split [start, end] into `count` evenly spaced datetime-local values (first = start, last = end). */
+function equalSplitTimes(startLocal, endLocal, count) {
+  const n = Math.max(1, Math.min(Number(count) || 1, 50));
+  const start = new Date(startLocal);
+  const end = new Date(endLocal);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new Error('Start and end times must be valid');
+  }
+  if (end.getTime() <= start.getTime()) {
+    throw new Error('End time must be after start time');
+  }
+  if (n === 1) {
+    return [toDatetimeLocal(start)];
+  }
+  const span = end.getTime() - start.getTime();
+  const step = span / (n - 1);
+  if (step <= 60 * 1000) {
+    throw new Error(
+      `Cannot split into ${n} trips: times would be ${Math.round(step / 1000)}s apart (need more than 1 minute). Widen the range or use fewer trips.`,
+    );
+  }
+  return Array.from({ length: n }, (_, i) => {
+    const d = new Date(start.getTime() + Math.round(step * i));
+    return toDatetimeLocal(d);
+  });
+}
+
+function defaultRangeBounds(count) {
+  const n = Math.max(1, Math.min(Number(count) || 1, 50));
+  const start = new Date();
+  start.setDate(start.getDate() + 1);
+  start.setHours(9, 0, 0, 0);
+  const end = new Date(start.getTime() + Math.max(1, n - 1) * 60 * 60 * 1000);
+  return { start: toDatetimeLocal(start), end: toDatetimeLocal(end) };
+}
+
 function fireAtIso(plannedAt) {
   if (!plannedAt) return null;
   const d = new Date(plannedAt);
@@ -51,6 +87,8 @@ function statusLabel(status, conflict) {
 export default function PlanGaps() {
   const [tripCount, setTripCount] = useState(3);
   const [times, setTimes] = useState(() => defaultSlotTimes(3));
+  const [rangeStart, setRangeStart] = useState(() => defaultRangeBounds(3).start);
+  const [rangeEnd, setRangeEnd] = useState(() => defaultRangeBounds(3).end);
   const [note, setNote] = useState('');
   const [hint, setHint] = useState(null);
   const [rows, setRows] = useState([]);
@@ -101,7 +139,15 @@ export default function PlanGaps() {
   useEffect(() => {
     setTimes((prev) => {
       const n = Math.max(1, Math.min(Number(tripCount) || 1, 50));
+      // Keep current times when only the range fields change; "Split equally" applies those.
       if (prev.length === n) return prev;
+      try {
+        if (rangeStart && rangeEnd) {
+          return equalSplitTimes(rangeStart, rangeEnd, n);
+        }
+      } catch {
+        // fall through to incremental slots
+      }
       if (prev.length < n) {
         const extra = defaultSlotTimes(n - prev.length).map((t, i) => {
           if (!prev.length) return t;
@@ -114,10 +160,32 @@ export default function PlanGaps() {
       }
       return prev.slice(0, n);
     });
-  }, [tripCount]);
+  }, [tripCount, rangeStart, rangeEnd]);
 
   function updateTime(index, value) {
     setTimes((prev) => prev.map((t, i) => (i === index ? value : t)));
+  }
+
+  function applyEqualSplit() {
+    setError('');
+    setMessage('');
+    try {
+      const n = Math.max(1, Math.min(Number(tripCount) || 1, 50));
+      const next = equalSplitTimes(rangeStart, rangeEnd, n);
+      setTripCount(n);
+      setTimes(next);
+      const startMs = new Date(next[0]).getTime();
+      const endMs = new Date(next[next.length - 1]).getTime();
+      const gapMin =
+        n > 1 ? Math.round((endMs - startMs) / (n - 1) / 60_000) : 0;
+      setMessage(
+        n === 1
+          ? 'Filled 1 trip at the start time. You can still edit it below.'
+          : `Split ${n} trips equally (~${gapMin} min apart) from ${fmtDate(new Date(next[0]).toISOString())} to ${fmtDate(new Date(next[next.length - 1]).toISOString())}. Edit any row if needed, then schedule.`,
+      );
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   function validateLocalGaps(timeValues) {
@@ -164,6 +232,9 @@ export default function PlanGaps() {
       setMessage(msg);
       setNote('');
       setTripCount(3);
+      const bounds = defaultRangeBounds(3);
+      setRangeStart(bounds.start);
+      setRangeEnd(bounds.end);
       setTimes(defaultSlotTimes(3));
       await load();
     } catch (err) {
@@ -271,6 +342,43 @@ export default function PlanGaps() {
               onChange={(e) => setNote(e.target.value)}
             />
           </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-3">
+          <div>
+            <p className="text-xs font-medium text-slate-300">Equal time split</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Set a start and end time, then split equally across all {Math.max(1, Math.min(Number(tripCount) || 1, 50))} trips
+              (first trip = start, last trip = end). You can still edit any trip below before scheduling.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-slate-400">Start date & time *</label>
+              <input
+                type="datetime-local"
+                className="field-input mt-1"
+                value={rangeStart}
+                onChange={(e) => setRangeStart(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-400">End date & time *</label>
+              <input
+                type="datetime-local"
+                className="field-input mt-1"
+                value={rangeEnd}
+                onChange={(e) => setRangeEnd(e.target.value)}
+              />
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            onClick={applyEqualSplit}
+          >
+            Split equally across {Math.max(1, Math.min(Number(tripCount) || 1, 50))} trips
+          </button>
         </div>
 
         <div className="space-y-2">

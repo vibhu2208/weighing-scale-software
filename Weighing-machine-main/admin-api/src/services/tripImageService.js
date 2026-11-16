@@ -1,20 +1,24 @@
 'use strict';
 
+const sharp = require('sharp');
 const { getAdvanceSettings, getList } = require('./settingsService');
 const { getRemoteTrip, attachPhotos } = require('./remoteTripService');
 const {
   getObjectBuffer,
   putObject,
   remoteTripPhotoKey,
+  remoteTripPhotoThumbKey,
   fillVehicleStillKey,
 } = require('./s3Presign');
-const { buildTripImagePrompt, DEFAULT_TRIP_IMAGE_PROMPT } = require('./tripImagePrompt');
+const { DEFAULT_TRIP_IMAGE_PROMPT } = require('./tripImagePrompt');
+const { getAdminBuilderWorkspace } = require('./adminBuilderWorkspace');
 
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
 const CAMERA_FIELDS = {
   arrival: { 1: 'arrival_cam_1', 2: 'arrival_cam_2' },
   departure: { 1: 'departure_cam_1', 2: 'departure_cam_2' },
 };
+const CAMERA_TIMEZONE = 'Asia/Kolkata';
 
 function compactPlate(value) {
   return String(value || '')
@@ -45,83 +49,85 @@ function sniffImage(buf) {
   return 'image/jpeg';
 }
 
-function readGeminiImage(payload) {
-  const parts = payload?.candidates?.[0]?.content?.parts || [];
-  for (const part of parts) {
-    const inline = part.inlineData || part.inline_data;
-    const data = inline?.data;
-    if (!data) continue;
-    const buffer = Buffer.from(data, 'base64');
-    if (!buffer.length) continue;
-    return {
-      buffer,
-      mimeType: inline.mimeType || inline.mime_type || sniffImage(buffer),
-    };
-  }
-  return null;
+function toDataUrl(buffer, mimeType) {
+  const type = String(mimeType || '').startsWith('image/') ? mimeType : sniffImage(buffer);
+  return `data:${type};base64,${Buffer.from(buffer).toString('base64')}`;
 }
 
-async function editImageWithGemini({ imageBuffer, mimeType, prompt }) {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
-  const model = (process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image').trim();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  let res;
+function kolkataDateTimeLocal(date) {
+  const value = new Date(date);
+  if (Number.isNaN(value.getTime())) throw new Error('Invalid trip time');
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: CAMERA_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(value);
+  const map = {};
+  for (const part of parts) map[part.type] = part.value;
+  return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}:${map.second}`;
+}
+
+async function encodeTripJpeg(buffer) {
+  return sharp(buffer, { failOn: 'error', limitInputPixels: 20_000_000 })
+    .rotate()
+    .removeAlpha()
+    .jpeg({ quality: 92, chromaSubsampling: '4:4:4', mozjpeg: true })
+    .toBuffer();
+}
+
+async function writeTripPhotoThumb(fullKey, body, thumbKey) {
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: mimeType || 'image/jpeg',
-                  data: imageBuffer.toString('base64'),
-                },
-              },
-              { text: prompt },
-            ],
-          },
-        ],
-        generationConfig: {
-          responseModalities: ['TEXT', 'IMAGE'],
-        },
-      }),
-      signal: AbortSignal.timeout(180000),
+    const thumb = await sharp(body)
+      .rotate()
+      .resize({ width: 320, height: 240, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 70, mozjpeg: true })
+      .toBuffer();
+    await putObject(thumbKey || fullKey.replace(/\.jpe?g$/i, '.thumb.jpg'), thumb, 'image/jpeg');
+  } catch (err) {
+    console.warn('[tripImage] thumb skipped', err.message);
+  }
+}
+
+async function editImageWithAdminBuilder({ imageBuffer, mimeType, datetimeLocal, operatorEmail }) {
+  const workspace = await getAdminBuilderWorkspace();
+  let result;
+  try {
+    result = await workspace.process({
+      sourceDataUrl: toDataUrl(imageBuffer, mimeType),
+      datetimeLocal,
+      timezone: CAMERA_TIMEZONE,
+      lamps: [],
+      operatorEmail: operatorEmail || null,
     });
   } catch (err) {
-    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-      throw new Error('Gemini image edit timed out');
+    const message = err?.message || 'Admin Builder request failed';
+    if (err?.code === 'SERVER_BUSY') {
+      throw new Error('Admin Builder is processing other images. Try again in a moment.');
     }
-    throw new Error(`Gemini image edit failed: ${err.message || 'network error'}`);
+    throw new Error(message);
   }
 
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = payload?.error?.message || res.statusText || 'request failed';
-    if (/free_tier/i.test(msg) && /limit:\s*0/.test(msg)) {
-      throw new Error(
-        'Gemini image editing is not included on the free tier. Enable billing for this API key in Google AI Studio, then try again.',
-      );
-    }
-    throw new Error(`Gemini image edit failed: ${msg}`);
+  if (!result?.output_image_base64) {
+    throw new Error('Admin Builder did not return an image');
   }
-  const image = readGeminiImage(payload);
-  if (!image) {
-    const reason = payload?.candidates?.[0]?.finishReason;
-    throw new Error(
-      reason
-        ? `Gemini did not return an image (${reason})`
-        : 'Gemini did not return an image',
-    );
+  if (result.source_sha256 === result.output_sha256) {
+    throw new Error('Admin Builder returned an unchanged image');
   }
-  return image;
+
+  const pngBuffer = Buffer.from(result.output_image_base64, 'base64');
+  if (!pngBuffer.length) {
+    throw new Error('Admin Builder did not return an image');
+  }
+  const jpegBuffer = await encodeTripJpeg(pngBuffer);
+  return {
+    buffer: jpegBuffer,
+    mimeType: 'image/jpeg',
+  };
 }
 
 async function loadPromptTemplate() {
@@ -169,19 +175,17 @@ async function generateRemoteTripPhoto(queryFn, id, body = {}) {
     throw new Error(`Reference image not found for ${pass} cam ${slot}`);
   }
 
-  const template = await loadPromptTemplate();
-  const prompt = buildTripImagePrompt({ template, at: when });
-  const edited = await editImageWithGemini({
+  const edited = await editImageWithAdminBuilder({
     imageBuffer: source,
     mimeType: sniffImage(source),
-    prompt,
+    datetimeLocal: kolkataDateTimeLocal(when),
+    operatorEmail: body.operatorEmail,
   });
 
   const key = remoteTripPhotoKey(trip.slip_number, slot, pass);
-  const contentType = String(edited.mimeType || '').startsWith('image/')
-    ? edited.mimeType
-    : sniffImage(edited.buffer);
-  await putObject(key, edited.buffer, contentType);
+  const thumbKey = remoteTripPhotoThumbKey(trip.slip_number, slot, pass);
+  await putObject(key, edited.buffer, 'image/jpeg');
+  await writeTripPhotoThumb(key, edited.buffer, thumbKey);
   const updated = await attachPhotos(queryFn, id, [{ slot, pass, key }]);
   return { trip: updated, slot, pass, key };
 }

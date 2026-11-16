@@ -14,11 +14,11 @@ import { parseLocalDateTime } from './validation.js';
 export const LIFT = {
   fill: 44, // skylight added to shadows, in levels
   fillTint: 0.6, // how much of the local hue the fill takes (0 = neutral grey)
-  saturation: -0.5, // night frames are relatively MORE colourful (warm lamps), so desaturate
-  darkSaturation: 0.2, // gives some back where the source was darkest
-  detail: 4.5, // luma detail put back after denoising
-  core: 2.0, // detail below this many source levels is noise and is left out
-  detailCap: 7, // most detail one edge can add (source levels): stops outlines on strong edges
+  saturation: -0.15, // mild desaturate of warm night lamps; -0.5 was too muddy
+  darkSaturation: 0.25, // gives some back where the source was darkest
+  detail: 6.0, // luma detail put back after denoising
+  core: 1.5, // detail below this many source levels is noise and is left out
+  detailCap: 8, // most detail one edge can add (source levels): stops outlines on strong edges
   clarity: 0, // local contrast against a wide blur (adds halos; keep at 0)
   whiteBalance: 1.15, // how far toward the daytime red/blue ratio
   spread: 0.4, // restores the highlight spread a gamma lift compresses
@@ -296,6 +296,34 @@ export async function relight(pixels, width, height, datetimeLocal, { skipRect =
   const delta = amb.night - srcNight;
   const towardNight = Math.max(delta, 0);
   const towardDay = Math.max(-delta, 0);
+  // Day→day with mean already near the schedule target: skip grading (OSD-only upstream).
+  // Still allow a plain exposure scale when the source is dim day vs bright noon target.
+  if (towardDay < 0.05 && towardNight < 0.05 && Math.abs(srcMean - amb.L) < 12) {
+    return {
+      pixels: Buffer.from(pixels),
+      preset: amb.L >= 90 ? 'day' : amb.minutes < hm(12) ? 'dawn' : 'dusk',
+      parameters: {
+        engine: 'relight',
+        curve: 'identity',
+        target_luminance: Number(amb.L.toFixed(1)),
+        source_mean_luminance: Number(srcMean.toFixed(2)),
+        output_mean_luminance: Number(srcMean.toFixed(2)),
+        tone_gamma: 1,
+        scale_k: 1,
+        applied_exposure_ev: 0,
+        saturation_applied: 1,
+        red_gain_applied: 1,
+        blue_gain_applied: 1,
+        night_weight: Number(amb.night.toFixed(3)),
+        source_nightness: Number(srcNight.toFixed(3)),
+        source_p10_luminance: srcP10,
+        falloff_power: 0,
+        open_sky_darkened: false,
+        lamp_glows: [],
+        insufficient_source_information: false,
+      },
+    };
+  }
   const gamma = delta >= 0 ? 1 : 1 + 0.45 * delta;
   const lifting = towardDay > 0.2;
   const toneLut = new Float32Array(256);
@@ -319,11 +347,9 @@ export async function relight(pixels, width, height, datetimeLocal, { skipRect =
   const rGain = clamp(Math.sqrt(pull), 0.75, 1.1) * (1 + amb.warm);
   const bGain = clamp(1 / Math.sqrt(pull), 0.92, 1.3) * (1 - amb.warm);
 
-  // Lifting: median filter keeps edges while removing the noise a lift would
-  // magnify; chroma comes from a blur so colour noise does not become confetti.
-  const denoised = lifting
-    ? await sharp(pixels, { raw: { width, height, channels: 3 } }).median(3).raw().toBuffer()
-    : null;
+  // Lifting: skip heavy median (was median(3)) so day frames keep more sharpness;
+  // chroma still comes from a blur so colour noise does not become confetti.
+  const denoised = lifting ? pixels : null;
   const chromaSmooth = lifting ? await blurred(pixels, width, height, Math.max(3, width / 400)) : null;
   // Float luma, denoised, plus the blurred copies that detail is taken against.
   let lumaDen = null;

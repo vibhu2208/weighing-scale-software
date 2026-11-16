@@ -83,6 +83,55 @@ export function defaultPhotoMapping() {
   };
 }
 
+export const PHOTO_MAPPING_STORAGE_KEY = 'wb_bulk_photo_mapping';
+
+/** Shared by Bulk Photos upload and Create images. */
+export function loadPhotoMapping() {
+  try {
+    const stored = localStorage.getItem(PHOTO_MAPPING_STORAGE_KEY);
+    const defaults = defaultPhotoMapping();
+    if (stored) {
+      const raw = JSON.parse(stored);
+      return Object.fromEntries(
+        ['arrival', 'departure'].map((pass) => [
+          pass,
+          Object.fromEntries(
+            SLOT_NUMS.map((source) => {
+              const destinations = raw?.[pass]?.[source];
+              return [
+                source,
+                Array.isArray(destinations)
+                  ? [...new Set(destinations.map(Number).filter((n) => n >= 1 && n <= 3))]
+                  : defaults[pass][source],
+              ];
+            }),
+          ),
+        ]),
+      );
+    }
+
+    const legacy = JSON.parse(localStorage.getItem('wb_bulk_photo_share') || 'null');
+    if (legacy) {
+      const group = Array.isArray(legacy.departure)
+        ? [...new Set(legacy.departure.map(Number).filter((n) => n >= 1 && n <= 3))]
+        : [];
+      return {
+        ...defaults,
+        departure: Object.fromEntries(
+          SLOT_NUMS.map((source) => [source, group.includes(source) ? group : [source]]),
+        ),
+      };
+    }
+    return defaults;
+  } catch {
+    return defaultPhotoMapping();
+  }
+}
+
+export function savePhotoMapping(mapping) {
+  localStorage.setItem(PHOTO_MAPPING_STORAGE_KEY, JSON.stringify(mapping));
+}
+
 export function slotCode(pass, slot) {
   return `${pass === 'departure' ? 'dc' : 'ac'}${slot}`;
 }

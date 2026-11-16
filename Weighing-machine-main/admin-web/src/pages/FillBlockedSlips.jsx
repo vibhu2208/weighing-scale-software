@@ -73,7 +73,17 @@ function emptyEntry() {
     weightWarning: '',
     operatorAuto: true,
     operatorNote: '',
+    timeApproval: '',
   };
+}
+
+/** Approval is bound to the exact in/out values; editing either time revokes it. */
+function timeApprovalKey(entry) {
+  return `${entry?.timestamp_in || ''}|${entry?.timestamp_out || ''}`;
+}
+
+function isTimeApproved(entry) {
+  return Boolean(entry?.timeApproval) && entry.timeApproval === timeApprovalKey(entry);
 }
 
 function isCancelled(entry) {
@@ -1130,17 +1140,44 @@ export default function FillBlockedSlips() {
       const errs = [
         ...rowErrors(entry),
         ...(overlaps[row.id] || []),
-        ...(collisions[row.id] || []),
+        ...(isTimeApproved(entry) ? [] : collisions[row.id] || []),
       ];
       if (errs.length) out[row.id] = errs;
     }
     return out;
   }, [rows, entries, overlaps, collisions]);
+  const unapprovedClashRows = selectedRows.filter(
+    (row) => collisions[row.id]?.length && !isTimeApproved(entries[row.id]),
+  );
   const blocked = selectedRows.length === 0 || Object.keys(problems).length > 0;
   const allSelected = rows.length > 0 && selectedRows.length === rows.length;
 
   function update(id, patch) {
     setEntries((prev) => ({ ...prev, [id]: { ...(prev[id] || emptyEntry()), ...patch } }));
+    setResult(null);
+  }
+
+  function approveTiming(id, approved) {
+    setEntries((prev) => {
+      const entry = prev[id] || emptyEntry();
+      return {
+        ...prev,
+        [id]: { ...entry, timeApproval: approved ? timeApprovalKey(entry) : '' },
+      };
+    });
+    setResult(null);
+  }
+
+  function approveAllTimingClashes() {
+    if (!unapprovedClashRows.length) return;
+    setEntries((prev) => {
+      const next = { ...prev };
+      for (const row of unapprovedClashRows) {
+        const entry = next[row.id] || emptyEntry();
+        next[row.id] = { ...entry, timeApproval: timeApprovalKey(entry) };
+      }
+      return next;
+    });
     setResult(null);
   }
 
@@ -1506,6 +1543,16 @@ export default function FillBlockedSlips() {
         >
           Mark selected cancelled
         </button>
+        {unapprovedClashRows.length > 0 && (
+          <button
+            type="button"
+            className="btn-ghost text-xs text-amber-300"
+            onClick={approveAllTimingClashes}
+            title="Accept the <1 min time clashes on selected rows and allow creating them"
+          >
+            Approve timing clashes ({unapprovedClashRows.length})
+          </button>
+        )}
         <span className="text-xs text-slate-500">
           {rows.length} blocked slip(s) · {selectedRows.length} selected
         </span>
@@ -1544,6 +1591,8 @@ export default function FillBlockedSlips() {
                 lookupFillVehicle(vehicles, entry.truck_number)?.kind,
               );
               const errs = problems[row.id] || [];
+              const clashes = entry.selected ? collisions[row.id] || [] : [];
+              const timingApproved = clashes.length > 0 && isTimeApproved(entry);
               const net = cancelled
                 ? 0
                 : Number(entry.gross_weight) > 0 && Number(entry.tare_weight) > 0
@@ -1551,6 +1600,7 @@ export default function FillBlockedSlips() {
                   : null;
               const hasNotes =
                 errs.length > 0 ||
+                clashes.length > 0 ||
                 entry.timeWarnings.length > 0 ||
                 Boolean(entry.weightNote || entry.weightWarning || entry.operatorNote) ||
                 Boolean(entry.truck_number && !cancelled);
@@ -1731,6 +1781,37 @@ export default function FillBlockedSlips() {
                             {msg}
                           </p>
                         ))}
+                        {timingApproved &&
+                          clashes.map((msg) => (
+                            <p key={`approved-${msg}`} className="text-amber-300">
+                              Approved: {msg}
+                            </p>
+                          ))}
+                        {clashes.length > 0 && (
+                          <div className="flex items-center gap-2 pt-0.5">
+                            {timingApproved ? (
+                              <>
+                                <span className="text-emerald-400">Timing manually approved</span>
+                                <button
+                                  type="button"
+                                  className="btn-ghost text-[11px] px-2 py-0.5"
+                                  onClick={() => approveTiming(row.id, false)}
+                                >
+                                  Undo approval
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn-ghost text-[11px] px-2 py-0.5 text-amber-300 border border-amber-500/40"
+                                onClick={() => approveTiming(row.id, true)}
+                                title="Accept this <1 min clash and allow creating the trip with these times"
+                              >
+                                Approve timing
+                              </button>
+                            )}
+                          </div>
+                        )}
                         {entry.weightWarning && (
                           <p className="text-amber-300">{entry.weightWarning}</p>
                         )}
