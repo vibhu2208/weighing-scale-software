@@ -1016,6 +1016,24 @@ async function reconcileRemoteTripsToMirror(queryFn, siteId = getSiteId(), limit
 }
 
 /**
+ * Prefer admin Create-images keys (remote-trips/) over weighbridge mirror keys.
+ * Mirror often still holds older bytes after Create images overwrites stable S3 keys
+ * while the PC skipped re-download of an existing local JPEG.
+ */
+function preferRemoteTripPhotoKey(remoteKey, mirrorKey) {
+  const remote = String(remoteKey || '').trim() || null;
+  const mirror = String(mirrorKey || '').trim() || null;
+  if (!mirror) return remote;
+  if (!remote) return mirror;
+  const remoteNorm = remote.replace(/\\/g, '/');
+  const mirrorNorm = mirror.replace(/\\/g, '/');
+  if (remoteNorm.startsWith('remote-trips/') && mirrorNorm.startsWith('sites/')) {
+    return remote;
+  }
+  return mirror;
+}
+
+/**
  * Refresh ALL synced remote_trips from transactions_mirror (local truth).
  * Moves remapped slips, copies weights/times/truck/etc, drops stale rows.
  */
@@ -1136,6 +1154,23 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           : rt.local_id && rt.local_id !== rt.id
             ? rt.local_id
             : mirror.local_id || rt.local_id || null;
+      const nextPhotos = {
+        arrival_photo_1: preferRemoteTripPhotoKey(rt.arrival_photo_1, mirror.arrival_photo_1),
+        arrival_photo_2: preferRemoteTripPhotoKey(rt.arrival_photo_2, mirror.arrival_photo_2),
+        arrival_photo_3: preferRemoteTripPhotoKey(rt.arrival_photo_3, mirror.arrival_photo_3),
+        departure_photo_1: preferRemoteTripPhotoKey(
+          rt.departure_photo_1,
+          mirror.departure_photo_1,
+        ),
+        departure_photo_2: preferRemoteTripPhotoKey(
+          rt.departure_photo_2,
+          mirror.departure_photo_2,
+        ),
+        departure_photo_3: preferRemoteTripPhotoKey(
+          rt.departure_photo_3,
+          mirror.departure_photo_3,
+        ),
+      };
       const unchanged =
         slipToWrite === oldSlip &&
         String(rt.truck_number || '') === String(mirror.truck_number || '') &&
@@ -1150,12 +1185,12 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
         Number(rt.gross_weight) === Number(mirror.gross_weight) &&
         String(rt.ticket_status || '') === String(mirror.ticket_status || '') &&
         String(rt.local_id || '') === String(nextLocalId || '') &&
-        String(rt.arrival_photo_1 || '') === String(mirror.arrival_photo_1 || '') &&
-        String(rt.arrival_photo_2 || '') === String(mirror.arrival_photo_2 || '') &&
-        String(rt.arrival_photo_3 || '') === String(mirror.arrival_photo_3 || '') &&
-        String(rt.departure_photo_1 || '') === String(mirror.departure_photo_1 || '') &&
-        String(rt.departure_photo_2 || '') === String(mirror.departure_photo_2 || '') &&
-        String(rt.departure_photo_3 || '') === String(mirror.departure_photo_3 || '') &&
+        String(rt.arrival_photo_1 || '') === String(nextPhotos.arrival_photo_1 || '') &&
+        String(rt.arrival_photo_2 || '') === String(nextPhotos.arrival_photo_2 || '') &&
+        String(rt.arrival_photo_3 || '') === String(nextPhotos.arrival_photo_3 || '') &&
+        String(rt.departure_photo_1 || '') === String(nextPhotos.departure_photo_1 || '') &&
+        String(rt.departure_photo_2 || '') === String(nextPhotos.departure_photo_2 || '') &&
+        String(rt.departure_photo_3 || '') === String(nextPhotos.departure_photo_3 || '') &&
         String(rt.report_s3_key || '') === String(mirror.report_s3_key || '');
       if (unchanged) continue;
 
@@ -1210,12 +1245,12 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           mirror.timestamp_out || null,
           // Don't overwrite a real local UUID with the create-time placeholder (remote id).
           nextLocalId,
-          mirror.arrival_photo_1 || null,
-          mirror.arrival_photo_2 || null,
-          mirror.arrival_photo_3 || null,
-          mirror.departure_photo_1 || null,
-          mirror.departure_photo_2 || null,
-          mirror.departure_photo_3 || null,
+          nextPhotos.arrival_photo_1 || null,
+          nextPhotos.arrival_photo_2 || null,
+          nextPhotos.arrival_photo_3 || null,
+          nextPhotos.departure_photo_1 || null,
+          nextPhotos.departure_photo_2 || null,
+          nextPhotos.departure_photo_3 || null,
           mirror.report_s3_key || null,
           mirror.ticket_status || null,
           mirror.mcg_status || null,

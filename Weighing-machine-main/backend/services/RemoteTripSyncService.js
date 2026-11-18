@@ -284,10 +284,19 @@ function isS3ObjectKey(value) {
   return /^(remote-trips|sites)\//.test(key.replace(/\\/g, '/'));
 }
 
+/** Admin Create images overwrites stable remote-trips/ keys — never skip those. */
+function shouldRefreshExistingLocalPhoto(s3Key) {
+  return String(s3Key || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .startsWith('remote-trips/');
+}
+
 async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
   const date = toIso(row.timestamp_in || row.timestamp_out);
   const truckNumber = row.truck_number;
   const usedS3Keys = {};
+  const refreshed = [];
   const paths = {};
   const jobs = [];
 
@@ -302,7 +311,11 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       vehicleNumber: truckNumber,
     });
     const key = String(s3Key).trim();
-    if (localPhotoExists(localPath) && isJpegFile(localPath)) {
+    if (
+      localPhotoExists(localPath) &&
+      isJpegFile(localPath) &&
+      !shouldRefreshExistingLocalPhoto(key)
+    ) {
       paths[slot.col] = localPath;
       usedS3Keys[slot.col] = key;
       continue;
@@ -321,7 +334,11 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       date,
       { vehicleNumber: truckNumber },
     );
-    if (localPhotoExists(localPath) && isJpegFile(localPath)) {
+    if (
+      localPhotoExists(localPath) &&
+      isJpegFile(localPath) &&
+      !shouldRefreshExistingLocalPhoto(s3Key)
+    ) {
       paths[inferred.col] = localPath;
       usedS3Keys[inferred.col] = s3Key;
       continue;
@@ -335,6 +352,7 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
       if (!saved) return;
       paths[job.col] = saved;
       usedS3Keys[job.col] = job.s3Key;
+      refreshed.push(job.col);
     } catch (err) {
       logger.warn('Remote trip photo download failed', {
         s3Key: job.s3Key,
@@ -363,7 +381,12 @@ async function downloadRemotePhotos(row, localTxnId, extraKeys = []) {
     }
   }
 
-  return { ...paths, report_path: reportPath, _s3Keys: usedS3Keys };
+  return {
+    ...paths,
+    report_path: reportPath,
+    _s3Keys: usedS3Keys,
+    _refreshed: refreshed,
+  };
 }
 
 async function s3PhotoStillAvailable(s3Key) {
@@ -507,8 +530,12 @@ async function syncImportedTripPhotos(row, localTxn, options = {}) {
     extraKeys,
   );
   const applied = applyLocalPhotoUpdates(localTxn, photoPaths);
+  const refreshedPhotos = (photoPaths._refreshed || []).length > 0;
   let regenerated = false;
-  if ((applied.updated || options.forceRegen) && options.regeneratePdf !== false) {
+  if (
+    (applied.updated || refreshedPhotos || options.forceRegen) &&
+    options.regeneratePdf !== false
+  ) {
     try {
       const ReportService = require('./ReportService');
       const regen = await ReportService.regenerateTripPDF(localTxn.id);
@@ -526,11 +553,16 @@ async function syncImportedTripPhotos(row, localTxn, options = {}) {
       });
     }
   }
-  if (applied.updated || regenerated || Object.keys(photoPaths._s3Keys || {}).length) {
+  if (
+    applied.updated ||
+    regenerated ||
+    refreshedPhotos ||
+    Object.keys(photoPaths._s3Keys || {}).length
+  ) {
     enqueueMirrorPush(localTxn.id);
   }
   return {
-    updated: applied.updated,
+    updated: applied.updated || refreshedPhotos,
     regenerated,
     localPaths: photoPaths,
     s3Keys: photoPaths._s3Keys || {},
