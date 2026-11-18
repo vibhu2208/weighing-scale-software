@@ -78,12 +78,13 @@ function normalizeSlots(slots) {
 
 export function defaultPhotoMapping() {
   return {
+    // Cam 1/2 stills are edited; cam 3 is always a mapped copy so 6/6 fills.
     arrival: { 1: [1, 2], 2: [3], 3: [3] },
-    departure: { 1: [1], 2: [2], 3: [3] },
+    departure: { 1: [1, 2], 2: [3], 3: [3] },
   };
 }
 
-export const PHOTO_MAPPING_STORAGE_KEY = 'wb_bulk_photo_mapping';
+export const PHOTO_MAPPING_STORAGE_KEY = 'wb_bulk_photo_mapping_v2';
 
 /** Shared by Bulk Photos upload and Create images. */
 export function loadPhotoMapping() {

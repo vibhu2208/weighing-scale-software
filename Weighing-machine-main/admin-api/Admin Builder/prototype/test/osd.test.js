@@ -121,6 +121,66 @@ test('white text gets a dark outline over bright scenery and black text does not
   assert.ok(black[((osd.top - 2) * W + osd.left + 40) * 3] === 200, 'black text has no halo above it');
 });
 
+test('finds a sky stamp after the white fill blends into the background', () => {
+  // Real day frames often leave only the black outline visible against pale sky.
+  const osd = { left: 16, top: 10, right: 353, bottom: 33, bandHeight: 24, textWidth: 338, pitch: 338 / 18.8, textColor: [255, 255, 255] };
+  const sky = 230;
+  const stamped = drawOsd(Buffer.alloc(W * H * 3, sky), W, H, osd, '16-11-2026 07:50:02');
+  for (let y = osd.top; y <= osd.bottom; y += 1) {
+    for (let x = osd.left; x <= osd.right; x += 1) {
+      const o = (y * W + x) * 3;
+      if (stamped[o] > 180) stamped.fill(sky, o, o + 3);
+    }
+  }
+  const found = locateOsd(stamped, W, H);
+  assert.ok(found, 'outline-only sky stamp should still be found');
+  assert.equal(found.polarity, 'light');
+  assert.ok(Math.abs(found.pitch - osd.pitch) <= 1.2, `pitch ${found.pitch}`);
+});
+
+test('white text on a dark plate does not paint a black outline box', () => {
+  const osd = { left: 16, top: 10, right: 353, bottom: 33, bandHeight: 24, textWidth: 338, pitch: 338 / 18.8, textColor: [255, 255, 255] };
+  const dark = Buffer.alloc(W * H * 3, 25);
+  const drawn = drawOsd(dark, W, H, osd, '21-10-2026 04:19:15');
+  // A pixel just outside glyph ink should stay near the dark plate, not drop toward outline black.
+  let rim = 0;
+  let n = 0;
+  for (let y = osd.top; y <= osd.bottom; y += 2) {
+    for (let x = osd.left; x <= osd.right; x += 3) {
+      const v = drawn[(y * W + x) * 3];
+      if (v < 40) {
+        rim += v;
+        n += 1;
+      }
+    }
+  }
+  assert.ok(n > 20, 'expected dark plate samples');
+  assert.ok(rim / n > 15, `outline darkened plate to ${rim / n}`);
+});
+
+test('erase removes a flat grey camera backdrop plate around the stamp', () => {
+  const base = Buffer.alloc(W * H * 3, 30);
+  // Simulated camera OSD plate behind the glyphs.
+  for (let y = 6; y <= 40; y += 1) {
+    for (let x = 8; x <= 360; x += 1) base.fill(120, (y * W + x) * 3, (y * W + x) * 3 + 3);
+  }
+  const osd = { left: 16, top: 10, right: 353, bottom: 33, bandHeight: 24, textWidth: 338, pitch: 338 / 18.8, textColor: [255, 255, 255] };
+  const stamped = drawOsd(base, W, H, osd, '21-10-2026 04:19:15');
+  const found = locateOsd(stamped, W, H);
+  assert.ok(found);
+  const erased = eraseOsd(stamped, W, H, found);
+  let plate = 0;
+  let n = 0;
+  for (let y = 8; y <= 38; y += 1) {
+    for (let x = 12; x <= 350; x += 1) {
+      plate += erased[(y * W + x) * 3];
+      n += 1;
+    }
+  }
+  assert.ok(plate / n < 55, `backdrop plate survived erase: mean ${plate / n}`);
+  assert.equal(locateOsd(erased, W, H), null);
+});
+
 test('formats the requested time in the camera layout', () => {
   assert.equal(formatOsdText('2026-10-21T03:05'), '21-10-2026 03:05:00');
   assert.throws(() => formatOsdText('nonsense'));

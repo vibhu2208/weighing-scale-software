@@ -10,73 +10,105 @@ const MIN_GAP_MS = 60 * 1000;
 const MAX_BUMP_STEPS = 120;
 
 let schemaReady = false;
+let schemaPromise = null;
 let workerTimer = null;
 let workerRunning = false;
 
+async function tableLooksReady(queryFn) {
+  const res = await queryFn(`
+    SELECT
+      to_regclass('public.slip_reservations') IS NOT NULL AS has_table,
+      EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'slip_reservations'
+          AND indexname = 'idx_slip_reservations_scheduled_fire'
+      ) AS has_fire_idx
+  `);
+  const row = res.rows[0] || {};
+  return Boolean(row.has_table && row.has_fire_idx);
+}
+
 async function ensureSchema(queryFn = query) {
   if (schemaReady) return;
+  if (schemaPromise) return schemaPromise;
 
-  await queryFn(`
-    CREATE TABLE IF NOT EXISTS slip_reservations (
-      id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-      slip_number     TEXT UNIQUE,
-      planned_at      TIMESTAMPTZ NOT NULL,
-      note            TEXT,
-      status          TEXT NOT NULL DEFAULT 'scheduled'
-                        CHECK (status IN ('scheduled', 'held', 'used', 'released', 'missed')),
-      remote_trip_id  TEXT,
-      created_by      TEXT,
-      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-      blocked_at      TIMESTAMPTZ,
-      fire_error      TEXT,
-      used_at         TIMESTAMPTZ,
-      released_at     TIMESTAMPTZ
-    )
-  `);
+  schemaPromise = (async () => {
+    // Fast path: avoid re-running DDL that can lock and trip statement_timeout.
+    if (await tableLooksReady(queryFn)) {
+      schemaReady = true;
+      return;
+    }
 
-  // Migrate older installs (immediate-block schema).
-  await queryFn(`ALTER TABLE slip_reservations ALTER COLUMN slip_number DROP NOT NULL`).catch(
-    () => {},
-  );
-  await queryFn(
-    `ALTER TABLE slip_reservations ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`,
-  ).catch(() => {});
-  await queryFn(`ALTER TABLE slip_reservations ADD COLUMN IF NOT EXISTS fire_error TEXT`).catch(
-    () => {},
-  );
+    await queryFn(`
+      CREATE TABLE IF NOT EXISTS slip_reservations (
+        id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        slip_number     TEXT UNIQUE,
+        planned_at      TIMESTAMPTZ NOT NULL,
+        note            TEXT,
+        status          TEXT NOT NULL DEFAULT 'scheduled'
+                          CHECK (status IN ('scheduled', 'held', 'used', 'released', 'missed')),
+        remote_trip_id  TEXT,
+        created_by      TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        blocked_at      TIMESTAMPTZ,
+        fire_error      TEXT,
+        used_at         TIMESTAMPTZ,
+        released_at     TIMESTAMPTZ
+      )
+    `);
 
-  await queryFn(`
-    DO $$
-    BEGIN
-      ALTER TABLE slip_reservations DROP CONSTRAINT IF EXISTS slip_reservations_status_check;
-      ALTER TABLE slip_reservations
-        ADD CONSTRAINT slip_reservations_status_check
-        CHECK (status IN ('scheduled', 'held', 'used', 'released', 'missed'));
-    EXCEPTION WHEN others THEN
-      NULL;
-    END $$
-  `);
+    // Migrate older installs (immediate-block schema).
+    await queryFn(`ALTER TABLE slip_reservations ALTER COLUMN slip_number DROP NOT NULL`).catch(
+      () => {},
+    );
+    await queryFn(
+      `ALTER TABLE slip_reservations ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`,
+    ).catch(() => {});
+    await queryFn(`ALTER TABLE slip_reservations ADD COLUMN IF NOT EXISTS fire_error TEXT`).catch(
+      () => {},
+    );
 
-  await queryFn(`
-    ALTER TABLE slip_reservations ALTER COLUMN status SET DEFAULT 'scheduled'
-  `).catch(() => {});
+    await queryFn(`
+      DO $$
+      BEGIN
+        ALTER TABLE slip_reservations DROP CONSTRAINT IF EXISTS slip_reservations_status_check;
+        ALTER TABLE slip_reservations
+          ADD CONSTRAINT slip_reservations_status_check
+          CHECK (status IN ('scheduled', 'held', 'used', 'released', 'missed'));
+      EXCEPTION WHEN others THEN
+        NULL;
+      END $$
+    `).catch(() => {});
 
-  await queryFn(`
-    CREATE INDEX IF NOT EXISTS idx_slip_reservations_status_planned
-      ON slip_reservations (status, planned_at)
-  `);
-  await queryFn(`
-    CREATE INDEX IF NOT EXISTS idx_slip_reservations_held
-      ON slip_reservations (planned_at)
-      WHERE status = 'held'
-  `);
-  await queryFn(`
-    CREATE INDEX IF NOT EXISTS idx_slip_reservations_scheduled_fire
-      ON slip_reservations (planned_at)
-      WHERE status = 'scheduled'
-  `);
+    await queryFn(`
+      ALTER TABLE slip_reservations ALTER COLUMN status SET DEFAULT 'scheduled'
+    `).catch(() => {});
 
-  schemaReady = true;
+    await queryFn(`
+      CREATE INDEX IF NOT EXISTS idx_slip_reservations_status_planned
+        ON slip_reservations (status, planned_at)
+    `).catch(() => {});
+    await queryFn(`
+      CREATE INDEX IF NOT EXISTS idx_slip_reservations_held
+        ON slip_reservations (planned_at)
+        WHERE status = 'held'
+    `).catch(() => {});
+    await queryFn(`
+      CREATE INDEX IF NOT EXISTS idx_slip_reservations_scheduled_fire
+        ON slip_reservations (planned_at)
+        WHERE status = 'scheduled'
+    `).catch(() => {});
+
+    if (await tableLooksReady(queryFn)) {
+      schemaReady = true;
+      return;
+    }
+    throw new Error('slip_reservations schema is incomplete');
+  })().finally(() => {
+    schemaPromise = null;
+  });
+
+  return schemaPromise;
 }
 
 function parseTimestamp(value, fieldName) {

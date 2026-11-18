@@ -127,7 +127,7 @@ test('saved ids cannot escape the storage folders', async (t) => {
 
 test('real frames with a cluttered background behind the stamp are still recognised (skipped when absent)', async (t) => {
   const { existsSync } = await import('node:fs');
-  const files = ['3515-dc2.png', '7668-dc1.png'].map((f) => path.join(os.homedir(), 'Downloads', f)).filter(existsSync);
+  const files = ['3515-dc2.png', '7668-dc1.png', '3336-ac1.png'].map((f) => path.join(os.homedir(), 'Downloads', f)).filter(existsSync);
   if (!files.length) return t.skip('private camera frames not present');
   for (const file of files) {
     const { data, info } = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });

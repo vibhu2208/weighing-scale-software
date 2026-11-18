@@ -44,26 +44,73 @@ function sizeScale(height) {
   return Math.max(1, height / 970);
 }
 
+// Zero-mean, unit-norm template from an atlas mask.
+function unitFromMask(mask) {
+  const n = mask.length;
+  let mean = 0;
+  for (let i = 0; i < n; i += 1) mean += mask[i];
+  mean /= n;
+  const z = new Float32Array(n);
+  let norm = 0;
+  for (let i = 0; i < n; i += 1) {
+    z[i] = mask[i] - mean;
+    norm += z[i] * z[i];
+  }
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < n; i += 1) z[i] /= norm;
+  return z;
+}
+
+function dilateMask(mask, radius = 2) {
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < ATLAS_H; y += 1) {
+    for (let x = 0; x < ATLAS_W; x += 1) {
+      let peak = 0;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const yy = y + dy;
+          const xx = x + dx;
+          if (yy < 0 || xx < 0 || yy >= ATLAS_H || xx >= ATLAS_W) continue;
+          peak = Math.max(peak, mask[yy * ATLAS_W + xx]);
+        }
+      }
+      out[y * ATLAS_W + x] = peak;
+    }
+  }
+  return out;
+}
+
+function ringMask(mask, radius = 2) {
+  const dilated = dilateMask(mask, radius);
+  const out = new Uint8Array(mask.length);
+  for (let i = 0; i < mask.length; i += 1) out[i] = Math.max(0, dilated[i] - mask[i]);
+  return out;
+}
+
 // Glyphs prepared for fast correlation: zero mean, unit norm.
 let unitGlyphCache = null;
 function unitGlyphs() {
   if (unitGlyphCache) return unitGlyphCache;
-  const n = ATLAS_W * ATLAS_H;
-  unitGlyphCache = Object.entries(loadAtlas().glyphs).map(([ch, g]) => {
-    let mean = 0;
-    for (let i = 0; i < n; i += 1) mean += g.mask[i];
-    mean /= n;
-    const z = new Float32Array(n);
-    let norm = 0;
-    for (let i = 0; i < n; i += 1) {
-      z[i] = g.mask[i] - mean;
-      norm += z[i] * z[i];
-    }
-    norm = Math.sqrt(norm) || 1;
-    for (let i = 0; i < n; i += 1) z[i] /= norm;
-    return { ch, z, isDigit: /\d/.test(ch) };
-  });
+  unitGlyphCache = Object.entries(loadAtlas().glyphs).map(([ch, g]) => ({
+    ch,
+    z: unitFromMask(g.mask),
+    isDigit: /\d/.test(ch),
+  }));
   return unitGlyphCache;
+}
+
+// Outline templates for stamps whose white fill vanishes on bright sky and leave
+// only the black camera outline (ring) or a thicker hollow stroke (dilate).
+let outlineGlyphCache = null;
+function outlineGlyphs() {
+  if (outlineGlyphCache) return outlineGlyphCache;
+  outlineGlyphCache = [];
+  for (const [ch, g] of Object.entries(loadAtlas().glyphs)) {
+    const isDigit = /\d/.test(ch);
+    outlineGlyphCache.push({ ch, z: unitFromMask(ringMask(g.mask, 2)), isDigit });
+    outlineGlyphCache.push({ ch, z: unitFromMask(dilateMask(g.mask, 2)), isDigit });
+  }
+  return outlineGlyphCache;
 }
 
 // The search works on the luma of the top-left region only.
@@ -124,17 +171,22 @@ const FIXED_CELLS = { 2: '-', 5: '-', 13: ':', 16: ':' };
 
 // Agreement with the camera layout: each cell's best glyph, in one polarity for
 // the whole stamp (white text, or the black text some cameras use on sky).
+// On bright sky the white fill often disappears and only the black outline
+// remains — those frames are scored against outline templates as well.
 // Punctuation cells must be punctuation and every other cell must be a digit.
 function layoutScore(region, geometry, shifts = [-0.12, -0.06, 0, 0.06, 0.12]) {
   const glyphs = unitGlyphs();
+  const outlines = outlineGlyphs();
   let light = 0;
   let dark = 0;
+  let outline = 0;
   let cells = 0;
   for (let i = 0; i < CELLS; i += 1) {
     if (i === 10) continue;
     const fixed = FIXED_CELLS[i];
     let bestLight = -1;
     let bestDark = -1;
+    let bestOutline = -1;
     for (const shift of shifts) {
       if (!sampleCell(region, geometry, i, shift * geometry.pitch)) continue;
       for (const g of glyphs) {
@@ -143,14 +195,25 @@ function layoutScore(region, geometry, shifts = [-0.12, -0.06, 0, 0.06, 0.12]) {
         if (c > bestLight) bestLight = c;
         if (-c > bestDark) bestDark = -c;
       }
+      for (const g of outlines) {
+        if (fixed ? g.ch !== fixed : !g.isDigit) continue;
+        const c = -dot(g.z);
+        if (c > bestOutline) bestOutline = c;
+      }
     }
     light += Math.max(bestLight, 0);
     dark += Math.max(bestDark, 0);
+    outline += Math.max(bestOutline, 0);
     cells += 1;
   }
+  const filledScore = Math.max(light, dark) / cells;
+  const outlineScore = outline / cells;
+  // Outline-only hits are still white camera stamps with a black stroke, so keep
+  // light polarity for erase/redraw even when the fill correlation is weaker.
+  if (outlineScore > filledScore) return { score: outlineScore, polarity: 'light' };
   return light >= dark
-    ? { score: light / cells, polarity: 'light' }
-    : { score: dark / cells, polarity: 'dark' };
+    ? { score: filledScore, polarity: 'light' }
+    : { score: filledScore, polarity: 'dark' };
 }
 
 // A 3x coarser copy of the glyphs: fast enough to try every position and size.
@@ -271,18 +334,23 @@ function screenGeometries(region) {
   const found = [];
   const heightStep = Math.max(2, Math.round(2 * f));
   const leftStep = Math.max(2, Math.round(2 * f));
+  // Camera stamps sit near pitch ≈ 20 on ~970px frames. Half-pitch geometries
+  // (~12) score spuriously on sky grain and crowd out the real stamp.
+  const minPitch = 16 * f;
+  const maxPitch = 26 * f;
   for (let h = Math.round(19 * f); h <= Math.round(33 * f) && h <= sh; h += heightStep) {
     const windows = [];
     for (let top = 0; top + h <= sh; top += 1) windows.push({ top, sum: rowPrefix[top + h] - rowPrefix[top] });
     windows.sort((a, b) => b.sum - a.sum);
     const tops = [];
     for (const w of windows) {
-      if (tops.every((t) => Math.abs(t - w.top) >= 3 * f)) tops.push(w.top);
-      if (tops.length === 4) break;
+      if (tops.every((t) => Math.abs(t - w.top) >= 2 * f)) tops.push(w.top);
+      if (tops.length === 6) break;
     }
     for (const top of tops) {
       for (let ratio = 0.62; ratio <= 0.921; ratio += 0.02) {
         const pitch = h * ratio;
+        if (pitch < minPitch || pitch > maxPitch) continue;
         for (let left = 0; left <= 44 * f; left += leftStep) {
           if (left + 18.8 * pitch > sw) break;
           const geometry = { left, top, bandHeight: h, pitch };
@@ -291,7 +359,23 @@ function screenGeometries(region) {
       }
     }
   }
-  return found.sort((a, b) => b.score - a.score).slice(0, 12).map((c) => c.geometry);
+  found.sort((a, b) => b.score - a.score);
+  // Keep diverse pitches/positions so one noisy band cannot fill the shortlist.
+  const picks = [];
+  for (const candidate of found) {
+    if (
+      picks.every(
+        (p) =>
+          Math.abs(p.geometry.pitch - candidate.geometry.pitch) >= 1.5 * f
+          || Math.abs(p.geometry.top - candidate.geometry.top) >= 3 * f
+          || Math.abs(p.geometry.left - candidate.geometry.left) >= 4 * f,
+      )
+    ) {
+      picks.push(candidate);
+    }
+    if (picks.length === 16) break;
+  }
+  return picks.map((c) => c.geometry);
 }
 
 function polish(region, start) {
@@ -443,62 +527,177 @@ export function formatOsdText(datetimeLocal) {
   return `${d}-${mo}-${y} ${h}:${mi}:${s}`;
 }
 
-function osdWipeBounds(osd, width, height) {
+function baseOsdWipeBounds(osd, width, height) {
   const f = sizeScale(height);
   // Cover soft glyph halos, black outlines (~2px atlas), and WINDOW_OFFSET overhang.
   const pad = Math.max(
-    6,
-    Math.round(osd.bandHeight * 0.55),
-    Math.round(Math.abs(WINDOW_OFFSET) * osd.pitch + 6 * f),
+    8,
+    Math.round(osd.bandHeight * 0.85),
+    Math.round(Math.abs(WINDOW_OFFSET) * osd.pitch + 8 * f),
   );
-  const x0 = Math.max(0, osd.left - pad);
-  const x1 = Math.min(width - 1, osd.right + pad);
-  const y0 = Math.max(0, osd.top - pad);
-  const y1 = Math.min(height - 1, osd.bottom + pad);
+  return {
+    x0: Math.max(0, osd.left - pad),
+    x1: Math.min(width - 1, osd.right + pad),
+    y0: Math.max(0, osd.top - pad),
+    y1: Math.min(height - 1, osd.bottom + pad),
+    f,
+  };
+}
+
+function edgeStripStats(pixels, width, x0, x1, y0, y1) {
+  let sum = 0;
+  let sum2 = 0;
+  let n = 0;
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = x0; x <= x1; x += 1) {
+      if (x < 0 || y < 0 || x >= width) continue;
+      const L = luma(pixels, (y * width + x) * 3);
+      sum += L;
+      sum2 += L * L;
+      n += 1;
+    }
+  }
+  if (!n) return { mean: 0, stdev: 0, n: 0 };
+  const mean = sum / n;
+  return { mean, stdev: Math.sqrt(Math.max(0, sum2 / n - mean * mean)), n };
+}
+
+// Grow the wipe until a camera OSD backdrop box / bright underline is covered.
+// Many site cameras put the stamp on a flat grey plate or draw a white frame line
+// that sits outside the glyph band; leaving those creates the "timestamp border".
+function expandWipeForBackdrop(pixels, width, height, bounds, osd) {
+  const f = bounds.f;
+  const maxGrowX = Math.round(Math.min(width * 0.08, 36 * f));
+  const maxGrowY = Math.round(Math.min(height * 0.08, 28 * f));
+  let { x0, x1, y0, y1 } = bounds;
+  const interior = edgeStripStats(
+    pixels,
+    width,
+    Math.max(0, osd.left),
+    Math.min(width - 1, osd.right),
+    Math.max(0, osd.top),
+    Math.min(height - 1, osd.bottom),
+  );
+  const looksLikePlate = (stats) =>
+    stats.n > 0 &&
+    stats.stdev <= 18 &&
+    Math.abs(stats.mean - interior.mean) <= 28;
+
+  for (let step = 0; step < maxGrowY; step += 1) {
+    if (y0 <= 0) break;
+    const strip = edgeStripStats(pixels, width, x0, x1, y0 - 1, y0 - 1);
+    if (!looksLikePlate(strip) && strip.mean < Math.max(interior.mean, 40) + 25) break;
+    y0 -= 1;
+  }
+  for (let step = 0; step < maxGrowY; step += 1) {
+    if (y1 >= height - 1) break;
+    const strip = edgeStripStats(pixels, width, x0, x1, y1 + 1, y1 + 1);
+    // Keep growing through flat plates and through a single bright underline.
+    if (!looksLikePlate(strip) && !(strip.mean >= 140 && strip.stdev <= 35)) break;
+    y1 += 1;
+  }
+  for (let step = 0; step < maxGrowX; step += 1) {
+    if (x0 <= 0) break;
+    const strip = edgeStripStats(pixels, width, x0 - 1, x0 - 1, y0, y1);
+    if (!looksLikePlate(strip) && !(strip.mean >= 140 && strip.stdev <= 35)) break;
+    x0 -= 1;
+  }
+  for (let step = 0; step < maxGrowX; step += 1) {
+    if (x1 >= width - 1) break;
+    const strip = edgeStripStats(pixels, width, x1 + 1, x1 + 1, y0, y1);
+    if (!looksLikePlate(strip) && !(strip.mean >= 140 && strip.stdev <= 35)) break;
+    x1 += 1;
+  }
   return { x0, x1, y0, y1, f };
+}
+
+function osdWipeBounds(osd, width, height, pixels = null) {
+  const base = baseOsdWipeBounds(osd, width, height);
+  if (!pixels) return base;
+  return expandWipeForBackdrop(pixels, width, height, base, osd);
+}
+
+function featherWeight(x, y, x0, x1, y0, y1, feather) {
+  if (feather <= 0) return 1;
+  const dx = Math.min(x - x0, x1 - x);
+  const dy = Math.min(y - y0, y1 - y);
+  const d = Math.min(dx, dy);
+  if (d >= feather) return 1;
+  if (d <= 0) return 0;
+  const t = d / feather;
+  return t * t * (3 - 2 * t);
 }
 
 // Copy the wiped stamp band from `source` into `dest` (same dimensions).
 // Used after relight so the stamp never sits on a lifted flat plate.
-export function restoreOsdBand(dest, source, width, height, osd) {
-  const { x0, x1, y0, y1 } = osdWipeBounds(osd, width, height);
+// Edges are feathered so the restore does not leave a hard rectangular border.
+// `boundsPixels` should be the pre-erase frame so backdrop expansion matches erase.
+export function restoreOsdBand(dest, source, width, height, osd, boundsPixels = source) {
+  const { x0, x1, y0, y1, f } = osdWipeBounds(osd, width, height, boundsPixels);
+  const feather = Math.max(5, Math.round(8 * f));
   const out = Buffer.from(dest);
   for (let y = y0; y <= y1; y += 1) {
-    const row = (y * width + x0) * 3;
-    const bytes = (x1 - x0 + 1) * 3;
-    source.copy(out, row, row, row + bytes);
+    for (let x = x0; x <= x1; x += 1) {
+      const wSrc = featherWeight(x, y, x0, x1, y0, y1, feather);
+      if (wSrc <= 0) continue;
+      const o = (y * width + x) * 3;
+      if (wSrc >= 0.999) {
+        out[o] = source[o];
+        out[o + 1] = source[o + 1];
+        out[o + 2] = source[o + 2];
+        continue;
+      }
+      out[o] = clamp8(source[o] * wSrc + dest[o] * (1 - wSrc));
+      out[o + 1] = clamp8(source[o + 1] * wSrc + dest[o + 1] * (1 - wSrc));
+      out[o + 2] = clamp8(source[o + 2] * wSrc + dest[o + 2] * (1 - wSrc));
+    }
   }
   return out;
 }
 
-// Erase the old stamp: wipe the full padded stamp rectangle, fill from
-// surrounding pixels (distance-weighted), and add matching sensor noise.
+// Erase the old stamp: wipe the full padded stamp rectangle (including any
+// camera backdrop plate / underline), fill from surrounding scene pixels, and
+// add matching sensor noise. Edge pixels are feathered so the wipe does not
+// leave a hard box.
 export function eraseOsd(pixels, width, height, osd) {
-  const { x0, x1, y0, y1, f } = osdWipeBounds(osd, width, height);
+  const { x0, x1, y0, y1, f } = osdWipeBounds(osd, width, height, pixels);
   const w = x1 - x0 + 1;
   const h = y1 - y0 + 1;
   // Full-band mask: glyph-only hot masks leave soft edges that lift into
   // readable ghost digits (e.g. leftover strokes beside a new day "16").
   const mask = new Uint8Array(w * h);
   mask.fill(1);
+  const feather = Math.max(5, Math.round(8 * f));
+  const sampleMargin = Math.max(10, Math.round(14 * f));
 
-  // Background from a ring outside the wipe box; used so inpaint never samples
-  // leftover bright/dark glyph halo just beyond the pad.
+  // Background from a ring outside the wipe box; prefer the strip below the
+  // stamp (real scene) so we never re-fill with backdrop-plate grey.
   const bgSamples = [];
-  for (let y = Math.max(0, y0 - 3); y <= Math.min(height - 1, y1 + 3); y += 1) {
-    for (let x = Math.max(0, x0 - 3); x <= Math.min(width - 1, x1 + 3); x += 1) {
-      if (x >= x0 && x <= x1 && y >= y0 && y <= y1) continue;
-      bgSamples.push(luma(pixels, (y * width + x) * 3));
+  const pushSample = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    if (x >= x0 && x <= x1 && y >= y0 && y <= y1) return;
+    bgSamples.push(luma(pixels, (y * width + x) * 3));
+  };
+  for (let y = y1 + 1; y <= Math.min(height - 1, y1 + sampleMargin); y += 1) {
+    for (let x = Math.max(0, x0 - sampleMargin); x <= Math.min(width - 1, x1 + sampleMargin); x += 1) {
+      pushSample(x, y);
+    }
+  }
+  for (let y = Math.max(0, y0 - sampleMargin); y <= Math.min(height - 1, y1 + sampleMargin); y += 1) {
+    for (let x = Math.max(0, x0 - sampleMargin); x <= Math.min(width - 1, x1 + sampleMargin); x += 1) {
+      pushSample(x, y);
     }
   }
   bgSamples.sort((a, b) => a - b);
   const dark = osd.polarity === 'dark';
+  // For light (white) stamps, bias toward the darker scene under the plate so
+  // we do not rebuild the grey OSD box the camera painted behind the text.
   const background = bgSamples.length
-    ? bgSamples[Math.floor(bgSamples.length * (dark ? 0.65 : 0.35))]
+    ? bgSamples[Math.floor(bgSamples.length * (dark ? 0.55 : 0.22))]
     : dark
       ? 200
       : 20;
-  const inkSlack = Math.max(14, Math.round(0.18 * Math.abs((dark ? 0 : 255) - background)));
+  const inkSlack = Math.max(12, Math.round(0.14 * Math.abs((dark ? 0 : 255) - background)));
 
   let sum = 0;
   let sum2 = 0;
@@ -521,7 +720,7 @@ export function eraseOsd(pixels, width, height, osd) {
     for (let x = 0; x < w; x += 1) {
       if (!mask[y * w + x]) continue;
       let value = null;
-      for (const radius of [3, 8, 18, 40, 70].map((v) => Math.round(v * f))) {
+      for (const radius of [4, 10, 22, 48, 80].map((v) => Math.round(v * f))) {
         let r = 0;
         let g = 0;
         let b = 0;
@@ -537,7 +736,7 @@ export function eraseOsd(pixels, width, height, osd) {
             const inBox = yy >= 0 && yy < h && xx >= 0 && xx < w;
             if (inBox && mask[yy * w + xx]) continue;
             const o = (gy * width + gx) * 3;
-            // Skip residual stamp ink / blur halo outside the wipe box.
+            // Skip residual stamp ink / blur halo / leftover plate outside the wipe.
             if (Math.abs(luma(pixels, o) - background) > inkSlack) continue;
             const wt = 1 / (1 + dx * dx + dy * dy);
             r += pixels[o] * wt; g += pixels[o + 1] * wt; b += pixels[o + 2] * wt; wsum += wt;
@@ -549,11 +748,19 @@ export function eraseOsd(pixels, width, height, osd) {
         // Fall back to neutral background estimate when the ring is empty.
         value = [background, background, background];
       }
-      const o = ((y0 + y) * width + (x0 + x)) * 3;
+      const gx = x0 + x;
+      const gy = y0 + y;
+      const o = (gy * width + gx) * 3;
       const n = gauss() * noise;
-      out[o] = clamp8(value[0] + n);
-      out[o + 1] = clamp8(value[1] + n);
-      out[o + 2] = clamp8(value[2] + n);
+      const filled = [clamp8(value[0] + n), clamp8(value[1] + n), clamp8(value[2] + n)];
+      // Feather only against real scene. Stamp ink / plate pixels at the rim must
+      // be fully replaced or ghost strokes and box edges survive.
+      const srcL = luma(pixels, o);
+      const looksLikeInk = Math.abs(srcL - background) > inkSlack;
+      const alpha = looksLikeInk ? 1 : featherWeight(gx, gy, x0, x1, y0, y1, feather);
+      out[o] = clamp8(filled[0] * alpha + pixels[o] * (1 - alpha));
+      out[o + 1] = clamp8(filled[1] * alpha + pixels[o + 1] * (1 - alpha));
+      out[o + 2] = clamp8(filled[2] * alpha + pixels[o + 2] * (1 - alpha));
     }
   }
   return out;
@@ -578,22 +785,7 @@ function sampleMask(mask, x, y) {
 const outlineCache = new Map();
 function outlineMask(ch, mask) {
   if (outlineCache.has(ch)) return outlineCache.get(ch);
-  const radius = 2;
-  const out = new Uint8Array(mask.length);
-  for (let y = 0; y < ATLAS_H; y += 1) {
-    for (let x = 0; x < ATLAS_W; x += 1) {
-      let peak = 0;
-      for (let dy = -radius; dy <= radius; dy += 1) {
-        for (let dx = -radius; dx <= radius; dx += 1) {
-          const yy = y + dy;
-          const xx = x + dx;
-          if (yy < 0 || xx < 0 || yy >= ATLAS_H || xx >= ATLAS_W) continue;
-          peak = Math.max(peak, mask[yy * ATLAS_W + xx]);
-        }
-      }
-      out[y * ATLAS_W + x] = peak;
-    }
-  }
+  const out = dilateMask(mask, 2);
   outlineCache.set(ch, out);
   return out;
 }
@@ -620,8 +812,11 @@ export function drawOsd(base, width, height, sourceOsd, text) {
   const out = Buffer.from(base);
   const gw = osd.pitch;
   const gh = osd.bandHeight;
+  // Camera black outlines only read over bright scenery. Painting them on a dark
+  // night plate creates a fake grey "box" around every glyph and looks like a
+  // bordered timestamp.
   const outlined = osd.polarity !== 'dark';
-  const paint = (mask, cellLeft, color, opacity) => {
+  const paint = (mask, cellLeft, color, opacity, requireBrightBg = false) => {
     const xStart = Math.floor(cellLeft) - 1;
     const xEnd = Math.ceil(cellLeft + gw) + 1;
     for (let py = osd.top; py <= osd.bottom; py += 1) {
@@ -630,9 +825,16 @@ export function drawOsd(base, width, height, sourceOsd, text) {
       for (let px = xStart; px <= xEnd; px += 1) {
         if (px < 0 || px >= width) continue;
         const ax = ((px + 0.5 - cellLeft) / gw) * ATLAS_W - 0.5;
-        const a = sampleMask(mask, ax, ay) * opacity;
+        let a = sampleMask(mask, ax, ay) * opacity;
         if (a <= 0.01) continue;
         const o = (py * width + px) * 3;
+        if (requireBrightBg) {
+          const bg = luma(out, o);
+          // Soft threshold: outline fades out below ~120 so night plates stay clean.
+          const bright = bg <= 90 ? 0 : bg >= 150 ? 1 : (bg - 90) / 60;
+          a *= bright;
+          if (a <= 0.01) continue;
+        }
         out[o] = clamp8(out[o] * (1 - a) + color[0] * a);
         out[o + 1] = clamp8(out[o + 1] * (1 - a) + color[1] * a);
         out[o + 2] = clamp8(out[o + 2] * (1 - a) + color[2] * a);
@@ -648,7 +850,9 @@ export function drawOsd(base, width, height, sourceOsd, text) {
     cells.push({ ch, glyph, cellLeft: osd.left + (i + WINDOW_OFFSET) * osd.pitch });
   }
   if (outlined) {
-    for (const { ch, glyph, cellLeft } of cells) paint(outlineMask(ch, glyph.mask), cellLeft, [8, 8, 8], 0.8);
+    for (const { ch, glyph, cellLeft } of cells) {
+      paint(outlineMask(ch, glyph.mask), cellLeft, [8, 8, 8], 0.8, true);
+    }
   }
   for (const { glyph, cellLeft } of cells) paint(glyph.mask, cellLeft, osd.textColor, 1);
   return out;

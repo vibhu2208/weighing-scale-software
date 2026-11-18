@@ -1285,8 +1285,9 @@ export default function BulkPhotoUpload() {
               </div>
             ))}
             <p className="text-xs text-slate-400">
-              Default: an AC1 image fills AC1 and AC2; an AC2 image fills AC3. Unchecked source
-              images are not uploaded to any slot.
+              Default: AC1 fills AC1+AC2 and AC2 fills AC3; same pattern for DC1/DC2/DC3. Unchecked
+              source images are not uploaded to any slot. Create images uses Admin Builder on cam
+              1/2 stills, then copies cam 3 from the mapping.
             </p>
             <div className="flex flex-wrap justify-end gap-2">
               <button type="button" className="btn-ghost" onClick={() => setConfigOpen(false)}>

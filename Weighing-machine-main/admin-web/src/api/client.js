@@ -237,10 +237,6 @@ export const api = {
     });
   },
 
-  getTripImagePrompt() {
-    return request('/settings/trip-image-prompt');
-  },
-
   generateRemoteTripPhoto(id, { pass, slot }) {
     return request(`/remote-trips/${encodeURIComponent(id)}/generate-photo`, {
       method: 'POST',

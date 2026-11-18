@@ -1,7 +1,7 @@
 'use strict';
 
 const sharp = require('sharp');
-const { getAdvanceSettings, getList } = require('./settingsService');
+const { getList } = require('./settingsService');
 const { getRemoteTrip, attachPhotos } = require('./remoteTripService');
 const {
   getObjectBuffer,
@@ -10,7 +10,6 @@ const {
   remoteTripPhotoThumbKey,
   fillVehicleStillKey,
 } = require('./s3Presign');
-const { DEFAULT_TRIP_IMAGE_PROMPT } = require('./tripImagePrompt');
 const { getAdminBuilderWorkspace } = require('./adminBuilderWorkspace');
 
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
@@ -130,12 +129,6 @@ async function editImageWithAdminBuilder({ imageBuffer, mimeType, datetimeLocal,
   };
 }
 
-async function loadPromptTemplate() {
-  const settings = await getAdvanceSettings();
-  const stored = String(settings.trip_image_prompt || '').trim();
-  return stored || DEFAULT_TRIP_IMAGE_PROMPT;
-}
-
 async function generateRemoteTripPhoto(queryFn, id, body = {}) {
   const pass = body.pass === 'arrival' ? 'arrival' : body.pass === 'departure' ? 'departure' : '';
   const slot = Number(body.slot);
@@ -192,5 +185,4 @@ async function generateRemoteTripPhoto(queryFn, id, body = {}) {
 
 module.exports = {
   generateRemoteTripPhoto,
-  loadPromptTemplate,
 };

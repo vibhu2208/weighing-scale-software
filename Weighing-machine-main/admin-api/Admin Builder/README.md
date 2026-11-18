@@ -211,7 +211,10 @@ conversion.
 - Stamp detection searches the top-left for the `DD-MM-YYYY HH:MM:SS` layout
   and scores every character against the camera glyphs, in either polarity: the
   frames carry white text with a black outline, dim grey text, or black text.
-  Measured on 148 reference frames and 165 non-stamp images
+  Screening keeps pitch near the camera's real size (~16–26 px at 970p) so
+  half-pitch sky grain cannot crowd out the stamp, and layout scoring also
+  matches black outline templates when the white fill disappears against bright
+  sky. Measured on 148 reference frames and 165 non-stamp images
   (`scripts/stamp-roc.mjs`): at `MIN_STAMP_SCORE` 0.40, 146 frames and no
   non-stamp images are accepted. The margin is thin: the best non-stamp image
   scores 0.37, and the cutoff was chosen on these same images. A rejected frame

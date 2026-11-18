@@ -120,6 +120,12 @@ function start() {
 
   const shutdown = () => {
     try {
+      const { endPool } = require('./db');
+      endPool().catch(() => {});
+    } catch {
+      /* optional */
+    }
+    try {
       const { closeBrowserPool } = require('./services/browserPool');
       closeBrowserPool().catch(() => {});
     } catch {
