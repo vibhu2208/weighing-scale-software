@@ -1247,6 +1247,11 @@ export default function RemoteTrips() {
                       trip={row}
                       disabled={Boolean(imageBusyId) && imageBusyId !== row.id}
                       onBusy={(active) => setImageBusyId(active ? row.id : '')}
+                      onTripUpdate={(next) => {
+                        setRows((prev) =>
+                          prev.map((r) => (r.id === next.id ? { ...r, ...next } : r)),
+                        );
+                      }}
                       onDone={loadTrips}
                     />
                   </td>

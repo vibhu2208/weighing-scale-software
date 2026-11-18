@@ -183,12 +183,42 @@ async function pushTransaction(txn, options = {}) {
       sync_status = EXCLUDED.sync_status,
       mcg_status = EXCLUDED.mcg_status,
       mcg_error = EXCLUDED.mcg_error,
-      arrival_photo_1 = COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1),
-      arrival_photo_2 = COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2),
-      arrival_photo_3 = COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3),
-      departure_photo_1 = COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1),
-      departure_photo_2 = COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2),
-      departure_photo_3 = COALESCE(EXCLUDED.departure_photo_3, transactions_mirror.departure_photo_3),
+      arrival_photo_1 = CASE
+        WHEN transactions_mirror.arrival_photo_1 LIKE 'remote-trips/%'
+         AND EXCLUDED.arrival_photo_1 LIKE 'sites/%'
+        THEN transactions_mirror.arrival_photo_1
+        ELSE COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1)
+      END,
+      arrival_photo_2 = CASE
+        WHEN transactions_mirror.arrival_photo_2 LIKE 'remote-trips/%'
+         AND EXCLUDED.arrival_photo_2 LIKE 'sites/%'
+        THEN transactions_mirror.arrival_photo_2
+        ELSE COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2)
+      END,
+      arrival_photo_3 = CASE
+        WHEN transactions_mirror.arrival_photo_3 LIKE 'remote-trips/%'
+         AND EXCLUDED.arrival_photo_3 LIKE 'sites/%'
+        THEN transactions_mirror.arrival_photo_3
+        ELSE COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3)
+      END,
+      departure_photo_1 = CASE
+        WHEN transactions_mirror.departure_photo_1 LIKE 'remote-trips/%'
+         AND EXCLUDED.departure_photo_1 LIKE 'sites/%'
+        THEN transactions_mirror.departure_photo_1
+        ELSE COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1)
+      END,
+      departure_photo_2 = CASE
+        WHEN transactions_mirror.departure_photo_2 LIKE 'remote-trips/%'
+         AND EXCLUDED.departure_photo_2 LIKE 'sites/%'
+        THEN transactions_mirror.departure_photo_2
+        ELSE COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2)
+      END,
+      departure_photo_3 = CASE
+        WHEN transactions_mirror.departure_photo_3 LIKE 'remote-trips/%'
+         AND EXCLUDED.departure_photo_3 LIKE 'sites/%'
+        THEN transactions_mirror.departure_photo_3
+        ELSE COALESCE(EXCLUDED.departure_photo_3, transactions_mirror.departure_photo_3)
+      END,
       report_s3_key = COALESCE(EXCLUDED.report_s3_key, transactions_mirror.report_s3_key),
       updated_at = now()`,
     [

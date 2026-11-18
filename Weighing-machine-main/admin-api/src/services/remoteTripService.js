@@ -948,12 +948,48 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId()) {
       sync_status = COALESCE(EXCLUDED.sync_status, transactions_mirror.sync_status),
       mcg_status = COALESCE(EXCLUDED.mcg_status, transactions_mirror.mcg_status),
       mcg_error = COALESCE(EXCLUDED.mcg_error, transactions_mirror.mcg_error),
-      arrival_photo_1 = COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1),
-      arrival_photo_2 = COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2),
-      arrival_photo_3 = COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3),
-      departure_photo_1 = COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1),
-      departure_photo_2 = COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2),
-      departure_photo_3 = COALESCE(EXCLUDED.departure_photo_3, transactions_mirror.departure_photo_3),
+      arrival_photo_1 = CASE
+        WHEN EXCLUDED.arrival_photo_1 LIKE 'remote-trips/%' THEN EXCLUDED.arrival_photo_1
+        WHEN transactions_mirror.arrival_photo_1 LIKE 'remote-trips/%'
+         AND EXCLUDED.arrival_photo_1 LIKE 'sites/%'
+        THEN transactions_mirror.arrival_photo_1
+        ELSE COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1)
+      END,
+      arrival_photo_2 = CASE
+        WHEN EXCLUDED.arrival_photo_2 LIKE 'remote-trips/%' THEN EXCLUDED.arrival_photo_2
+        WHEN transactions_mirror.arrival_photo_2 LIKE 'remote-trips/%'
+         AND EXCLUDED.arrival_photo_2 LIKE 'sites/%'
+        THEN transactions_mirror.arrival_photo_2
+        ELSE COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2)
+      END,
+      arrival_photo_3 = CASE
+        WHEN EXCLUDED.arrival_photo_3 LIKE 'remote-trips/%' THEN EXCLUDED.arrival_photo_3
+        WHEN transactions_mirror.arrival_photo_3 LIKE 'remote-trips/%'
+         AND EXCLUDED.arrival_photo_3 LIKE 'sites/%'
+        THEN transactions_mirror.arrival_photo_3
+        ELSE COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3)
+      END,
+      departure_photo_1 = CASE
+        WHEN EXCLUDED.departure_photo_1 LIKE 'remote-trips/%' THEN EXCLUDED.departure_photo_1
+        WHEN transactions_mirror.departure_photo_1 LIKE 'remote-trips/%'
+         AND EXCLUDED.departure_photo_1 LIKE 'sites/%'
+        THEN transactions_mirror.departure_photo_1
+        ELSE COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1)
+      END,
+      departure_photo_2 = CASE
+        WHEN EXCLUDED.departure_photo_2 LIKE 'remote-trips/%' THEN EXCLUDED.departure_photo_2
+        WHEN transactions_mirror.departure_photo_2 LIKE 'remote-trips/%'
+         AND EXCLUDED.departure_photo_2 LIKE 'sites/%'
+        THEN transactions_mirror.departure_photo_2
+        ELSE COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2)
+      END,
+      departure_photo_3 = CASE
+        WHEN EXCLUDED.departure_photo_3 LIKE 'remote-trips/%' THEN EXCLUDED.departure_photo_3
+        WHEN transactions_mirror.departure_photo_3 LIKE 'remote-trips/%'
+         AND EXCLUDED.departure_photo_3 LIKE 'sites/%'
+        THEN transactions_mirror.departure_photo_3
+        ELSE COALESCE(EXCLUDED.departure_photo_3, transactions_mirror.departure_photo_3)
+      END,
       report_s3_key = COALESCE(EXCLUDED.report_s3_key, transactions_mirror.report_s3_key),
       updated_at = now()
     RETURNING slip_number`,
@@ -1016,20 +1052,17 @@ async function reconcileRemoteTripsToMirror(queryFn, siteId = getSiteId(), limit
 }
 
 /**
- * Prefer admin Create-images keys (remote-trips/) over weighbridge mirror keys.
- * Mirror often still holds older bytes after Create images overwrites stable S3 keys
- * while the PC skipped re-download of an existing local JPEG.
+ * Never let mirror sync clobber photos already stored on remote_trips.
+ * Create images writes remote-trips/… keys; the weighbridge then pushes older
+ * sites/…/mirror/… JPEGs. Reconcile used to COALESCE those mirror keys back
+ * onto remote_trips and the Bulk Photos UI looked like it “reassigned” the old image.
+ * Only fill empty remote slots from mirror (unless the slip itself remapped).
  */
-function preferRemoteTripPhotoKey(remoteKey, mirrorKey) {
+function preferRemoteTripPhotoKey(remoteKey, mirrorKey, { slipChanged = false } = {}) {
   const remote = String(remoteKey || '').trim() || null;
   const mirror = String(mirrorKey || '').trim() || null;
-  if (!mirror) return remote;
-  if (!remote) return mirror;
-  const remoteNorm = remote.replace(/\\/g, '/');
-  const mirrorNorm = mirror.replace(/\\/g, '/');
-  if (remoteNorm.startsWith('remote-trips/') && mirrorNorm.startsWith('sites/')) {
-    return remote;
-  }
+  if (slipChanged) return mirror || remote;
+  if (remote) return remote;
   return mirror;
 }
 
@@ -1154,23 +1187,57 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           : rt.local_id && rt.local_id !== rt.id
             ? rt.local_id
             : mirror.local_id || rt.local_id || null;
+      const slipChanged = Boolean(newSlip && newSlip !== oldSlip);
       const nextPhotos = {
-        arrival_photo_1: preferRemoteTripPhotoKey(rt.arrival_photo_1, mirror.arrival_photo_1),
-        arrival_photo_2: preferRemoteTripPhotoKey(rt.arrival_photo_2, mirror.arrival_photo_2),
-        arrival_photo_3: preferRemoteTripPhotoKey(rt.arrival_photo_3, mirror.arrival_photo_3),
+        arrival_photo_1: preferRemoteTripPhotoKey(rt.arrival_photo_1, mirror.arrival_photo_1, {
+          slipChanged,
+        }),
+        arrival_photo_2: preferRemoteTripPhotoKey(rt.arrival_photo_2, mirror.arrival_photo_2, {
+          slipChanged,
+        }),
+        arrival_photo_3: preferRemoteTripPhotoKey(rt.arrival_photo_3, mirror.arrival_photo_3, {
+          slipChanged,
+        }),
         departure_photo_1: preferRemoteTripPhotoKey(
           rt.departure_photo_1,
           mirror.departure_photo_1,
+          { slipChanged },
         ),
         departure_photo_2: preferRemoteTripPhotoKey(
           rt.departure_photo_2,
           mirror.departure_photo_2,
+          { slipChanged },
         ),
         departure_photo_3: preferRemoteTripPhotoKey(
           rt.departure_photo_3,
           mirror.departure_photo_3,
+          { slipChanged },
         ),
       };
+      for (const col of [
+        'arrival_photo_1',
+        'arrival_photo_2',
+        'arrival_photo_3',
+        'departure_photo_1',
+        'departure_photo_2',
+        'departure_photo_3',
+      ]) {
+        const before = String(rt[col] || '').trim();
+        const after = String(nextPhotos[col] || '').trim();
+        const mirrorVal = String(mirror[col] || '').trim();
+        if (
+          before.startsWith('remote-trips/') &&
+          mirrorVal.startsWith('sites/') &&
+          after === before
+        ) {
+          console.log('[remoteTrip] kept Create-images photo (ignored stale mirror)', {
+            slip: rt.slip_number,
+            col,
+            kept: before,
+            ignoredMirror: mirrorVal,
+          });
+        }
+      }
       const unchanged =
         slipToWrite === oldSlip &&
         String(rt.truck_number || '') === String(mirror.truck_number || '') &&

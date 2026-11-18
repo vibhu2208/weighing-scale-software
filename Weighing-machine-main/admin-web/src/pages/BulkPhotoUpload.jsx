@@ -807,6 +807,11 @@ export default function BulkPhotoUpload() {
                       trip={row}
                       disabled={busy || (Boolean(imageBusyId) && imageBusyId !== row.id)}
                       onBusy={(active) => setImageBusyId(active ? row.id : '')}
+                      onTripUpdate={(next) => {
+                        setRows((prev) =>
+                          prev.map((r) => (r.id === next.id ? { ...r, ...next } : r)),
+                        );
+                      }}
                       onDone={load}
                     />
                   </td>

@@ -12,7 +12,7 @@ const {
   mirrorPhotoKey,
   mirrorPhotoThumbKey,
   remoteTripPhotoKey,
-  remoteTripPhotoThumbKey,
+  remoteTripPhotoThumbKeyFromKey,
   fillVehicleStillKey,
   isConfigured,
 } = require('../services/s3Presign');
@@ -141,7 +141,7 @@ router.post('/remote-trip-upload', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'slip and slot (1-3) required' });
     }
     const key = remoteTripPhotoKey(slipNum, slotNum, photoPass);
-    const thumbKey = remoteTripPhotoThumbKey(slipNum, slotNum, photoPass);
+    const thumbKey = remoteTripPhotoThumbKeyFromKey(key);
     const raw = parseImageBuffer(imageBase64);
     const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
     await writePhotoThumb(key, stored.body, thumbKey);
@@ -257,9 +257,9 @@ router.post('/remote-trip-copy', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'sourceKey not allowed' });
     }
     const key = remoteTripPhotoKey(slipNum, slotNum, photoPass);
-    const thumbKey = remoteTripPhotoThumbKey(slipNum, slotNum, photoPass);
+    const thumbKey = remoteTripPhotoThumbKeyFromKey(key);
     await copyObject(fromKey, key);
-    const fromThumb = fromKey.replace(/\.jpe?g$/i, '.thumb.jpg');
+    const fromThumb = remoteTripPhotoThumbKeyFromKey(fromKey);
     try {
       await copyObject(fromThumb, thumbKey);
     } catch {

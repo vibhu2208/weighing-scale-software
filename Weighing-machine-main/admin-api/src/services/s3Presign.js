@@ -140,14 +140,28 @@ async function copyObject(sourceKey, destKey) {
   return destKey;
 }
 
-function remoteTripPhotoKey(slip, slot, pass = 'departure') {
-  const tag = pass === 'arrival' ? 'arrival' : 'departure';
-  return `remote-trips/${slip}/${tag}_cam-${slot}.jpg`;
+function newRemoteTripPhotoVersion() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function remoteTripPhotoThumbKey(slip, slot, pass = 'departure') {
+/** Versioned keys so Create images never overwrites a prior object under the same path. */
+function remoteTripPhotoKey(slip, slot, pass = 'departure', version = null) {
   const tag = pass === 'arrival' ? 'arrival' : 'departure';
-  return `remote-trips/${slip}/${tag}_cam-${slot}.thumb.jpg`;
+  const ver = version || newRemoteTripPhotoVersion();
+  return `remote-trips/${slip}/${tag}_cam-${slot}-${ver}.jpg`;
+}
+
+function remoteTripPhotoThumbKey(slip, slot, pass = 'departure', version = null) {
+  const tag = pass === 'arrival' ? 'arrival' : 'departure';
+  const ver = version || newRemoteTripPhotoVersion();
+  return `remote-trips/${slip}/${tag}_cam-${slot}-${ver}.thumb.jpg`;
+}
+
+function remoteTripPhotoThumbKeyFromKey(fullKey) {
+  const key = String(fullKey || '').trim();
+  if (!key) return key;
+  if (/\.thumb\.jpe?g$/i.test(key)) return key;
+  return key.replace(/\.jpe?g$/i, '.thumb.jpg');
 }
 
 function mirrorPhotoThumbKey(siteId, slip, slot, pass = 'departure') {
@@ -207,6 +221,8 @@ module.exports = {
   putObject,
   copyObject,
   getObjectBuffer,
+  newRemoteTripPhotoVersion,
+  remoteTripPhotoThumbKeyFromKey,
   mirrorPhotoKey,
   mirrorReportKey,
   mirrorReportGrossKey,

@@ -3,11 +3,12 @@
 const sharp = require('sharp');
 const { getList } = require('./settingsService');
 const { getRemoteTrip, attachPhotos } = require('./remoteTripService');
-const {
+  const {
   getObjectBuffer,
   putObject,
+  newRemoteTripPhotoVersion,
   remoteTripPhotoKey,
-  remoteTripPhotoThumbKey,
+  remoteTripPhotoThumbKeyFromKey,
   fillVehicleStillKey,
 } = require('./s3Presign');
 const { getAdminBuilderWorkspace } = require('./adminBuilderWorkspace');
@@ -175,8 +176,9 @@ async function generateRemoteTripPhoto(queryFn, id, body = {}) {
     operatorEmail: body.operatorEmail,
   });
 
-  const key = remoteTripPhotoKey(trip.slip_number, slot, pass);
-  const thumbKey = remoteTripPhotoThumbKey(trip.slip_number, slot, pass);
+  const version = newRemoteTripPhotoVersion();
+  const key = remoteTripPhotoKey(trip.slip_number, slot, pass, version);
+  const thumbKey = remoteTripPhotoThumbKeyFromKey(key);
   await putObject(key, edited.buffer, 'image/jpeg');
   await writeTripPhotoThumb(key, edited.buffer, thumbKey);
   const updated = await attachPhotos(queryFn, id, [{ slot, pass, key }]);

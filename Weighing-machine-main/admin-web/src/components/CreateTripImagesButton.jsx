@@ -14,24 +14,58 @@ const JOBS = [
 ];
 
 const STOP_RE =
-  /Admin Builder is processing|not in the fill vehicle list|S3 not configured|Missing .+ still|Reference image not found|OSD_NOT_FOUND|Could not find the camera timestamp/i;
+  /Admin Builder is processing|not in the fill vehicle list|S3 not configured|Missing .+ still|Reference image not found/i;
 
-export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone }) {
+const PHOTO_COLS = [
+  'arrival_photo_1',
+  'arrival_photo_2',
+  'arrival_photo_3',
+  'departure_photo_1',
+  'departure_photo_2',
+  'departure_photo_3',
+];
+
+async function mediaFieldsForTrip(trip) {
+  const urlFields = {};
+  await Promise.all(
+    PHOTO_COLS.map(async (col) => {
+      const key = trip?.[col];
+      if (!key) return;
+      try {
+        const signed = await api.presignMedia(key);
+        urlFields[`${col}_url`] = signed.url;
+        urlFields[`${col}_thumb_url`] = null;
+        const thumbKey = String(key).replace(/\.jpe?g$/i, '.thumb.jpg');
+        try {
+          const thumb = await api.presignMedia(thumbKey);
+          urlFields[`${col}_thumb_url`] = thumb.url;
+        } catch {
+          /* older objects may lack thumbs */
+        }
+      } catch {
+        /* preview optional */
+      }
+    }),
+  );
+  return urlFields;
+}
+
+export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone, onTripUpdate }) {
   const [status, setStatus] = useState('');
   const [note, setNote] = useState('');
   const busy = Boolean(status);
 
-  async function attachKeys(photoS3Keys) {
-    if (!photoS3Keys.length || !trip?.id) return;
-    await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+  async function publishTrip(nextTrip) {
+    if (!nextTrip?.id) return;
+    const urlFields = await mediaFieldsForTrip(nextTrip);
+    onTripUpdate?.({ ...nextTrip, ...urlFields, has_photos: true });
   }
 
-  async function applyMappingCopies(result, job, mapping, slot3Filled) {
+  async function applyMappingCopies(result, job, mapping) {
     const sourceKey = result?.key;
-    if (!sourceKey || !trip?.slip_number) return slot3Filled;
+    if (!sourceKey || !trip?.slip_number) return result?.trip || null;
     const destinations = destinationSlotsFor(job.pass, job.slot, mapping);
     const photoS3Keys = [{ slot: job.slot, pass: job.pass, key: sourceKey }];
-    let filled3 = slot3Filled;
     for (const dest of destinations) {
       if (dest === job.slot) continue;
       if (isOpenTicket(trip.ticket_status) && job.pass === 'departure') continue;
@@ -43,22 +77,13 @@ export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone 
       );
       if (copied?.key) {
         photoS3Keys.push({ slot: dest, pass: job.pass, key: copied.key });
-        if (dest === 3) filled3 = true;
       }
     }
     if (photoS3Keys.length > 1) {
-      await attachKeys(photoS3Keys);
+      const attached = await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+      return attached?.trip || result?.trip || null;
     }
-    return filled3;
-  }
-
-  async function ensureSlot3(pass, sourceKey, slot3Filled) {
-    if (slot3Filled || !sourceKey || !trip?.slip_number) return;
-    if (isOpenTicket(trip.ticket_status) && pass === 'departure') return;
-    const copied = await api.copyRemoteTripPhoto(sourceKey, trip.slip_number, 3, pass);
-    if (copied?.key) {
-      await attachKeys([{ slot: 3, pass, key: copied.key }]);
-    }
+    return result?.trip || null;
   }
 
   async function run() {
@@ -68,8 +93,6 @@ export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone 
     let changed = false;
     let toldDeparture = false;
     const mapping = loadPhotoMapping();
-    const lastKeyByPass = { arrival: '', departure: '' };
-    const slot3Filled = { arrival: false, departure: false };
     try {
       for (const job of JOBS) {
         if (!trip?.[job.timeField]) {
@@ -88,23 +111,16 @@ export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone 
             pass: job.pass,
             slot: job.slot,
           });
-          if (result?.key) lastKeyByPass[job.pass] = result.key;
-          slot3Filled[job.pass] = await applyMappingCopies(
-            result,
-            job,
-            mapping,
-            slot3Filled[job.pass],
-          );
+          // generate-photo already returns signed media URLs on trip.
+          if (result?.trip) await publishTrip(result.trip);
+          const nextTrip = await applyMappingCopies(result, job, mapping);
+          if (nextTrip && nextTrip !== result?.trip) await publishTrip(nextTrip);
           changed = true;
         } catch (err) {
           const message = err.message || 'Could not create image';
           notes.push(STOP_RE.test(message) ? message : `${job.label}: ${message}`);
           if (STOP_RE.test(message)) break;
         }
-      }
-      setStatus('Filling cam 3…');
-      for (const pass of ['arrival', 'departure']) {
-        await ensureSlot3(pass, lastKeyByPass[pass], slot3Filled[pass]);
       }
     } finally {
       setStatus('');
@@ -121,7 +137,6 @@ export default function CreateTripImagesButton({ trip, disabled, onBusy, onDone 
         className="text-brand-300 hover:underline text-xs disabled:opacity-50 whitespace-nowrap"
         disabled={disabled || busy || !trip?.id}
         onClick={run}
-        title="Edits fill-vehicle stills with Admin Builder (timestamp + lighting)"
       >
         {busy ? status : 'Create images'}
       </button>
