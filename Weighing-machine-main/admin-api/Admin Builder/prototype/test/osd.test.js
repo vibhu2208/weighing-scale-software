@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import sharp from 'sharp';
-import { drawOsd, eraseOsd, formatOsdText, locateOsd, restoreOsdBand } from '../src/osd.js';
+import { drawOsd, eraseOsd, formatOsdText, locateOsd } from '../src/osd.js';
 import { ambienceForTime, relight } from '../src/relight.js';
 
 const W = 640;
@@ -53,22 +53,32 @@ test('changing the day digit leaves no leftover stroke before the new day', asyn
   const erased = eraseOsd(pixels, W, H, found);
   assert.equal(locateOsd(erased, W, H), null, 'erase must remove the old stamp');
   const lifted = await relight(erased, W, H, '2026-11-16T12:00:00', { skipRect: found });
-  const stampReady = restoreOsdBand(lifted.pixels, erased, W, H, found);
+  // Re-wipe after relight so the stamp sits on scene pixels (no flat plate).
+  const stampReady = eraseOsd(lifted.pixels, W, H, found);
   const redrawn = drawOsd(stampReady, W, H, found, formatOsdText('2026-11-16T12:00:00'));
   const again = locateOsd(redrawn, W, H);
   assert.ok(again, 'new stamp should be readable');
-  // First glyph cell must not be much brighter than the drawn "1" alone would allow:
-  // a leftover "2" stroke would inflate ink left of the new day.
+  // Leftover "2" stroke would sit left of the new day; compare against local bg
+  // (after day lift the wipe band is bright scene, not near-black).
   const pitch = found.pitch;
   const left = found.left + (-0.1) * pitch;
   let inkBefore = 0;
+  let localBg = 0;
+  let bgCount = 0;
+  const yBg = Math.max(0, found.top - 2);
+  for (let x = Math.floor(left - pitch * 0.6); x < Math.floor(left); x += 1) {
+    if (x < 0) continue;
+    localBg += redrawn[(yBg * W + x) * 3];
+    bgCount += 1;
+  }
+  localBg = bgCount ? localBg / bgCount : 0;
   for (let y = found.top; y <= found.bottom; y += 1) {
     for (let x = Math.floor(left - pitch * 0.6); x < Math.floor(left); x += 1) {
       if (x < 0) continue;
-      inkBefore = Math.max(inkBefore, redrawn[(y * W + x) * 3]);
+      inkBefore = Math.max(inkBefore, Math.abs(redrawn[(y * W + x) * 3] - localBg));
     }
   }
-  assert.ok(inkBefore < 80, `ghost ink before day digit: ${inkBefore}`);
+  assert.ok(inkBefore < 50, `ghost ink before day digit: ${inkBefore}`);
 });
 
 test('finds white text whatever is behind it, and black text on a bright sky', () => {

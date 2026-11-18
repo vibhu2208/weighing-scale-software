@@ -4,7 +4,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { ProcessingError } from './errors.js';
 import { applyLighting } from './lighting.js';
-import { drawOsd, eraseOsd, formatOsdText, planOsdReplacement, restoreOsdBand } from './osd.js';
+import { drawOsd, eraseOsd, formatOsdText, planOsdReplacement } from './osd.js';
 import { relight } from './relight.js';
 import { assessVisualQuality, reportSafeRect } from './quality.js';
 import {
@@ -572,9 +572,9 @@ export async function processJob({
   let lighting;
   let workingPixels;
   if (inframeOsd) {
-    // Erase the camera stamp, relight the scene, restore the pre-relight wipe
-    // band (relight would lift the flat plate into a white frame / ghost digits),
-    // then redraw the requested stamp (camera burns OSD after exposure).
+    // Erase the camera stamp, relight the scene, then wipe the stamp band again
+    // from the *relit* neighbors so the background matches the scene (no white
+    // plate), and redraw the requested stamp (camera burns OSD after exposure).
     osdPlan = planOsdReplacement(source.pixels, source.width, source.height, job.datetime_local);
     const erased = eraseOsd(source.pixels, source.width, source.height, osdPlan.osd);
     if (job.lighting_mode === 'none') {
@@ -585,13 +585,7 @@ export async function processJob({
         lamps: Array.isArray(job.lamps) ? job.lamps : [],
       });
     }
-    const stampReady = restoreOsdBand(
-      lighting.pixels,
-      erased,
-      source.width,
-      source.height,
-      osdPlan.osd,
-    );
+    const stampReady = eraseOsd(lighting.pixels, source.width, source.height, osdPlan.osd);
     workingPixels = drawOsd(stampReady, source.width, source.height, osdPlan.osd, osdPlan.text);
   } else {
     lighting = applyLighting(source.pixels, job.lighting_mode, job.datetime_local, profile);
