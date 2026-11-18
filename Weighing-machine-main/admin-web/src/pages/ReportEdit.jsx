@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { reportEditBackLabel, reportEditBackPath } from '../lib/reportsListState.js';
 import { api } from '../api/client.js';
@@ -26,6 +26,18 @@ function photoKey(pass, slot) {
   return `${pass}:${slot}`;
 }
 
+/** Only blob / http(s) image URLs may open in the lightbox. */
+function isSafeImageUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'blob:';
+  } catch {
+    return false;
+  }
+}
+
 function PhotoSlot({
   pass,
   slot,
@@ -34,8 +46,11 @@ function PhotoSlot({
   previewUrl,
   onFileChange,
   onUseBlankImage,
+  onViewImage,
   disabled,
 }) {
+  const displayUrl = previewUrl || existingUrl || '';
+  const canView = isSafeImageUrl(displayUrl);
   return (
     <div>
       <label className="text-xs text-slate-500">{title}</label>
@@ -47,22 +62,23 @@ function PhotoSlot({
         onChange={(e) => onFileChange(pass, slot, e.target.files?.[0] || null)}
       />
       <div className="mt-2 h-24 rounded border border-slate-700 bg-slate-900/50 overflow-hidden flex items-center justify-center">
-        {previewUrl ? (
-          <img
-            src={previewUrl}
-            alt={title}
-            loading="lazy"
-            decoding="async"
-            className="h-full w-full object-cover"
-          />
-        ) : existingUrl ? (
-          <img
-            src={existingUrl}
-            alt={title}
-            loading="lazy"
-            decoding="async"
-            className="h-full w-full object-cover"
-          />
+        {canView ? (
+          <button
+            type="button"
+            className="group h-full w-full cursor-zoom-in p-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-inset"
+            title={`View ${title}`}
+            aria-label={`View ${title}`}
+            onClick={() => onViewImage?.({ url: displayUrl, label: title })}
+          >
+            <img
+              src={displayUrl}
+              alt={title}
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              className="pointer-events-none h-full w-full object-cover transition-opacity group-hover:opacity-90"
+            />
+          </button>
         ) : (
           <div className="flex flex-col items-center gap-2">
             <span className="text-[10px] text-slate-500 px-2 text-center">No photo</span>
@@ -91,6 +107,7 @@ export default function ReportEdit() {
   const [form, setForm] = useState({});
   const [photos, setPhotos] = useState({});
   const [previews, setPreviews] = useState({});
+  const previewsRef = useRef({});
   const [lists, setLists] = useState({
     materials: [],
     customers: [],
@@ -102,8 +119,41 @@ export default function ReportEdit() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [lightbox, setLightbox] = useState(null);
+
+  function openLightbox({ url, label }) {
+    if (!isSafeImageUrl(url)) return;
+    setLightbox({ url, label: String(label || 'Photo') });
+  }
 
   useEffect(() => {
+    previewsRef.current = previews;
+  }, [previews]);
+
+  useEffect(() => {
+    if (!lightbox) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setLightbox(null);
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [lightbox]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(previewsRef.current).forEach((url) => {
+        if (url) URL.revokeObjectURL(url);
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    setLightbox(null);
     async function load() {
       setLoading(true);
       try {
@@ -468,6 +518,12 @@ export default function ReportEdit() {
                     previewUrl={previews[photoKey(pass, slot)]}
                     onFileChange={onPhotoFileChange}
                     onUseBlankImage={onUseBlankImage}
+                    onViewImage={({ url }) =>
+                      openLightbox({
+                        url,
+                        label: `${slip} · ${pass === 'arrival' ? 'Arrival' : 'Departure'} · Camera ${slot}`,
+                      })
+                    }
                     disabled={saving}
                   />
                 ))}
@@ -498,6 +554,34 @@ export default function ReportEdit() {
           </button>
         </div>
       </form>
+
+      {lightbox && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={lightbox.label}
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-6"
+          onClick={() => setLightbox(null)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setLightbox(null);
+          }}
+        >
+          <button
+            type="button"
+            className="absolute right-4 top-4 rounded bg-slate-900/80 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800"
+            onClick={() => setLightbox(null)}
+          >
+            Close
+          </button>
+          <img
+            src={lightbox.url}
+            alt={lightbox.label}
+            referrerPolicy="no-referrer"
+            className="max-h-[90vh] max-w-[90vw] rounded object-contain"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
     </div>
   );
 }
