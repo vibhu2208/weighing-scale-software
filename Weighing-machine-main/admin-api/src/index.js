@@ -95,6 +95,13 @@ async function bootstrap() {
     );
   }
   try {
+    const { ensureProtectCreateImagePhotos } = require('./services/remoteTripService');
+    await ensureProtectCreateImagePhotos(query);
+    console.log('[api] create-image photo protection trigger ready');
+  } catch (err) {
+    console.error('[api] create-image photo protection trigger failed:', err.message);
+  }
+  try {
     startMirrorReconcileWorker(query, 60);
     startOutTimeReleaseWorker(query, 15000);
     console.log('[api] remote trip → mirror reconcile worker started');

@@ -1261,6 +1261,10 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
         String(rt.report_s3_key || '') === String(mirror.report_s3_key || '');
       if (unchanged) continue;
 
+      // Photo SET must prefer the *current* row value over the stale JS snapshot.
+      // Reconcile loads hundreds of rows first; Create images can attach remote-trips/
+      // keys while that loop is still running. COALESCE($n, arrival_photo_1) used to
+      // write the stale sites/.../mirror key back and undo Create images after sync.
       await queryFn(
         `UPDATE remote_trips SET
           slip_number = $2,
@@ -1277,12 +1281,42 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           timestamp_in = COALESCE($13, timestamp_in),
           timestamp_out = COALESCE($14, timestamp_out),
           local_id = COALESCE($15, local_id),
-          arrival_photo_1 = COALESCE($16, arrival_photo_1),
-          arrival_photo_2 = COALESCE($17, arrival_photo_2),
-          arrival_photo_3 = COALESCE($18, arrival_photo_3),
-          departure_photo_1 = COALESCE($19, departure_photo_1),
-          departure_photo_2 = COALESCE($20, departure_photo_2),
-          departure_photo_3 = COALESCE($21, departure_photo_3),
+          arrival_photo_1 = CASE
+            WHEN $25::boolean THEN COALESCE($16, arrival_photo_1)
+            WHEN arrival_photo_1 LIKE 'remote-trips/%' THEN arrival_photo_1
+            WHEN $16::text LIKE 'remote-trips/%' THEN $16
+            ELSE COALESCE(NULLIF(BTRIM(arrival_photo_1), ''), $16)
+          END,
+          arrival_photo_2 = CASE
+            WHEN $25::boolean THEN COALESCE($17, arrival_photo_2)
+            WHEN arrival_photo_2 LIKE 'remote-trips/%' THEN arrival_photo_2
+            WHEN $17::text LIKE 'remote-trips/%' THEN $17
+            ELSE COALESCE(NULLIF(BTRIM(arrival_photo_2), ''), $17)
+          END,
+          arrival_photo_3 = CASE
+            WHEN $25::boolean THEN COALESCE($18, arrival_photo_3)
+            WHEN arrival_photo_3 LIKE 'remote-trips/%' THEN arrival_photo_3
+            WHEN $18::text LIKE 'remote-trips/%' THEN $18
+            ELSE COALESCE(NULLIF(BTRIM(arrival_photo_3), ''), $18)
+          END,
+          departure_photo_1 = CASE
+            WHEN $25::boolean THEN COALESCE($19, departure_photo_1)
+            WHEN departure_photo_1 LIKE 'remote-trips/%' THEN departure_photo_1
+            WHEN $19::text LIKE 'remote-trips/%' THEN $19
+            ELSE COALESCE(NULLIF(BTRIM(departure_photo_1), ''), $19)
+          END,
+          departure_photo_2 = CASE
+            WHEN $25::boolean THEN COALESCE($20, departure_photo_2)
+            WHEN departure_photo_2 LIKE 'remote-trips/%' THEN departure_photo_2
+            WHEN $20::text LIKE 'remote-trips/%' THEN $20
+            ELSE COALESCE(NULLIF(BTRIM(departure_photo_2), ''), $20)
+          END,
+          departure_photo_3 = CASE
+            WHEN $25::boolean THEN COALESCE($21, departure_photo_3)
+            WHEN departure_photo_3 LIKE 'remote-trips/%' THEN departure_photo_3
+            WHEN $21::text LIKE 'remote-trips/%' THEN $21
+            ELSE COALESCE(NULLIF(BTRIM(departure_photo_3), ''), $21)
+          END,
           report_s3_key = COALESCE($22, report_s3_key),
           ticket_status = CASE
             WHEN $23 = 'CLOSED' THEN 'CLOSED'
@@ -1321,6 +1355,7 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
           mirror.report_s3_key || null,
           mirror.ticket_status || null,
           mirror.mcg_status || null,
+          slipChanged,
         ],
       );
       updated += 1;
@@ -1673,6 +1708,66 @@ async function deleteRemoteTrip(queryFn, id, { siteId = getSiteId() } = {}) {
   return { slip_number: slip, wasSynced };
 }
 
+/**
+ * DB-level guard: any client (including an old admin-api reconcile worker on
+ * another machine) must not replace Create-images keys with weighbridge mirror keys.
+ * Explicit attachPhotos to a new remote-trips/… key is still allowed.
+ */
+async function ensureProtectCreateImagePhotos(queryFn = null) {
+  const q = queryFn || require('../db').query;
+  await q(`
+    CREATE OR REPLACE FUNCTION protect_remote_trip_create_image_photos()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $fn$
+    DECLARE
+      slip_changed boolean;
+    BEGIN
+      slip_changed := UPPER(COALESCE(NEW.slip_number, '')) IS DISTINCT FROM UPPER(COALESCE(OLD.slip_number, ''));
+      IF slip_changed THEN
+        RETURN NEW;
+      END IF;
+
+      IF OLD.arrival_photo_1 LIKE 'remote-trips/%'
+         AND NEW.arrival_photo_1 LIKE 'sites/%' THEN
+        NEW.arrival_photo_1 := OLD.arrival_photo_1;
+      END IF;
+      IF OLD.arrival_photo_2 LIKE 'remote-trips/%'
+         AND NEW.arrival_photo_2 LIKE 'sites/%' THEN
+        NEW.arrival_photo_2 := OLD.arrival_photo_2;
+      END IF;
+      IF OLD.arrival_photo_3 LIKE 'remote-trips/%'
+         AND NEW.arrival_photo_3 LIKE 'sites/%' THEN
+        NEW.arrival_photo_3 := OLD.arrival_photo_3;
+      END IF;
+      IF OLD.departure_photo_1 LIKE 'remote-trips/%'
+         AND NEW.departure_photo_1 LIKE 'sites/%' THEN
+        NEW.departure_photo_1 := OLD.departure_photo_1;
+      END IF;
+      IF OLD.departure_photo_2 LIKE 'remote-trips/%'
+         AND NEW.departure_photo_2 LIKE 'sites/%' THEN
+        NEW.departure_photo_2 := OLD.departure_photo_2;
+      END IF;
+      IF OLD.departure_photo_3 LIKE 'remote-trips/%'
+         AND NEW.departure_photo_3 LIKE 'sites/%' THEN
+        NEW.departure_photo_3 := OLD.departure_photo_3;
+      END IF;
+
+      RETURN NEW;
+    END;
+    $fn$;
+  `);
+  await q(`
+    DROP TRIGGER IF EXISTS trg_protect_remote_trip_create_image_photos ON remote_trips;
+  `);
+  await q(`
+    CREATE TRIGGER trg_protect_remote_trip_create_image_photos
+    BEFORE UPDATE ON remote_trips
+    FOR EACH ROW
+    EXECUTE FUNCTION protect_remote_trip_create_image_photos();
+  `);
+}
+
 module.exports = {
   buildCreatePayload,
   validateRemoteTripFields,
@@ -1686,6 +1781,7 @@ module.exports = {
   resyncRemoteTrip,
   cancelRemoteTrip,
   deleteRemoteTrip,
+  ensureProtectCreateImagePhotos,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,
   reconcileRemoteTripsFromMirror,

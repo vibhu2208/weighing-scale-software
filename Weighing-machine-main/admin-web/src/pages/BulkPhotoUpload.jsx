@@ -204,6 +204,14 @@ export default function BulkPhotoUpload() {
     () => filteredRows.filter((row) => row?.id),
     [filteredRows],
   );
+  const remainingTripsWithoutImages = useMemo(
+    () =>
+      createAllTrips.filter((row) => {
+        const slots = expectedPhotoSlots(row);
+        return filledPhotoCount(row) < slots.length;
+      }),
+    [createAllTrips],
+  );
   const imagesLocked = Boolean(createAllStatus) || Boolean(imageBusyId);
 
   const assignments = useMemo(
@@ -361,16 +369,9 @@ export default function BulkPhotoUpload() {
     setRows((prev) => prev.map((r) => (r.id === next.id ? { ...r, ...next } : r)));
   }
 
-  async function createImagesForAll() {
-    const trips = createAllTrips;
+  async function createImagesForTrips(trips, confirmMessage) {
     if (!trips.length || busy || imagesLocked) return;
-    if (
-      !window.confirm(
-        `Create images for all ${trips.length} trip${trips.length === 1 ? '' : 's'} in this list? They will run one by one.`,
-      )
-    ) {
-      return;
-    }
+    if (!window.confirm(confirmMessage)) return;
     setError('');
     setMessage('');
     let changedCount = 0;
@@ -437,6 +438,22 @@ export default function BulkPhotoUpload() {
     }
     if (parts.length) setMessage(parts.join(' · '));
     if (changedCount) await load();
+  }
+
+  function createImagesForAll() {
+    const trips = createAllTrips;
+    return createImagesForTrips(
+      trips,
+      `Create images for all ${trips.length} trip${trips.length === 1 ? '' : 's'} in this list? They will run one by one.`,
+    );
+  }
+
+  function createImagesForRemaining() {
+    const trips = remainingTripsWithoutImages;
+    return createImagesForTrips(
+      trips,
+      `Create images for ${trips.length} remaining trip${trips.length === 1 ? '' : 's'} that are missing photos? They will run one by one.`,
+    );
   }
 
   async function uploadAll() {
@@ -785,9 +802,18 @@ export default function BulkPhotoUpload() {
             ? createAllStatus
             : `Create images for all (${createAllTrips.length})`}
         </button>
+        <button
+          type="button"
+          className="btn-ghost text-xs"
+          disabled={!remainingTripsWithoutImages.length || busy || zipBusy || imagesLocked}
+          onClick={createImagesForRemaining}
+          title="Only trips that still have empty camera slots"
+        >
+          Create remaining ({remainingTripsWithoutImages.length})
+        </button>
         <span className="text-xs text-slate-500">
           {filteredRows.length} of {rows.length} trip{rows.length === 1 ? '' : 's'} ·{' '}
-          {dayLabel(day, customDate)}
+          {remainingTripsWithoutImages.length} missing photos · {dayLabel(day, customDate)}
         </span>
       </div>
 
