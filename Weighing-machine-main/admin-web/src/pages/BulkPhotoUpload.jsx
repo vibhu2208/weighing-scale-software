@@ -3,7 +3,10 @@ import { Link } from 'react-router-dom';
 import blankPhotoUrl from '../assets/blank-photo.png';
 import { api } from '../api/client.js';
 import Badge from '../components/Badge.jsx';
-import CreateTripImagesButton from '../components/CreateTripImagesButton.jsx';
+import CreateTripImagesButton, {
+  FATAL_CREATE_RE,
+  createTripImages,
+} from '../components/CreateTripImagesButton.jsx';
 import RemoveRemoteTripButton from '../components/RemoveRemoteTripButton.jsx';
 import {
   fmtDate,
@@ -108,6 +111,7 @@ export default function BulkPhotoUpload() {
   const [dragOver, setDragOver] = useState(false);
   const [zipBusy, setZipBusy] = useState(false);
   const [imageBusyId, setImageBusyId] = useState('');
+  const [createAllStatus, setCreateAllStatus] = useState('');
   const [zipOpen, setZipOpen] = useState(false);
   const [zipVehicles, setZipVehicles] = useState([]);
   const [lightbox, setLightbox] = useState(null);
@@ -195,6 +199,12 @@ export default function BulkPhotoUpload() {
       return true;
     });
   }, [rows, vehicle, operator, ticketStatus, syncFilter, photoFilter, search]);
+
+  const createAllTrips = useMemo(
+    () => filteredRows.filter((row) => row?.id),
+    [filteredRows],
+  );
+  const imagesLocked = Boolean(createAllStatus) || Boolean(imageBusyId);
 
   const assignments = useMemo(
     () => buildPhotoAssignments(files, rows, overrides),
@@ -347,8 +357,90 @@ export default function BulkPhotoUpload() {
     setConfigOpen(false);
   }
 
+  function applyTripUpdate(next) {
+    setRows((prev) => prev.map((r) => (r.id === next.id ? { ...r, ...next } : r)));
+  }
+
+  async function createImagesForAll() {
+    const trips = createAllTrips;
+    if (!trips.length || busy || imagesLocked) return;
+    if (
+      !window.confirm(
+        `Create images for all ${trips.length} trip${trips.length === 1 ? '' : 's'} in this list? They will run one by one.`,
+      )
+    ) {
+      return;
+    }
+    setError('');
+    setMessage('');
+    let changedCount = 0;
+    let abortedEarly = false;
+    const failures = [];
+    const softNotes = [];
+    try {
+      for (let i = 0; i < trips.length; i += 1) {
+        const trip = trips[i];
+        const label = trip.truck_number || trip.slip_number || trip.id;
+        setImageBusyId(trip.id);
+        setCreateAllStatus(`${i + 1}/${trips.length}: ${label}`);
+        try {
+          const { changed, warnings, errors, stopped } = await createTripImages(trip, {
+            onStatus: (jobStatus) => {
+              setCreateAllStatus(
+                jobStatus
+                  ? `${i + 1}/${trips.length}: ${label} · ${jobStatus}`
+                  : `${i + 1}/${trips.length}: ${label}`,
+              );
+            },
+            onTripUpdate: applyTripUpdate,
+          });
+          if (changed) changedCount += 1;
+          if (errors.length) failures.push(`${label}: ${errors.join(' · ')}`);
+          else if (warnings.length) softNotes.push(`${label}: ${warnings.join(' · ')}`);
+          if (stopped && errors.some((msg) => FATAL_CREATE_RE.test(msg))) {
+            abortedEarly = true;
+            failures.push(`Stopped early — remaining trips were not started`);
+            break;
+          }
+        } catch (err) {
+          const message = err.message || 'Could not create images';
+          failures.push(`${label}: ${message}`);
+          if (FATAL_CREATE_RE.test(message)) {
+            abortedEarly = true;
+            failures.push(`Stopped early — remaining trips were not started`);
+            break;
+          }
+        }
+      }
+    } finally {
+      setImageBusyId('');
+      setCreateAllStatus('');
+    }
+    if (failures.length) {
+      const shown = failures.slice(0, 5);
+      const extra = failures.length - shown.length;
+      setError(
+        extra > 0 ? `${shown.join(' · ')} · and ${extra} more` : shown.join(' · '),
+      );
+    }
+    const parts = [];
+    if (changedCount) {
+      parts.push(
+        `Created images for ${changedCount} of ${trips.length} trip${trips.length === 1 ? '' : 's'}`,
+      );
+    } else if (!failures.length) {
+      parts.push(`No images created for ${trips.length} trip${trips.length === 1 ? '' : 's'}`);
+    }
+    if (abortedEarly) parts.push('run stopped early');
+    if (!failures.length && softNotes.length) {
+      parts.push(softNotes.slice(0, 3).join(' · '));
+    }
+    if (parts.length) setMessage(parts.join(' · '));
+    if (changedCount) await load();
+  }
+
   async function uploadAll() {
-    if (!ready.length || busy) return;
+    if (!ready.length || busy || imagesLocked) return;
     if (
       !window.confirm(
         `Upload ${ready.length} photo(s) onto ${tripIds.length} remote trip(s)? Existing camera slots will be replaced.`,
@@ -652,6 +744,7 @@ export default function BulkPhotoUpload() {
             key={opt.v}
             type="button"
             className={day === opt.v ? 'btn-primary' : 'btn-ghost'}
+            disabled={imagesLocked}
             onClick={() => pickDay(opt.v)}
           >
             {opt.l}
@@ -661,20 +754,36 @@ export default function BulkPhotoUpload() {
           type="date"
           className="field-input w-auto text-xs py-1"
           value={customDate}
+          disabled={imagesLocked}
           onChange={(e) => pickCustomDate(e.target.value)}
         />
-        <button type="button" className="btn-ghost text-xs" onClick={load} disabled={loading}>
+        <button
+          type="button"
+          className="btn-ghost text-xs"
+          onClick={load}
+          disabled={loading || imagesLocked}
+        >
           {loading ? 'Loading…' : 'Refresh'}
         </button>
         <button
           type="button"
           className="btn-ghost text-xs"
-          disabled={!filteredRows.length || zipBusy || busy}
+          disabled={!filteredRows.length || zipBusy || busy || imagesLocked}
           onClick={openZipModal}
         >
           {zipBusy
             ? 'Zipping reports…'
             : `Download ${filteredRows.length} report${filteredRows.length === 1 ? '' : 's'} zip`}
+        </button>
+        <button
+          type="button"
+          className="btn-primary text-xs"
+          disabled={!createAllTrips.length || busy || zipBusy || imagesLocked}
+          onClick={createImagesForAll}
+        >
+          {createAllStatus
+            ? createAllStatus
+            : `Create images for all (${createAllTrips.length})`}
         </button>
         <span className="text-xs text-slate-500">
           {filteredRows.length} of {rows.length} trip{rows.length === 1 ? '' : 's'} ·{' '}
@@ -686,6 +795,7 @@ export default function BulkPhotoUpload() {
         <select
           className="field-input text-sm"
           value={vehicle}
+          disabled={imagesLocked}
           onChange={(e) => setVehicle(e.target.value)}
         >
           <option value="all">All vehicles</option>
@@ -698,6 +808,7 @@ export default function BulkPhotoUpload() {
         <select
           className="field-input text-sm"
           value={operator}
+          disabled={imagesLocked}
           onChange={(e) => setOperator(e.target.value)}
         >
           <option value="all">All operators</option>
@@ -710,6 +821,7 @@ export default function BulkPhotoUpload() {
         <select
           className="field-input text-sm"
           value={ticketStatus}
+          disabled={imagesLocked}
           onChange={(e) => setTicketStatus(e.target.value)}
         >
           <option value="all">All tickets</option>
@@ -719,6 +831,7 @@ export default function BulkPhotoUpload() {
         <select
           className="field-input text-sm"
           value={syncFilter}
+          disabled={imagesLocked}
           onChange={(e) => setSyncFilter(e.target.value)}
         >
           <option value="all">All sync</option>
@@ -729,6 +842,7 @@ export default function BulkPhotoUpload() {
         <select
           className="field-input text-sm"
           value={photoFilter}
+          disabled={imagesLocked}
           onChange={(e) => setPhotoFilter(e.target.value)}
         >
           <option value="all">All photos</option>
@@ -739,6 +853,7 @@ export default function BulkPhotoUpload() {
           className="field-input text-sm"
           placeholder="Search slip, vehicle, last 4…"
           value={search}
+          disabled={imagesLocked}
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
@@ -797,7 +912,7 @@ export default function BulkPhotoUpload() {
                     )}
                     <RemoveRemoteTripButton
                       tripId={row.id}
-                      disabled={busy || Boolean(imageBusyId)}
+                      disabled={busy || imagesLocked}
                       onDone={load}
                       onError={(err) => setError(err.message)}
                     />
@@ -805,13 +920,13 @@ export default function BulkPhotoUpload() {
                   <td className="p-3">
                     <CreateTripImagesButton
                       trip={row}
-                      disabled={busy || (Boolean(imageBusyId) && imageBusyId !== row.id)}
+                      disabled={
+                        busy ||
+                        Boolean(createAllStatus) ||
+                        (Boolean(imageBusyId) && imageBusyId !== row.id)
+                      }
                       onBusy={(active) => setImageBusyId(active ? row.id : '')}
-                      onTripUpdate={(next) => {
-                        setRows((prev) =>
-                          prev.map((r) => (r.id === next.id ? { ...r, ...next } : r)),
-                        );
-                      }}
+                      onTripUpdate={applyTripUpdate}
                       onDone={load}
                     />
                   </td>
@@ -866,7 +981,7 @@ export default function BulkPhotoUpload() {
                                 <button
                                   type="button"
                                   className="text-[10px] text-brand-300 hover:text-brand-200 whitespace-nowrap"
-                                  disabled={busy}
+                                  disabled={busy || imagesLocked}
                                   onClick={() => addBlankPhotoForSlot(row, slot)}
                                 >
                                   Use blank
@@ -907,6 +1022,7 @@ export default function BulkPhotoUpload() {
         onDrop={(e) => {
           e.preventDefault();
           setDragOver(false);
+          if (busy || imagesLocked) return;
           addFiles(e.dataTransfer.files);
         }}
       >
@@ -918,7 +1034,7 @@ export default function BulkPhotoUpload() {
               accept="image/*"
               multiple
               className="hidden"
-              disabled={busy}
+              disabled={busy || imagesLocked}
               onChange={(e) => {
                 addFiles(e.target.files);
                 e.target.value = '';
@@ -933,7 +1049,7 @@ export default function BulkPhotoUpload() {
               multiple
               webkitdirectory=""
               className="hidden"
-              disabled={busy}
+              disabled={busy || imagesLocked}
               onChange={(e) => {
                 addFiles(e.target.files);
                 e.target.value = '';
@@ -943,7 +1059,7 @@ export default function BulkPhotoUpload() {
           <button
             type="button"
             className="btn-ghost text-xs"
-            disabled={busy}
+            disabled={busy || imagesLocked}
             onClick={openPhotoMappingConfig}
           >
             Configuration
@@ -953,7 +1069,7 @@ export default function BulkPhotoUpload() {
               type="button"
               className="btn-ghost text-xs text-red-300 hover:text-red-200"
               onClick={clearFiles}
-              disabled={busy}
+              disabled={busy || imagesLocked}
             >
               Clear all
             </button>
@@ -985,7 +1101,7 @@ export default function BulkPhotoUpload() {
               type="button"
               className="btn-ghost text-xs text-red-300 hover:text-red-200"
               onClick={clearFiles}
-              disabled={busy}
+              disabled={busy || imagesLocked}
             >
               Clear all
             </button>
@@ -1050,7 +1166,7 @@ export default function BulkPhotoUpload() {
                       <select
                         className="field-input text-xs py-1 min-w-[11rem]"
                         value={item.trip?.id || ''}
-                        disabled={busy || !options.length}
+                        disabled={busy || imagesLocked || !options.length}
                         onChange={(e) => setTripOverride(item.fileId, e.target.value)}
                       >
                         <option value="">Select trip…</option>
@@ -1075,7 +1191,7 @@ export default function BulkPhotoUpload() {
                       <button
                         type="button"
                         className="text-xs text-slate-400 hover:text-slate-200"
-                        disabled={busy}
+                        disabled={busy || imagesLocked}
                         onClick={() => removeFile(item.fileId)}
                       >
                         Remove
@@ -1102,7 +1218,7 @@ export default function BulkPhotoUpload() {
         <button
           type="button"
           className="btn-primary"
-          disabled={!ready.length || busy || zipBusy}
+          disabled={!ready.length || busy || zipBusy || imagesLocked}
           onClick={uploadAll}
         >
           {busy
