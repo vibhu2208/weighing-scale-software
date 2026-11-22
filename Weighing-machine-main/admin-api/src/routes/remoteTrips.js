@@ -29,6 +29,7 @@ const {
 const {
   loadBestMirrorBySlips,
   mergeRemoteWithMirror,
+  recoverPhotoKeysFromS3,
 } = require('../services/reportMedia');
 
 const router = express.Router();
@@ -122,7 +123,10 @@ router.get('/', async (req, res) => {
           mirrors.get(String(row.slip_number || '').trim().toUpperCase()) || null,
         ) || row,
     );
-    const withMedia = await Promise.all(merged.map(attachTripMedia));
+    // Restore newer Report Edit objects from S3 when DB still points at older
+    // Create-images keys (common after reconcile / forceCreateImages races).
+    const recovered = await mapPool(merged, 6, async (row) => recoverPhotoKeysFromS3(row));
+    const withMedia = await Promise.all(recovered.map(attachTripMedia));
     return res.json({ ok: true, rows: withMedia });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -192,13 +196,14 @@ router.post('/zip', async (req, res) => {
     } catch (err) {
       console.warn('[remoteTrips.zip] mirror load failed', err.message);
     }
-    const withMirror = resolved.map(
+    const mergedTrips = resolved.map(
       (trip) =>
         mergeRemoteWithMirror(
           trip,
           mirrors.get(String(trip.slip_number || '').trim().toUpperCase()) || null,
         ) || trip,
     );
+    const withMirror = await mapPool(mergedTrips, 6, (trip) => recoverPhotoKeysFromS3(trip));
 
     withMirror.sort((a, b) => {
       const ta = new Date(a.timestamp_out || a.timestamp_in || 0).getTime();
@@ -327,12 +332,12 @@ async function tripWithMirrorPhotos(trip, siteId = getSiteId()) {
   if (!trip) return trip;
   try {
     const mirrors = await loadBestMirrorBySlips([trip.slip_number], siteId);
-    return (
+    const merged =
       mergeRemoteWithMirror(
         trip,
         mirrors.get(String(trip.slip_number || '').trim().toUpperCase()) || null,
-      ) || trip
-    );
+      ) || trip;
+    return recoverPhotoKeysFromS3(merged);
   } catch (err) {
     console.warn('[remoteTrips] mirror overlay failed', err.message);
     return trip;
