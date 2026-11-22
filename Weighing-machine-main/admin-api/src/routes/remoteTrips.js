@@ -26,6 +26,10 @@ const {
   uniqueZipEntryName,
   calendarDateInTz,
 } = require('../services/reportZipNames');
+const {
+  loadBestMirrorBySlips,
+  mergeRemoteWithMirror,
+} = require('../services/reportMedia');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -104,7 +108,21 @@ async function attachTripMedia(row) {
 router.get('/', async (req, res) => {
   try {
     const rows = await listRemoteTrips(query, req.query || {});
-    const withMedia = await Promise.all(rows.map(attachTripMedia));
+    // Overlay Report Edit / mirror photo keys so Bulk Photos matches Reports.
+    let mirrors = new Map();
+    try {
+      mirrors = await loadBestMirrorBySlips(rows.map((r) => r.slip_number));
+    } catch (err) {
+      console.warn('[remoteTrips] mirror overlay failed', err.message);
+    }
+    const merged = rows.map(
+      (row) =>
+        mergeRemoteWithMirror(
+          row,
+          mirrors.get(String(row.slip_number || '').trim().toUpperCase()) || null,
+        ) || row,
+    );
+    const withMedia = await Promise.all(merged.map(attachTripMedia));
     return res.json({ ok: true, rows: withMedia });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -166,13 +184,29 @@ router.post('/zip', async (req, res) => {
       else resolved.push(trip);
     });
 
-    resolved.sort((a, b) => {
+    // Same merge as GET /reports/:slip/pdf — mirror (Report Edit) wins over
+    // remote_trips Create-images keys so zip PDFs include manually replaced photos.
+    let mirrors = new Map();
+    try {
+      mirrors = await loadBestMirrorBySlips(resolved.map((t) => t.slip_number), siteId);
+    } catch (err) {
+      console.warn('[remoteTrips.zip] mirror load failed', err.message);
+    }
+    const withMirror = resolved.map(
+      (trip) =>
+        mergeRemoteWithMirror(
+          trip,
+          mirrors.get(String(trip.slip_number || '').trim().toUpperCase()) || null,
+        ) || trip,
+    );
+
+    withMirror.sort((a, b) => {
       const ta = new Date(a.timestamp_out || a.timestamp_in || 0).getTime();
       const tb = new Date(b.timestamp_out || b.timestamp_in || 0).getTime();
       if (ta !== tb) return ta - tb;
       return String(a.slip_number || '').localeCompare(String(b.slip_number || ''));
     });
-    const jobs = resolved.map((trip) => {
+    const jobs = withMirror.map((trip) => {
       const baseName = reportZipFilename(
         trip.truck_number,
         trip.timestamp_out || trip.timestamp_in,
@@ -289,20 +323,37 @@ router.post('/zip', async (req, res) => {
   }
 });
 
+async function tripWithMirrorPhotos(trip, siteId = getSiteId()) {
+  if (!trip) return trip;
+  try {
+    const mirrors = await loadBestMirrorBySlips([trip.slip_number], siteId);
+    return (
+      mergeRemoteWithMirror(
+        trip,
+        mirrors.get(String(trip.slip_number || '').trim().toUpperCase()) || null,
+      ) || trip
+    );
+  } catch (err) {
+    console.warn('[remoteTrips] mirror overlay failed', err.message);
+    return trip;
+  }
+}
+
 router.get('/:id/pdf', async (req, res) => {
   try {
     const trip = await getRemoteTrip(query, req.params.id);
     if (!trip) return res.status(404).json({ ok: false, error: 'Not found' });
 
     const siteId = getSiteId();
-    const filename = `${trip.slip_number}_report.pdf`;
+    const merged = await tripWithMirrorPhotos(trip, siteId);
+    const filename = `${merged.slip_number}_report.pdf`;
     const printGross = String(req.query.print || '') === 'gross';
 
-    const built = await generateTripPdf(trip, {
+    const built = await generateTripPdf(merged, {
       siteId,
       upload: true,
       grossPrint: printGross,
-      printAt: printGross ? grossWeightTimestamp(trip) : undefined,
+      printAt: printGross ? grossWeightTimestamp(merged) : undefined,
     });
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -319,7 +370,8 @@ router.get('/:id', async (req, res) => {
   try {
     const row = await getRemoteTrip(query, req.params.id);
     if (!row) return res.status(404).json({ ok: false, error: 'Not found' });
-    return res.json({ ok: true, trip: await attachTripMedia(row) });
+    const merged = await tripWithMirrorPhotos(row);
+    return res.json({ ok: true, trip: await attachTripMedia(merged) });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

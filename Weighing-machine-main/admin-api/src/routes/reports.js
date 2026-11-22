@@ -17,7 +17,10 @@ const {
 const { createCommand } = require('../services/commandService');
 const { siteIdAliases } = require('../siteId');
 const { generateTripPdf } = require('../services/reportPdfService');
-const { attachMediaUrls } = require('../services/reportMedia');
+const {
+  attachMediaUrls,
+  mergeRemoteWithMirror,
+} = require('../services/reportMedia');
 const { getAdvanceSettings } = require('../services/settingsService');
 
 async function reportCompanyName() {
@@ -202,16 +205,12 @@ router.get('/:slip/pdf', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Report not found' });
     }
 
-    // Prefer mirror fields over remote. Do not hydrate before the cache check —
-    // fingerprint uses DB photo keys; hydrate only runs on a cache miss inside
-    // generateTripPdf → loadPhotoDataUrls.
-    const built = await generateTripPdf(
-      { ...(remote || {}), ...(row || {}) },
-      {
-        siteId,
-        upload: true,
-      },
-    );
+    // Same merge as Bulk zip / remote-trip PDF — mirror photos win, empty
+    // mirror slots keep remote Create-images keys; gross cache cols stay on remote.
+    const built = await generateTripPdf(mergeRemoteWithMirror(remote, row) || row || remote, {
+      siteId,
+      upload: true,
+    });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
@@ -317,11 +316,12 @@ router.post('/:slip/edit', async (req, res) => {
       );
     }
 
-    // Keep remote_trips in sync when photos / vehicle are updated via Report Edit.
+    // Keep remote_trips in sync when photos / vehicle are updated via Report Edit
+    // so Bulk zip (and reconcile) see the same sites/… keys as the mirror row.
     const targetSlip = newSlipNumber || slip;
     try {
       const rt = await query(
-        `SELECT id FROM remote_trips
+        `SELECT id, slip_number FROM remote_trips
          WHERE UPPER(slip_number) = UPPER($1) OR UPPER(slip_number) = UPPER($2)
          LIMIT 1`,
         [targetSlip, slip],
@@ -330,18 +330,28 @@ router.post('/:slip/edit', async (req, res) => {
         if (photoS3Keys.length) {
           const { attachPhotos } = require('../services/remoteTripService');
           await attachPhotos(query, rt.rows[0].id, photoS3Keys);
+          console.log('[reports] synced edited photos to remote_trips', {
+            slip: rt.rows[0].slip_number,
+            id: rt.rows[0].id,
+            slots: photoS3Keys.length,
+          });
         }
         if (truckNumber) {
           await query(
             `UPDATE remote_trips
-             SET truck_number = $2
+             SET truck_number = $2, updated_at = now()
              WHERE id = $1`,
             [rt.rows[0].id, truckNumber],
           );
         }
+      } else if (photoS3Keys.length) {
+        console.warn('[reports] no remote_trips row to sync edited photos', {
+          slip,
+          targetSlip,
+        });
       }
     } catch (err) {
-      console.warn('[reports] remote trip sync failed', err.message);
+      console.error('[reports] remote trip sync failed', err.message);
     }
 
     const cmd = await createCommand({

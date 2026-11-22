@@ -9,6 +9,7 @@ const {
   presignGet,
 } = require('./s3Presign');
 const { siteIdAliases } = require('../siteId');
+const { PHOTO_SCORE_SQL } = require('./reportQuery');
 
 const PHOTO_FIELDS = [
   'arrival_photo_1',
@@ -18,6 +19,76 @@ const PHOTO_FIELDS = [
   'departure_photo_2',
   'departure_photo_3',
 ];
+
+/** Soft cap so a bad caller cannot build an unbounded IN-list. */
+const MAX_MIRROR_SLIP_BATCH = 250;
+
+/**
+ * Pick the photo key admin PDFs / Bulk UI should show.
+ * Mirror first (Report Edit / Admin Reports truth). Empty mirror slots fall
+ * back to remote_trips so Create-images keys still appear when mirror is blank.
+ * Create-images vs stale weighbridge sites/ keys is enforced on write
+ * (reconcile + upsertMirror), not by ignoring mirror edits here.
+ */
+function preferAdminPhotoKey(remoteKey, mirrorKey) {
+  const remote = String(remoteKey || '').trim();
+  const mirror = String(mirrorKey || '').trim();
+  return mirror || remote || null;
+}
+
+/**
+ * Best mirror row per slip (most photo columns filled), keyed by UPPER(slip).
+ * Used so Bulk zip / remote PDFs see Report Edit photos the same way as
+ * GET /reports/:slip/pdf.
+ */
+async function loadBestMirrorBySlips(slips, siteId = getSiteId()) {
+  const list = [
+    ...new Set(
+      (slips || [])
+        .map((s) => String(s || '').trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  ].slice(0, MAX_MIRROR_SLIP_BATCH);
+  const map = new Map();
+  if (!list.length) return map;
+
+  const result = await query(
+    `SELECT DISTINCT ON (UPPER(slip_number)) *
+     FROM transactions_mirror
+     WHERE site_id = ANY($1::text[])
+       AND UPPER(slip_number) = ANY($2::text[])
+     ORDER BY UPPER(slip_number), ${PHOTO_SCORE_SQL} DESC`,
+    [siteIdAliases(siteId), list],
+  );
+  for (const row of result.rows || []) {
+    map.set(String(row.slip_number || '').trim().toUpperCase(), row);
+  }
+  return map;
+}
+
+/**
+ * Merge remote_trips + transactions_mirror for admin PDF / Bulk Photos.
+ * Keeps remote id + gross-PDF cache columns; photo slots use preferAdminPhotoKey.
+ */
+function mergeRemoteWithMirror(remote, mirror) {
+  if (!mirror) return remote || null;
+  if (!remote) return mirror;
+  const merged = {
+    ...remote,
+    ...mirror,
+    id: remote.id,
+    report_gross_content_fp: remote.report_gross_content_fp,
+    report_gross_s3_key: remote.report_gross_s3_key,
+    // Normal PDF cache lane: prefer whichever side still has a fingerprint;
+    // photo-key merge below drives invalidation when keys change.
+    report_content_fp: remote.report_content_fp || mirror.report_content_fp,
+    report_s3_key: mirror.report_s3_key || remote.report_s3_key,
+  };
+  for (const field of PHOTO_FIELDS) {
+    merged[field] = preferAdminPhotoKey(remote[field], mirror[field]);
+  }
+  return merged;
+}
 
 /**
  * Resolve usable S3 photo keys for a trip row.
@@ -118,4 +189,8 @@ module.exports = {
   PHOTO_FIELDS,
   hydratePhotoKeys,
   attachMediaUrls,
+  loadBestMirrorBySlips,
+  mergeRemoteWithMirror,
+  preferAdminPhotoKey,
+  MAX_MIRROR_SLIP_BATCH,
 };
