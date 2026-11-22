@@ -159,7 +159,8 @@ router.get('/export/excel', async (req, res) => {
 
 router.get('/:slip', async (req, res) => {
   try {
-    const aliases = siteIdAliases(getSiteId());
+    const siteId = getSiteId();
+    const aliases = siteIdAliases(siteId);
     const slip = String(req.params.slip || '').trim();
     const result = await query(
       `SELECT * FROM transactions_mirror
@@ -168,11 +169,19 @@ router.get('/:slip', async (req, res) => {
        LIMIT 1`,
       [aliases, slip],
     );
-    if (!result.rows[0]) {
+    let row = result.rows[0] || null;
+    const rt = await query(
+      `SELECT * FROM remote_trips WHERE UPPER(slip_number) = UPPER($1) LIMIT 1`,
+      [slip],
+    );
+    const remote = rt.rows[0] || null;
+    if (!row && !remote) {
       return res.status(404).json({ ok: false, error: 'Report not found' });
     }
-    const row = await attachMediaUrls(result.rows[0]);
-    return res.json({ ok: true, report: row });
+    // Last write wins between Report Edit (mirror) and Create images (remote).
+    const merged = mergeRemoteWithMirror(remote, row) || row || remote;
+    const withMedia = await attachMediaUrls(merged);
+    return res.json({ ok: true, report: withMedia });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

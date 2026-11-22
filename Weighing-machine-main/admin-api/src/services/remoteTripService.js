@@ -3,6 +3,7 @@
 const { markReservationUsed, findWeighbridgeConflict } = require('./slipReservationService');
 const { getList } = require('./settingsService');
 const { getSiteId, getPool } = require('../db');
+const { preferLastWritePhotoKey } = require('./adminPhotoKeys');
 
 const ALLOWED_VEHICLE_TYPES = ['HYWA', 'TRUCK', 'TANKER', 'CONTAINER'];
 const PLATE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$/;
@@ -1097,24 +1098,9 @@ async function reconcileRemoteTripsToMirror(queryFn, siteId = getSiteId(), limit
   return { candidates: (missing.rows || []).length, upserted };
 }
 
-function isVersionedAdminMirrorKey(key) {
-  return /sites\/[^/]+\/mirror\/[^/]+\/(arrival|departure)_cam-[1-3]-[a-z0-9]+\.jpe?g$/i.test(
-    String(key || ''),
-  );
-}
-
-/**
- * Never let weighbridge stable sites/…/cam-N.jpg clobber Create-images
- * remote-trips/… keys. Report Edit versioned sites/…/cam-N-{ver}.jpg keys
- * ARE newer admin truth and must win over Create-images.
- */
-function preferRemoteTripPhotoKey(remoteKey, mirrorKey, { slipChanged = false } = {}) {
-  const remote = String(remoteKey || '').trim() || null;
-  const mirror = String(mirrorKey || '').trim() || null;
-  if (slipChanged) return mirror || remote;
-  if (mirror && isVersionedAdminMirrorKey(mirror)) return mirror;
-  if (remote) return remote;
-  return mirror;
+/** Reconcile uses the same last-write-wins rules as Bulk / Reports PDFs. */
+function preferRemoteTripPhotoKey(remoteKey, mirrorKey, opts = {}) {
+  return preferLastWritePhotoKey(remoteKey, mirrorKey, opts);
 }
 
 /**
@@ -1239,30 +1225,41 @@ async function reconcileRemoteTripsFromMirror(queryFn, siteId = getSiteId()) {
             ? rt.local_id
             : mirror.local_id || rt.local_id || null;
       const slipChanged = Boolean(newSlip && newSlip !== oldSlip);
+      const photoOpts = {
+        slipChanged,
+        remoteUpdatedAt: rt.updated_at,
+        mirrorUpdatedAt: mirror.updated_at,
+      };
       const nextPhotos = {
-        arrival_photo_1: preferRemoteTripPhotoKey(rt.arrival_photo_1, mirror.arrival_photo_1, {
-          slipChanged,
-        }),
-        arrival_photo_2: preferRemoteTripPhotoKey(rt.arrival_photo_2, mirror.arrival_photo_2, {
-          slipChanged,
-        }),
-        arrival_photo_3: preferRemoteTripPhotoKey(rt.arrival_photo_3, mirror.arrival_photo_3, {
-          slipChanged,
-        }),
+        arrival_photo_1: preferRemoteTripPhotoKey(
+          rt.arrival_photo_1,
+          mirror.arrival_photo_1,
+          photoOpts,
+        ),
+        arrival_photo_2: preferRemoteTripPhotoKey(
+          rt.arrival_photo_2,
+          mirror.arrival_photo_2,
+          photoOpts,
+        ),
+        arrival_photo_3: preferRemoteTripPhotoKey(
+          rt.arrival_photo_3,
+          mirror.arrival_photo_3,
+          photoOpts,
+        ),
         departure_photo_1: preferRemoteTripPhotoKey(
           rt.departure_photo_1,
           mirror.departure_photo_1,
-          { slipChanged },
+          photoOpts,
         ),
         departure_photo_2: preferRemoteTripPhotoKey(
           rt.departure_photo_2,
           mirror.departure_photo_2,
-          { slipChanged },
+          photoOpts,
         ),
         departure_photo_3: preferRemoteTripPhotoKey(
           rt.departure_photo_3,
           mirror.departure_photo_3,
-          { slipChanged },
+          photoOpts,
         ),
       };
       for (const col of [

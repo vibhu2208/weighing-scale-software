@@ -10,6 +10,7 @@ const {
 } = require('./s3Presign');
 const { siteIdAliases } = require('../siteId');
 const { PHOTO_SCORE_SQL } = require('./reportQuery');
+const { preferLastWritePhotoKey } = require('./adminPhotoKeys');
 
 const PHOTO_FIELDS = [
   'arrival_photo_1',
@@ -23,23 +24,9 @@ const PHOTO_FIELDS = [
 /** Soft cap so a bad caller cannot build an unbounded IN-list. */
 const MAX_MIRROR_SLIP_BATCH = 250;
 
-function isVersionedAdminMirrorKey(key) {
-  return /sites\/[^/]+\/mirror\/[^/]+\/(arrival|departure)_cam-[1-3]-[a-z0-9]+\.jpe?g$/i.test(
-    String(key || ''),
-  );
-}
-
-/**
- * Pick the photo key admin PDFs / Bulk UI should show.
- * Versioned Report Edit keys always win. Otherwise mirror first (Reports
- * truth), then remote_trips for Create-images when mirror is empty.
- */
-function preferAdminPhotoKey(remoteKey, mirrorKey) {
-  const remote = String(remoteKey || '').trim();
-  const mirror = String(mirrorKey || '').trim();
-  if (isVersionedAdminMirrorKey(mirror)) return mirror;
-  if (isVersionedAdminMirrorKey(remote)) return remote;
-  return mirror || remote || null;
+/** @deprecated use preferLastWritePhotoKey — kept as alias for tests/callers */
+function preferAdminPhotoKey(remoteKey, mirrorKey, opts = {}) {
+  return preferLastWritePhotoKey(remoteKey, mirrorKey, opts);
 }
 
 /**
@@ -90,9 +77,19 @@ function mergeRemoteWithMirror(remote, mirror) {
     report_content_fp: remote.report_content_fp || mirror.report_content_fp,
     report_s3_key: mirror.report_s3_key || remote.report_s3_key,
   };
+  const timeOpts = {
+    remoteUpdatedAt: remote.updated_at,
+    mirrorUpdatedAt: mirror.updated_at,
+  };
   for (const field of PHOTO_FIELDS) {
-    merged[field] = preferAdminPhotoKey(remote[field], mirror[field]);
+    merged[field] = preferLastWritePhotoKey(remote[field], mirror[field], timeOpts);
   }
+  // Surface the winning side's updated_at so PDF fingerprints / UI cache-bust
+  // move forward when Create images or Report Edit lands.
+  const remoteAt = Date.parse(remote.updated_at) || 0;
+  const mirrorAt = Date.parse(mirror.updated_at) || 0;
+  if (mirrorAt >= remoteAt && mirror.updated_at) merged.updated_at = mirror.updated_at;
+  else if (remote.updated_at) merged.updated_at = remote.updated_at;
   return merged;
 }
 
