@@ -35,16 +35,25 @@ export function tripPhotoFilled(trip, pass, slot) {
   return Boolean(trip?.[`${pass}_photo_${slot}`]);
 }
 
+function withCacheBust(url, trip) {
+  if (!url) return '';
+  const stamp = trip?.updated_at || trip?.synced_at || '';
+  if (!stamp) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}v=${encodeURIComponent(String(stamp))}`;
+}
+
 export function tripPhotoUrl(trip, pass, slot) {
-  return (
+  const raw =
     trip?.[`${pass}_photo_${slot}_thumb_url`] ||
     trip?.[`${pass}_photo_${slot}_url`] ||
-    ''
-  );
+    '';
+  return withCacheBust(raw, trip);
 }
 
 export function tripPhotoFullUrl(trip, pass, slot) {
-  return trip?.[`${pass}_photo_${slot}_url`] || tripPhotoUrl(trip, pass, slot);
+  const raw = trip?.[`${pass}_photo_${slot}_url`] || trip?.[`${pass}_photo_${slot}_thumb_url`] || '';
+  return withCacheBust(raw, trip) || tripPhotoUrl(trip, pass, slot);
 }
 
 export function expectedPhotoSlots(trip) {

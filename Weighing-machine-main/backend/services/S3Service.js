@@ -26,7 +26,8 @@ try {
 
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const CONNECTION_TIMEOUT_MS = 60 * 1000;
-const MAX_ATTEMPTS = 5;
+/** App-level retries (SDK retries disabled — we reset the client between attempts). */
+const MAX_ATTEMPTS = 8;
 
 let client = null;
 let clientFingerprint = '';
@@ -62,7 +63,8 @@ function getClient() {
         accessKeyId: cfg.accessKeyId,
         secretAccessKey: cfg.secretAccessKey,
       },
-      maxAttempts: MAX_ATTEMPTS,
+      // Let withS3Retry own retries so we can resetClient() between attempts.
+      maxAttempts: 1,
       requestHandler: new NodeHttpHandler({
         requestTimeout: REQUEST_TIMEOUT_MS,
         connectionTimeout: CONNECTION_TIMEOUT_MS,
@@ -82,6 +84,7 @@ function getBucket() {
 function isRetryableS3Error(err) {
   const msg = String(err?.message || err || '');
   const name = String(err?.name || '');
+  const code = String(err?.code || err?.Code || '');
   const status = err?.$metadata?.httpStatusCode;
   // Wrong AWS_REGION → 301 / PermanentRedirect. Retrying burns minutes and blocks sync.
   if (
@@ -92,12 +95,15 @@ function isRetryableS3Error(err) {
     return false;
   }
   return (
-    /timeout|ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|socket|networkingerror|unknownerror|throttl/i.test(
+    /timeout|ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EPIPE|EAI_AGAIN|socket|hang up|networkingerror|unknownerror|throttl|aborted|ECONNABORTED/i.test(
       msg,
     ) ||
-    /timeout|networkingerror|timeouterror/i.test(name) ||
+    /timeout|networkingerror|timeouterror|timeouterror|abort/i.test(name) ||
+    /ECONNRESET|ETIMEDOUT|EPIPE|ECONNABORTED|ENOTFOUND/i.test(code) ||
     status === 503 ||
-    status === 500
+    status === 500 ||
+    status === 502 ||
+    status === 504
   );
 }
 
@@ -109,9 +115,12 @@ async function withS3Retry(label, fn) {
     } catch (err) {
       lastErr = err;
       if (!isRetryableS3Error(err) || attempt >= MAX_ATTEMPTS) break;
-      // Drop cached client — stale sockets often cause repeated timeouts.
+      // Drop cached client — stale sockets often cause repeated hang-ups.
       resetClient();
-      const delayMs = Math.min(15000, 1000 * 2 ** (attempt - 1));
+      const delayMs = Math.min(20000, 800 * 2 ** (attempt - 1));
+      console.warn(
+        `[S3] ${label} attempt ${attempt}/${MAX_ATTEMPTS} failed (${err.message || err}); retry in ${delayMs}ms`,
+      );
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
@@ -186,15 +195,17 @@ async function objectExists(s3Key) {
 
 /**
  * Download an S3 object to a local path.
+ * Retries include body streaming — "socket hang up" often hits while reading
+ * the response body, not during GetObject setup.
  */
 async function downloadFile(s3Key, localPath) {
   const bucket = getBucket();
-  const res = await withS3Retry(`download ${s3Key}`, () =>
-    getClient().send(
+  const buf = await withS3Retry(`download ${s3Key}`, async () => {
+    const res = await getClient().send(
       new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
-    ),
-  );
-  const buf = await streamToBuffer(res.Body);
+    );
+    return streamToBuffer(res.Body);
+  });
   await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
   await fs.promises.writeFile(localPath, buf);
   return localPath;

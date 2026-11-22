@@ -11,6 +11,9 @@ const {
   getObjectBuffer,
   mirrorPhotoKey,
   mirrorPhotoThumbKey,
+  mirrorAdminPhotoKey,
+  mirrorAdminPhotoThumbKeyFromKey,
+  newRemoteTripPhotoVersion,
   remoteTripPhotoKey,
   remoteTripPhotoThumbKeyFromKey,
   fillVehicleStillKey,
@@ -99,7 +102,8 @@ router.post('/upload-url', async (req, res) => {
     if (!slipNum || !Number.isFinite(slotNum) || slotNum < 1 || slotNum > 3) {
       return res.status(400).json({ ok: false, error: 'slip and slot (1-3) required' });
     }
-    const key = mirrorPhotoKey(siteId, slipNum, slotNum, photoPass);
+    const version = newRemoteTripPhotoVersion();
+    const key = mirrorAdminPhotoKey(siteId, slipNum, slotNum, photoPass, version);
     const url = await presignPut(key, contentType || 'image/jpeg');
     return res.json({ ok: true, uploadUrl: url, key });
   } catch (err) {
@@ -286,8 +290,11 @@ router.post('/upload', async (req, res) => {
     if (!slipNum || !Number.isFinite(slotNum) || slotNum < 1 || slotNum > 3) {
       return res.status(400).json({ ok: false, error: 'slip and slot (1-3) required' });
     }
-    const key = mirrorPhotoKey(siteId, slipNum, slotNum, photoPass);
-    const thumbKey = mirrorPhotoThumbKey(siteId, slipNum, slotNum, photoPass);
+    // Versioned keys so weighbridge PC sync cannot overwrite the edited JPEG
+    // under the stable sites/…/cam-N.jpg path.
+    const version = newRemoteTripPhotoVersion();
+    const key = mirrorAdminPhotoKey(siteId, slipNum, slotNum, photoPass, version);
+    const thumbKey = mirrorAdminPhotoThumbKeyFromKey(key);
     const raw = parseImageBuffer(imageBase64);
     const stored = await storeReportPhoto(key, raw, contentType || 'image/jpeg');
     await writePhotoThumb(key, stored.body, thumbKey);

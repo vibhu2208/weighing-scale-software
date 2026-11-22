@@ -107,6 +107,30 @@ function mirrorPhotoKey(siteId, slip, slot, pass = 'departure') {
   return `sites/${siteId}/mirror/${slip}/${pass}_cam-${slot}.jpg`;
 }
 
+/**
+ * Versioned Report Edit upload key. Stable mirrorPhotoKey paths are also used
+ * by the weighbridge PC push — versioning prevents PC sync from overwriting
+ * a freshly edited admin JPEG under the same key.
+ */
+function mirrorAdminPhotoKey(siteId, slip, slot, pass = 'departure', version = null) {
+  const tag = pass === 'arrival' ? 'arrival' : 'departure';
+  const ver = version || newRemoteTripPhotoVersion();
+  return `sites/${siteId}/mirror/${slip}/${tag}_cam-${slot}-${ver}.jpg`;
+}
+
+function mirrorAdminPhotoThumbKey(siteId, slip, slot, pass = 'departure', version = null) {
+  const tag = pass === 'arrival' ? 'arrival' : 'departure';
+  const ver = version || newRemoteTripPhotoVersion();
+  return `sites/${siteId}/mirror/${slip}/${tag}_cam-${slot}-${ver}.thumb.jpg`;
+}
+
+/** True when key is a versioned admin Report Edit object (not the stable PC path). */
+function isVersionedAdminMirrorKey(key) {
+  return /sites\/[^/]+\/mirror\/[^/]+\/(arrival|departure)_cam-[1-3]-[a-z0-9]+\.jpe?g$/i.test(
+    String(key || ''),
+  );
+}
+
 function mirrorReportKey(siteId, slip) {
   return `sites/${siteId}/mirror/${slip}/report.pdf`;
 }
@@ -168,6 +192,13 @@ function mirrorPhotoThumbKey(siteId, slip, slot, pass = 'departure') {
   return `sites/${siteId}/mirror/${slip}/${pass}_cam-${slot}.thumb.jpg`;
 }
 
+function mirrorAdminPhotoThumbKeyFromKey(fullKey) {
+  const key = String(fullKey || '').trim();
+  if (!key) return key;
+  if (/\.thumb\.jpe?g$/i.test(key)) return key;
+  return key.replace(/\.jpe?g$/i, '.thumb.jpg');
+}
+
 function fillVehicleStillKey(plate, pass = 'departure', slot = 1) {
   const safe = String(plate || '')
     .toUpperCase()
@@ -224,6 +255,10 @@ module.exports = {
   newRemoteTripPhotoVersion,
   remoteTripPhotoThumbKeyFromKey,
   mirrorPhotoKey,
+  mirrorAdminPhotoKey,
+  mirrorAdminPhotoThumbKey,
+  mirrorAdminPhotoThumbKeyFromKey,
+  isVersionedAdminMirrorKey,
   mirrorReportKey,
   mirrorReportGrossKey,
   remoteTripPhotoKey,

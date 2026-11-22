@@ -145,6 +145,15 @@ export default function BulkPhotoUpload() {
     load();
   }, [load]);
 
+  // Re-fetch when returning from Report Edit so replaced photos show immediately.
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === 'visible') load();
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [load]);
+
   useEffect(() => {
     return () => {
       try {

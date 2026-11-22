@@ -113,10 +113,17 @@ async function buildMirrorPhotoKeys(txn, options = {}) {
     { col: 'departure_photo_2', pass: 'departure', slot: 2 },
     { col: 'departure_photo_3', pass: 'departure', slot: 3 },
   ];
+  // Never clobber Admin Report Edit / Create-images objects at the stable
+  // sites/…/mirror/… path. PC sync used to re-upload yellow local JPEGs over
+  // freshly edited admin photos whenever edit_report was still pending.
+  const photoOpts = {
+    ...options,
+    onlyIfMissing: options.forcePhotoUpload ? false : true,
+  };
   for (const { col, pass, slot } of slots) {
     if (!txn[col]) continue;
     const s3Key = S3Service.mirrorPhotoKey(siteId, slip, slot, pass);
-    const uploaded = await uploadLocalFileIfExists(txn[col], s3Key, options);
+    const uploaded = await uploadLocalFileIfExists(txn[col], s3Key, photoOpts);
     if (uploaded) keys[col] = uploaded;
   }
   return keys;
@@ -183,42 +190,33 @@ async function pushTransaction(txn, options = {}) {
       sync_status = EXCLUDED.sync_status,
       mcg_status = EXCLUDED.mcg_status,
       mcg_error = EXCLUDED.mcg_error,
-      arrival_photo_1 = CASE
-        WHEN transactions_mirror.arrival_photo_1 LIKE 'remote-trips/%'
-         AND EXCLUDED.arrival_photo_1 LIKE 'sites/%'
-        THEN transactions_mirror.arrival_photo_1
-        ELSE COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1)
-      END,
-      arrival_photo_2 = CASE
-        WHEN transactions_mirror.arrival_photo_2 LIKE 'remote-trips/%'
-         AND EXCLUDED.arrival_photo_2 LIKE 'sites/%'
-        THEN transactions_mirror.arrival_photo_2
-        ELSE COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2)
-      END,
-      arrival_photo_3 = CASE
-        WHEN transactions_mirror.arrival_photo_3 LIKE 'remote-trips/%'
-         AND EXCLUDED.arrival_photo_3 LIKE 'sites/%'
-        THEN transactions_mirror.arrival_photo_3
-        ELSE COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3)
-      END,
-      departure_photo_1 = CASE
-        WHEN transactions_mirror.departure_photo_1 LIKE 'remote-trips/%'
-         AND EXCLUDED.departure_photo_1 LIKE 'sites/%'
-        THEN transactions_mirror.departure_photo_1
-        ELSE COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1)
-      END,
-      departure_photo_2 = CASE
-        WHEN transactions_mirror.departure_photo_2 LIKE 'remote-trips/%'
-         AND EXCLUDED.departure_photo_2 LIKE 'sites/%'
-        THEN transactions_mirror.departure_photo_2
-        ELSE COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2)
-      END,
-      departure_photo_3 = CASE
-        WHEN transactions_mirror.departure_photo_3 LIKE 'remote-trips/%'
-         AND EXCLUDED.departure_photo_3 LIKE 'sites/%'
-        THEN transactions_mirror.departure_photo_3
-        ELSE COALESCE(EXCLUDED.departure_photo_3, transactions_mirror.departure_photo_3)
-      END,
+      -- Never let a routine PC mirror push replace photos already on the admin
+      -- row (Create images remote-trips/… or Report Edit sites/…). Only fill
+      -- empty slots. Forced re-uploads still go through S3 onlyIfMissing above.
+      arrival_photo_1 = COALESCE(
+        NULLIF(BTRIM(transactions_mirror.arrival_photo_1), ''),
+        EXCLUDED.arrival_photo_1
+      ),
+      arrival_photo_2 = COALESCE(
+        NULLIF(BTRIM(transactions_mirror.arrival_photo_2), ''),
+        EXCLUDED.arrival_photo_2
+      ),
+      arrival_photo_3 = COALESCE(
+        NULLIF(BTRIM(transactions_mirror.arrival_photo_3), ''),
+        EXCLUDED.arrival_photo_3
+      ),
+      departure_photo_1 = COALESCE(
+        NULLIF(BTRIM(transactions_mirror.departure_photo_1), ''),
+        EXCLUDED.departure_photo_1
+      ),
+      departure_photo_2 = COALESCE(
+        NULLIF(BTRIM(transactions_mirror.departure_photo_2), ''),
+        EXCLUDED.departure_photo_2
+      ),
+      departure_photo_3 = COALESCE(
+        NULLIF(BTRIM(transactions_mirror.departure_photo_3), ''),
+        EXCLUDED.departure_photo_3
+      ),
       report_s3_key = COALESCE(EXCLUDED.report_s3_key, transactions_mirror.report_s3_key),
       updated_at = now()`,
     [

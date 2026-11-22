@@ -7,7 +7,17 @@ const {
   preferAdminPhotoKey,
 } = require('./reportMedia');
 
-test('preferAdminPhotoKey: mirror wins when both set', () => {
+test('preferAdminPhotoKey: versioned Report Edit key beats Create-images', () => {
+  assert.equal(
+    preferAdminPhotoKey(
+      'remote-trips/WB0001/arrival_cam-1-v1.jpg',
+      'sites/WB-03/mirror/WB0001/arrival_cam-1-abc123.jpg',
+    ),
+    'sites/WB-03/mirror/WB0001/arrival_cam-1-abc123.jpg',
+  );
+});
+
+test('preferAdminPhotoKey: mirror wins when both set (stable sites)', () => {
   assert.equal(
     preferAdminPhotoKey(
       'remote-trips/WB0001/arrival_cam-1-v1.jpg',
@@ -39,7 +49,7 @@ test('mergeRemoteWithMirror prefers mirror photo keys over remote Create-images 
   const mirror = {
     id: 'mirror-row',
     slip_number: 'WB0001',
-    arrival_photo_1: 'sites/WB-03/mirror/WB0001/arrival_cam-1.jpg',
+    arrival_photo_1: 'sites/WB-03/mirror/WB0001/arrival_cam-1-edit99.jpg',
     departure_photo_1: null,
     truck_number: 'MH12AB1234',
     report_s3_key: 'sites/WB-03/mirror/WB0001/report.pdf',
@@ -48,7 +58,7 @@ test('mergeRemoteWithMirror prefers mirror photo keys over remote Create-images 
   const merged = mergeRemoteWithMirror(remote, mirror);
   assert.equal(merged.id, 'rt-1');
   assert.equal(merged.truck_number, 'MH12AB1234');
-  assert.equal(merged.arrival_photo_1, 'sites/WB-03/mirror/WB0001/arrival_cam-1.jpg');
+  assert.equal(merged.arrival_photo_1, 'sites/WB-03/mirror/WB0001/arrival_cam-1-edit99.jpg');
   assert.equal(merged.departure_photo_1, 'remote-trips/WB0001/departure_cam-1-v1.jpg');
   assert.equal(merged.report_gross_content_fp, 'abc123');
   assert.equal(merged.report_gross_s3_key, 'sites/WB-03/mirror/WB0001/report_gross.pdf');

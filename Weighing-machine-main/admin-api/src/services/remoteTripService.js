@@ -900,15 +900,18 @@ async function importRemoteTrips(queryFn, trips, { dryRun = false } = {}) {
  * Upsert a remote trip into transactions_mirror so Admin Reports lists it.
  * Weighbridge CloudAdminSync may later refresh the same slip with local ids/photos.
  *
- * @param {{ forcePhotos?: boolean }} [options]
+ * @param {{ forcePhotos?: boolean, forceCreateImages?: boolean }} [options]
  *   forcePhotos: Report Edit attached sites/… keys — allow them to replace
  *   Create-images remote-trips/… keys on the mirror row.
+ *   forceCreateImages: Create images — allow remote-trips/… to replace sites/…
+ *   including versioned Report Edit keys.
  */
 async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), options = {}) {
   if (!row?.slip_number) return null;
   const localId = row.local_id || row.id;
   if (!localId) return null;
   const forcePhotos = options.forcePhotos === true;
+  const forceCreateImages = options.forceCreateImages === true;
 
   // Avoid unique (site_id, local_id) conflicts when slip already exists with another local_id.
   await queryFn(
@@ -954,6 +957,11 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
       mcg_status = COALESCE(EXCLUDED.mcg_status, transactions_mirror.mcg_status),
       mcg_error = COALESCE(EXCLUDED.mcg_error, transactions_mirror.mcg_error),
       arrival_photo_1 = CASE
+        WHEN $28::boolean AND EXCLUDED.arrival_photo_1 LIKE 'remote-trips/%'
+          THEN EXCLUDED.arrival_photo_1
+        WHEN EXCLUDED.arrival_photo_1 LIKE 'remote-trips/%'
+         AND transactions_mirror.arrival_photo_1 LIKE 'sites/%'
+          THEN transactions_mirror.arrival_photo_1
         WHEN EXCLUDED.arrival_photo_1 LIKE 'remote-trips/%' THEN EXCLUDED.arrival_photo_1
         WHEN NOT $27::boolean
          AND transactions_mirror.arrival_photo_1 LIKE 'remote-trips/%'
@@ -962,6 +970,11 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
         ELSE COALESCE(EXCLUDED.arrival_photo_1, transactions_mirror.arrival_photo_1)
       END,
       arrival_photo_2 = CASE
+        WHEN $28::boolean AND EXCLUDED.arrival_photo_2 LIKE 'remote-trips/%'
+          THEN EXCLUDED.arrival_photo_2
+        WHEN EXCLUDED.arrival_photo_2 LIKE 'remote-trips/%'
+         AND transactions_mirror.arrival_photo_2 LIKE 'sites/%'
+          THEN transactions_mirror.arrival_photo_2
         WHEN EXCLUDED.arrival_photo_2 LIKE 'remote-trips/%' THEN EXCLUDED.arrival_photo_2
         WHEN NOT $27::boolean
          AND transactions_mirror.arrival_photo_2 LIKE 'remote-trips/%'
@@ -970,6 +983,11 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
         ELSE COALESCE(EXCLUDED.arrival_photo_2, transactions_mirror.arrival_photo_2)
       END,
       arrival_photo_3 = CASE
+        WHEN $28::boolean AND EXCLUDED.arrival_photo_3 LIKE 'remote-trips/%'
+          THEN EXCLUDED.arrival_photo_3
+        WHEN EXCLUDED.arrival_photo_3 LIKE 'remote-trips/%'
+         AND transactions_mirror.arrival_photo_3 LIKE 'sites/%'
+          THEN transactions_mirror.arrival_photo_3
         WHEN EXCLUDED.arrival_photo_3 LIKE 'remote-trips/%' THEN EXCLUDED.arrival_photo_3
         WHEN NOT $27::boolean
          AND transactions_mirror.arrival_photo_3 LIKE 'remote-trips/%'
@@ -978,6 +996,11 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
         ELSE COALESCE(EXCLUDED.arrival_photo_3, transactions_mirror.arrival_photo_3)
       END,
       departure_photo_1 = CASE
+        WHEN $28::boolean AND EXCLUDED.departure_photo_1 LIKE 'remote-trips/%'
+          THEN EXCLUDED.departure_photo_1
+        WHEN EXCLUDED.departure_photo_1 LIKE 'remote-trips/%'
+         AND transactions_mirror.departure_photo_1 LIKE 'sites/%'
+          THEN transactions_mirror.departure_photo_1
         WHEN EXCLUDED.departure_photo_1 LIKE 'remote-trips/%' THEN EXCLUDED.departure_photo_1
         WHEN NOT $27::boolean
          AND transactions_mirror.departure_photo_1 LIKE 'remote-trips/%'
@@ -986,6 +1009,11 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
         ELSE COALESCE(EXCLUDED.departure_photo_1, transactions_mirror.departure_photo_1)
       END,
       departure_photo_2 = CASE
+        WHEN $28::boolean AND EXCLUDED.departure_photo_2 LIKE 'remote-trips/%'
+          THEN EXCLUDED.departure_photo_2
+        WHEN EXCLUDED.departure_photo_2 LIKE 'remote-trips/%'
+         AND transactions_mirror.departure_photo_2 LIKE 'sites/%'
+          THEN transactions_mirror.departure_photo_2
         WHEN EXCLUDED.departure_photo_2 LIKE 'remote-trips/%' THEN EXCLUDED.departure_photo_2
         WHEN NOT $27::boolean
          AND transactions_mirror.departure_photo_2 LIKE 'remote-trips/%'
@@ -994,6 +1022,11 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
         ELSE COALESCE(EXCLUDED.departure_photo_2, transactions_mirror.departure_photo_2)
       END,
       departure_photo_3 = CASE
+        WHEN $28::boolean AND EXCLUDED.departure_photo_3 LIKE 'remote-trips/%'
+          THEN EXCLUDED.departure_photo_3
+        WHEN EXCLUDED.departure_photo_3 LIKE 'remote-trips/%'
+         AND transactions_mirror.departure_photo_3 LIKE 'sites/%'
+          THEN transactions_mirror.departure_photo_3
         WHEN EXCLUDED.departure_photo_3 LIKE 'remote-trips/%' THEN EXCLUDED.departure_photo_3
         WHEN NOT $27::boolean
          AND transactions_mirror.departure_photo_3 LIKE 'remote-trips/%'
@@ -1032,6 +1065,7 @@ async function upsertMirrorFromRemoteTrip(queryFn, row, siteId = getSiteId(), op
       row.report_s3_key || null,
       normalizeTicketStatus(row.ticket_status),
       forcePhotos,
+      forceCreateImages,
     ],
   );
   return res.rows[0] || null;
@@ -1063,17 +1097,22 @@ async function reconcileRemoteTripsToMirror(queryFn, siteId = getSiteId(), limit
   return { candidates: (missing.rows || []).length, upserted };
 }
 
+function isVersionedAdminMirrorKey(key) {
+  return /sites\/[^/]+\/mirror\/[^/]+\/(arrival|departure)_cam-[1-3]-[a-z0-9]+\.jpe?g$/i.test(
+    String(key || ''),
+  );
+}
+
 /**
- * Never let mirror sync clobber photos already stored on remote_trips.
- * Create images writes remote-trips/… keys; the weighbridge then pushes older
- * sites/…/mirror/… JPEGs. Reconcile used to COALESCE those mirror keys back
- * onto remote_trips and the Bulk Photos UI looked like it “reassigned” the old image.
- * Only fill empty remote slots from mirror (unless the slip itself remapped).
+ * Never let weighbridge stable sites/…/cam-N.jpg clobber Create-images
+ * remote-trips/… keys. Report Edit versioned sites/…/cam-N-{ver}.jpg keys
+ * ARE newer admin truth and must win over Create-images.
  */
 function preferRemoteTripPhotoKey(remoteKey, mirrorKey, { slipChanged = false } = {}) {
   const remote = String(remoteKey || '').trim() || null;
   const mirror = String(mirrorKey || '').trim() || null;
   if (slipChanged) return mirror || remote;
+  if (mirror && isVersionedAdminMirrorKey(mirror)) return mirror;
   if (remote) return remote;
   return mirror;
 }
@@ -1564,10 +1603,14 @@ async function attachPhotos(queryFn, id, photoS3Keys = []) {
   const trip = res.rows[0];
   if (trip) {
     try {
-      // Report Edit attaches sites/… keys — allow them to replace Create-images
-      // remote-trips/… keys on the mirror row (default upsert protects those).
+      // Report Edit attaches sites/… keys — allow them to replace Create-images.
+      // Create images attaches remote-trips/… — allow those to replace sites/.
       const forcePhotos = values.some((k) => String(k || '').startsWith('sites/'));
-      await upsertMirrorFromRemoteTrip(queryFn, trip, getSiteId(), { forcePhotos });
+      const forceCreateImages = values.some((k) => String(k || '').startsWith('remote-trips/'));
+      await upsertMirrorFromRemoteTrip(queryFn, trip, getSiteId(), {
+        forcePhotos,
+        forceCreateImages,
+      });
     } catch (err) {
       console.warn('[remoteTrip] mirror upsert on photos failed', err.message);
     }

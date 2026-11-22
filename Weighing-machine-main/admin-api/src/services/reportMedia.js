@@ -23,16 +23,22 @@ const PHOTO_FIELDS = [
 /** Soft cap so a bad caller cannot build an unbounded IN-list. */
 const MAX_MIRROR_SLIP_BATCH = 250;
 
+function isVersionedAdminMirrorKey(key) {
+  return /sites\/[^/]+\/mirror\/[^/]+\/(arrival|departure)_cam-[1-3]-[a-z0-9]+\.jpe?g$/i.test(
+    String(key || ''),
+  );
+}
+
 /**
  * Pick the photo key admin PDFs / Bulk UI should show.
- * Mirror first (Report Edit / Admin Reports truth). Empty mirror slots fall
- * back to remote_trips so Create-images keys still appear when mirror is blank.
- * Create-images vs stale weighbridge sites/ keys is enforced on write
- * (reconcile + upsertMirror), not by ignoring mirror edits here.
+ * Versioned Report Edit keys always win. Otherwise mirror first (Reports
+ * truth), then remote_trips for Create-images when mirror is empty.
  */
 function preferAdminPhotoKey(remoteKey, mirrorKey) {
   const remote = String(remoteKey || '').trim();
   const mirror = String(mirrorKey || '').trim();
+  if (isVersionedAdminMirrorKey(mirror)) return mirror;
+  if (isVersionedAdminMirrorKey(remote)) return remote;
   return mirror || remote || null;
 }
 
