@@ -19,10 +19,13 @@ let catchUpJob = null;
 let catchUpTimer = null;
 let listenClient = null;
 let processing = false;
+let processingStartedAt = 0;
 let rerunRequested = false;
 let started = false;
 const pushQueue = new Set();
 const catchUpDone = new Set();
+/** If processNow hangs (e.g. S3 download), force-clear so cron can run again. */
+const PROCESSING_STALE_MS = 2 * 60 * 1000;
 
 const REMOTE_SAFE_KEYS = new Set([
   'WEIGHT_ADJUSTMENT_ENABLED',
@@ -659,14 +662,30 @@ async function pushWeightFeatureMeta() {
 
 async function processNow() {
   if (processing) {
-    rerunRequested = true;
-    return { ok: true, skipped: true };
+    const ageMs = Date.now() - processingStartedAt;
+    if (processingStartedAt && ageMs > PROCESSING_STALE_MS) {
+      logger.error('CloudAdminSync clearing stuck processing lock', {
+        ageMs,
+        staleAfterMs: PROCESSING_STALE_MS,
+      });
+      processing = false;
+      processingStartedAt = 0;
+      try {
+        S3Service.resetClient();
+      } catch (_e) {
+        /* ignore */
+      }
+    } else {
+      rerunRequested = true;
+      return { ok: true, skipped: true };
+    }
   }
   if (!pg.isConfigured()) return { ok: false, reason: 'not_configured' };
   if (!(await isOnline())) return { ok: false, reason: 'offline' };
   if (!(await pg.ping())) return { ok: false, reason: 'ping_failed' };
 
   processing = true;
+  processingStartedAt = Date.now();
   try {
     let passes = 0;
     do {
@@ -687,6 +706,7 @@ async function processNow() {
     return { ok: true };
   } finally {
     processing = false;
+    processingStartedAt = 0;
     if (rerunRequested) {
       rerunRequested = false;
       setTimeout(() => {

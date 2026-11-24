@@ -24,10 +24,12 @@ try {
   /* ignore */
 }
 
-const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const CONNECTION_TIMEOUT_MS = 60 * 1000;
+const REQUEST_TIMEOUT_MS = 90 * 1000;
+const CONNECTION_TIMEOUT_MS = 20 * 1000;
 /** App-level retries (SDK retries disabled — we reset the client between attempts). */
-const MAX_ATTEMPTS = 8;
+const MAX_ATTEMPTS = 5;
+const DOWNLOAD_MAX_ATTEMPTS = 4;
+const DOWNLOAD_BODY_TIMEOUT_MS = 60 * 1000;
 
 let client = null;
 let clientFingerprint = '';
@@ -107,25 +109,26 @@ function isRetryableS3Error(err) {
   );
 }
 
-async function withS3Retry(label, fn) {
+async function withS3Retry(label, fn, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || MAX_ATTEMPTS);
   let lastErr;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isRetryableS3Error(err) || attempt >= MAX_ATTEMPTS) break;
+      if (!isRetryableS3Error(err) || attempt >= maxAttempts) break;
       // Drop cached client — stale sockets often cause repeated hang-ups.
       resetClient();
-      const delayMs = Math.min(20000, 800 * 2 ** (attempt - 1));
+      const delayMs = Math.min(12000, 800 * 2 ** (attempt - 1));
       console.warn(
-        `[S3] ${label} attempt ${attempt}/${MAX_ATTEMPTS} failed (${err.message || err}); retry in ${delayMs}ms`,
+        `[S3] ${label} attempt ${attempt}/${maxAttempts} failed (${err.message || err}); retry in ${delayMs}ms`,
       );
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
   const detail = lastErr?.message || String(lastErr);
-  throw new Error(`S3 ${label} failed after ${MAX_ATTEMPTS} attempts: ${detail}`);
+  throw new Error(`S3 ${label} failed after ${maxAttempts} attempts: ${detail}`);
 }
 
 async function streamToBuffer(body) {
@@ -197,15 +200,28 @@ async function objectExists(s3Key) {
  * Download an S3 object to a local path.
  * Retries include body streaming — "socket hang up" often hits while reading
  * the response body, not during GetObject setup.
+ * Keep attempts short so CloudAdminSync cannot stay blocked for many minutes
+ * (that freezes heartbeat / command pull on the weighbridge PC).
  */
 async function downloadFile(s3Key, localPath) {
   const bucket = getBucket();
-  const buf = await withS3Retry(`download ${s3Key}`, async () => {
-    const res = await getClient().send(
-      new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
-    );
-    return streamToBuffer(res.Body);
-  });
+  const buf = await withS3Retry(
+    `download ${s3Key}`,
+    async () => {
+      const res = await getClient().send(
+        new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
+      );
+      return Promise.race([
+        streamToBuffer(res.Body),
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('socket hang up: body read timeout'));
+          }, DOWNLOAD_BODY_TIMEOUT_MS);
+        }),
+      ]);
+    },
+    { maxAttempts: DOWNLOAD_MAX_ATTEMPTS },
+  );
   await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
   await fs.promises.writeFile(localPath, buf);
   return localPath;
