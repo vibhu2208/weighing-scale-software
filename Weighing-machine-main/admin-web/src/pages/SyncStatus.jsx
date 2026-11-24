@@ -34,6 +34,19 @@ export default function SyncStatus() {
   const site = data?.site || {};
   const commands = data?.commands || {};
   const failedCount = Number(commands.failed || 0);
+  const pendingCount = Number(commands.pending || 0);
+  const lastSeenMs = site.last_seen_at ? new Date(site.last_seen_at).getTime() : NaN;
+  const seenAgoSec = Number.isFinite(lastSeenMs)
+    ? Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000))
+    : null;
+  const pcStale = seenAgoSec == null || seenAgoSec > 120;
+
+  function formatAgo(sec) {
+    if (sec == null) return 'never';
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    return `${Math.floor(sec / 3600)}h ago`;
+  }
 
   function commandTone(status) {
     if (status === 'applied') return 'success';
@@ -125,6 +138,18 @@ export default function SyncStatus() {
 
       {error && <p className="text-sm text-red-400">{error}</p>}
       {message && <p className="text-sm text-emerald-400">{message}</p>}
+      {pcStale && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <p className="font-medium">Weighbridge PC sync is stalled</p>
+          <p className="mt-1 text-amber-100/80">
+            Last heartbeat {formatAgo(seenAgoSec)}
+            {pendingCount ? ` · ${pendingCount} command(s) waiting` : ''}. The PC app is not
+            reaching RDS right now (app stopped, disk full, or PG_SYNC_URL / firewall). Restart the
+            Electron app on the weighbridge PC after <code className="text-amber-50">git pull</code>
+            .
+          </p>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div className="card p-4">
@@ -134,8 +159,13 @@ export default function SyncStatus() {
         </div>
         <div className="card p-4">
           <p className="text-xs text-slate-400">Weighbridge PC last seen</p>
-          <p className="font-semibold mt-1">{fmtDate(site.last_seen_at)}</p>
-          <p className="text-xs text-slate-500 mt-2">Last push: {fmtDate(site.last_push_at)}</p>
+          <p className={`font-semibold mt-1 ${pcStale ? 'text-amber-300' : ''}`}>
+            {fmtDate(site.last_seen_at)}
+          </p>
+          <p className={`text-xs mt-2 ${pcStale ? 'text-amber-400' : 'text-slate-500'}`}>
+            {pcStale ? `Stale · ${formatAgo(seenAgoSec)}` : `OK · ${formatAgo(seenAgoSec)}`}
+          </p>
+          <p className="text-xs text-slate-500 mt-1">Last push: {fmtDate(site.last_push_at)}</p>
         </div>
         <div className="card p-4">
           <p className="text-xs text-slate-400">Mirrored reports</p>
