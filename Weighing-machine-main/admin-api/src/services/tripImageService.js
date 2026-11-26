@@ -181,8 +181,15 @@ async function generateRemoteTripPhoto(queryFn, id, body = {}) {
   const thumbKey = remoteTripPhotoThumbKeyFromKey(key);
   await putObject(key, edited.buffer, 'image/jpeg');
   await writeTripPhotoThumb(key, edited.buffer, thumbKey);
+
+  // Create images applies photo-slot mapping before attach; skip writing the
+  // source camera slot so AC2→AC3 does not leave the image on AC2.
+  if (body.attach === false) {
+    return { trip, slot, pass, key, attached: false };
+  }
+
   const updated = await attachPhotos(queryFn, id, [{ slot, pass, key }]);
-  return { trip: updated, slot, pass, key };
+  return { trip: updated, slot, pass, key, attached: true };
 }
 
 module.exports = {

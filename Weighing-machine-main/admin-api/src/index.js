@@ -29,6 +29,7 @@ const { query } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+
 const corsOrigin = process.env.CORS_ORIGIN || '*';
 app.use(
   cors({
@@ -95,11 +96,16 @@ async function bootstrap() {
     );
   }
   try {
-    const { ensureProtectCreateImagePhotos } = require('./services/remoteTripService');
+    const {
+      ensureProtectCreateImagePhotos,
+      ensureUpdatedAtColumn,
+    } = require('./services/remoteTripService');
+    await ensureUpdatedAtColumn(query);
+    console.log('[api] remote_trips.updated_at ready');
     await ensureProtectCreateImagePhotos(query);
     console.log('[api] create-image photo protection trigger ready');
   } catch (err) {
-    console.error('[api] create-image photo protection trigger failed:', err.message);
+    console.error('[api] remote_trips photo schema/trigger failed:', err.message);
   }
   try {
     startMirrorReconcileWorker(query, 60);

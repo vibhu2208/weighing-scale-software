@@ -17,6 +17,8 @@ const {
   remoteTripPhotoKey,
   remoteTripPhotoThumbKeyFromKey,
   fillVehicleStillKey,
+  normalizeSlipNumber,
+  isAllowedTripPhotoKey,
   isConfigured,
 } = require('../services/s3Presign');
 const { clearPdfFingerprints } = require('../services/pdfContentCache');
@@ -247,7 +249,7 @@ router.post('/remote-trip-copy', async (req, res) => {
       return res.status(503).json({ ok: false, error: 'S3 not configured' });
     }
     const { sourceKey, slip, slot, pass } = req.body || {};
-    const slipNum = String(slip || '').trim();
+    const slipNum = normalizeSlipNumber(slip);
     const slotNum = Number(slot);
     const photoPass = pass === 'arrival' ? 'arrival' : 'departure';
     const fromKey = String(sourceKey || '').trim();
@@ -257,8 +259,9 @@ router.post('/remote-trip-copy', async (req, res) => {
         error: 'sourceKey, slip, and slot (1-3) required',
       });
     }
-    if (!fromKey.startsWith('remote-trips/') && !fromKey.startsWith('sites/')) {
-      return res.status(400).json({ ok: false, error: 'sourceKey not allowed' });
+    // Source must already belong to this slip (no cross-trip grafting).
+    if (!isAllowedTripPhotoKey(fromKey, slipNum, getSiteId())) {
+      return res.status(400).json({ ok: false, error: 'sourceKey not allowed for this slip' });
     }
     const key = remoteTripPhotoKey(slipNum, slotNum, photoPass);
     const thumbKey = remoteTripPhotoThumbKeyFromKey(key);

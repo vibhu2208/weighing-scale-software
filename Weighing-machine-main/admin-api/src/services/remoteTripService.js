@@ -563,6 +563,19 @@ async function ensureReleaseColumn(queryFn) {
   releaseColumnReady = true;
 }
 
+let updatedAtColumnReady = false;
+/** attachPhotos / photo recovery bump this; older RDS dumps may lack the column. */
+async function ensureUpdatedAtColumn(queryFn) {
+  if (updatedAtColumnReady) return;
+  const cols = await loadRemoteTripColumns(queryFn);
+  if (!cols.has('updated_at')) {
+    await runRemoteTripDdl([
+      `ALTER TABLE remote_trips ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+    ]);
+  }
+  updatedAtColumnReady = true;
+}
+
 let openTicketColumnsReady = false;
 /** Open tickets store only the first weigh, so the second weight and close time may be null. */
 async function ensureOpenTicketColumns(queryFn) {
@@ -1553,14 +1566,25 @@ async function getRemoteTripsByIds(queryFn, ids = []) {
 async function attachPhotos(queryFn, id, photoS3Keys = []) {
   const row = await getRemoteTrip(queryFn, id);
   if (!row) throw new Error('Remote trip not found');
+  await ensureUpdatedAtColumn(queryFn);
 
+  const { isAllowedTripPhotoKey } = require('./s3Presign');
   const updates = {};
+  const rejected = [];
   for (const item of photoS3Keys) {
     const slot = Number(item.slot);
     const key = item.key || item.s3Key;
     const pass = item.pass === 'arrival' ? 'arrival' : 'departure';
     if (!key || !Number.isFinite(slot) || slot < 1 || slot > 3) continue;
+    if (!isAllowedTripPhotoKey(key, row.slip_number, getSiteId())) {
+      rejected.push(String(key));
+      continue;
+    }
     updates[`${pass}_photo_${slot}`] = key;
+  }
+
+  if (rejected.length) {
+    throw new Error('Photo key not allowed for this trip');
   }
 
   if (!Object.keys(updates).length) {
@@ -1839,6 +1863,7 @@ module.exports = {
   cancelRemoteTrip,
   deleteRemoteTrip,
   ensureProtectCreateImagePhotos,
+  ensureUpdatedAtColumn,
   upsertMirrorFromRemoteTrip,
   reconcileRemoteTripsToMirror,
   reconcileRemoteTripsFromMirror,

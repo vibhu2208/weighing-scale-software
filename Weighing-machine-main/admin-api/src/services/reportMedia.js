@@ -166,6 +166,8 @@ async function persistRecoveredPhotoKeys(slipNumber, updates) {
     console.warn('[reportMedia] mirror photo restore failed', slip, err.message);
   }
   try {
+    const { ensureUpdatedAtColumn } = require('./remoteTripService');
+    await ensureUpdatedAtColumn(query);
     const rtSets = entries.map(([col], i) => `${col} = $${i + 2}`);
     await query(
       `UPDATE remote_trips

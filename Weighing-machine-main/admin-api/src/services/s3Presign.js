@@ -241,6 +241,29 @@ function inferPhotoFieldFromKey(s3Key) {
   return null;
 }
 
+/** Reject path traversal / empty slips used in S3 prefixes. */
+function normalizeSlipNumber(slip) {
+  const value = String(slip || '').trim();
+  if (!value || /[\\/\0]/.test(value) || value.includes('..')) return '';
+  return value;
+}
+
+/**
+ * Photo keys must belong to this slip under remote-trips/ or site mirror paths.
+ * Prevents attaching/copying another trip's objects onto a different slip.
+ */
+function isAllowedTripPhotoKey(key, slip, siteId = process.env.SITE_ID || 'WB-03') {
+  const k = String(key || '').trim();
+  const slipNum = normalizeSlipNumber(slip);
+  if (!k || !slipNum) return false;
+  if (k.startsWith(`remote-trips/${slipNum}/`)) return true;
+  const { siteIdAliases } = require('../siteId');
+  for (const site of siteIdAliases(siteId)) {
+    if (k.startsWith(`sites/${site}/mirror/${slipNum}/`)) return true;
+  }
+  return false;
+}
+
 module.exports = {
   isConfigured,
   getClient,
@@ -265,5 +288,7 @@ module.exports = {
   remoteTripPhotoThumbKey,
   mirrorPhotoThumbKey,
   fillVehicleStillKey,
+  normalizeSlipNumber,
+  isAllowedTripPhotoKey,
   getBucket,
 };

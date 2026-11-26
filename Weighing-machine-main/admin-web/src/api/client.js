@@ -237,10 +237,10 @@ export const api = {
     });
   },
 
-  generateRemoteTripPhoto(id, { pass, slot }) {
+  generateRemoteTripPhoto(id, { pass, slot, attach = true }) {
     return request(`/remote-trips/${encodeURIComponent(id)}/generate-photo`, {
       method: 'POST',
-      body: JSON.stringify({ pass, slot }),
+      body: JSON.stringify({ pass, slot, attach }),
     });
   },
 

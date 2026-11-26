@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { api } from '../api/client.js';
 import {
-  destinationSlotsFor,
   isOpenTicket,
   loadPhotoMapping,
+  resolveMappedPhotoSlots,
+  slotCode,
 } from '../lib/bulkVehiclePhotos.js';
 
 const JOBS = [
@@ -59,29 +60,61 @@ async function publishTrip(trip, onTripUpdate) {
   onTripUpdate?.({ ...trip, ...urlFields, has_photos: true });
 }
 
-async function applyMappingCopies(trip, result, job, mapping) {
-  const sourceKey = result?.key;
-  if (!sourceKey || !trip?.slip_number) return result?.trip || null;
-  const destinations = destinationSlotsFor(job.pass, job.slot, mapping);
-  const photoS3Keys = [{ slot: job.slot, pass: job.pass, key: sourceKey }];
-  for (const dest of destinations) {
-    if (dest === job.slot) continue;
-    if (isOpenTicket(trip.ticket_status) && job.pass === 'departure') continue;
-    const copied = await api.copyRemoteTripPhoto(
-      sourceKey,
-      trip.slip_number,
-      dest,
-      job.pass,
+/**
+ * Place generated cam stills into mapped destination slots only.
+ * Example default: AC1 → AC1+AC2, AC2 → AC3 (AC2 slot keeps the AC1 copy).
+ */
+async function attachMappedPhotos(trip, pass, sourceKeysBySlot, mapping) {
+  if (!trip?.id || !trip?.slip_number) {
+    throw new Error('Trip is missing an id or slip number');
+  }
+  if (isOpenTicket(trip.ticket_status) && pass === 'departure') {
+    return { trip: null, skipped: true };
+  }
+
+  const resolved = resolveMappedPhotoSlots(pass, sourceKeysBySlot, mapping);
+  if (!resolved.length) {
+    throw new Error(
+      `${pass === 'arrival' ? 'Arrival' : 'Departure'} mapping has no destination slots`,
     );
-    if (copied?.key) {
-      photoS3Keys.push({ slot: dest, pass: job.pass, key: copied.key });
+  }
+
+  const photoS3Keys = [];
+  const failedSlots = [];
+  for (const item of resolved) {
+    if (item.slot === item.sourceSlot) {
+      photoS3Keys.push({ slot: item.slot, pass, key: item.key });
+      continue;
+    }
+    try {
+      const copied = await api.copyRemoteTripPhoto(
+        item.key,
+        trip.slip_number,
+        item.slot,
+        pass,
+      );
+      if (copied?.key) {
+        photoS3Keys.push({ slot: item.slot, pass, key: copied.key });
+      } else {
+        failedSlots.push(slotCode(pass, item.slot).toUpperCase());
+      }
+    } catch {
+      failedSlots.push(slotCode(pass, item.slot).toUpperCase());
     }
   }
-  if (photoS3Keys.length > 1) {
-    const attached = await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
-    return attached?.trip || result?.trip || null;
+
+  if (failedSlots.length) {
+    throw new Error(`Could not copy to ${failedSlots.join(', ')}`);
   }
-  return result?.trip || null;
+  if (photoS3Keys.length !== resolved.length) {
+    throw new Error('Mapped photo copy incomplete');
+  }
+
+  const attached = await api.attachRemoteTripPhotos(trip.id, photoS3Keys);
+  if (!attached?.trip) {
+    throw new Error('Could not attach mapped photos');
+  }
+  return { trip: attached.trip, skipped: false };
 }
 
 /** Shared by the per-trip button and Create images for all. */
@@ -92,9 +125,20 @@ export async function createTripImages(trip, { onStatus, onTripUpdate } = {}) {
   let stopped = false;
   let toldDeparture = false;
   const mapping = loadPhotoMapping();
+  const generated = { arrival: {}, departure: {} };
+  let workingTrip = trip;
+  const openTicket = isOpenTicket(trip?.ticket_status);
+
   try {
     for (const job of JOBS) {
-      if (!trip?.[job.timeField]) {
+      if (openTicket && job.pass === 'departure') {
+        if (!toldDeparture) {
+          warnings.push('Open ticket — departure photos skipped');
+          toldDeparture = true;
+        }
+        continue;
+      }
+      if (!workingTrip?.[job.timeField]) {
         if (job.timeField === 'timestamp_out' && !toldDeparture) {
           warnings.push('Departure is waiting for an out time');
           toldDeparture = true;
@@ -106,21 +150,52 @@ export async function createTripImages(trip, { onStatus, onTripUpdate } = {}) {
       }
       onStatus?.(`${job.label}…`);
       try {
-        const result = await api.generateRemoteTripPhoto(trip.id, {
+        const result = await api.generateRemoteTripPhoto(workingTrip.id, {
           pass: job.pass,
           slot: job.slot,
+          attach: false,
         });
-        // generate-photo already returns signed media URLs on trip.
-        if (result?.trip) await publishTrip(result.trip, onTripUpdate);
-        const nextTrip = await applyMappingCopies(trip, result, job, mapping);
-        if (nextTrip && nextTrip !== result?.trip) await publishTrip(nextTrip, onTripUpdate);
-        changed = true;
+        if (!result?.key) {
+          throw new Error('Create images did not return an image key');
+        }
+        generated[job.pass][job.slot] = result.key;
       } catch (err) {
         const message = err.message || 'Could not create image';
         errors.push(STOP_RE.test(message) ? message : `${job.label}: ${message}`);
         if (STOP_RE.test(message)) {
           stopped = true;
           break;
+        }
+      }
+    }
+
+    if (!stopped) {
+      for (const pass of ['arrival', 'departure']) {
+        const sourceKeys = generated[pass];
+        if (!Object.keys(sourceKeys).length) continue;
+        onStatus?.(pass === 'arrival' ? 'Mapping arrival slots…' : 'Mapping departure slots…');
+        try {
+          const result = await attachMappedPhotos(workingTrip, pass, sourceKeys, mapping);
+          if (result?.skipped) {
+            warnings.push('Open ticket — departure mapping skipped');
+            continue;
+          }
+          if (result?.trip) {
+            workingTrip = result.trip;
+            await publishTrip(result.trip, onTripUpdate);
+            changed = true;
+          }
+        } catch (err) {
+          const message = err.message || 'Could not attach mapped photos';
+          errors.push(
+            STOP_RE.test(message)
+              ? message
+              : `${pass === 'arrival' ? 'Arrival' : 'Departure'} mapping: ${message}`,
+          );
+          if (STOP_RE.test(message)) {
+            stopped = true;
+            break;
+          }
         }
       }
     }

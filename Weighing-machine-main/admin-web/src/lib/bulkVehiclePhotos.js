@@ -145,6 +145,41 @@ export function destinationSlotsFor(pass, slot, photoMapping) {
   return Array.isArray(destinations) ? normalizeSlots(destinations) : [Number(slot)];
 }
 
+/**
+ * Resolve final destination-slot keys from generated source stills + mapping.
+ * A source that maps to its own slot wins over another source routing into it.
+ * Returns [{ slot, pass, sourceSlot, key }] ready for copy/attach.
+ */
+export function resolveMappedPhotoSlots(pass, sourceKeysBySlot, photoMapping = {}) {
+  const candidates = new Map();
+  for (const [rawSlot, key] of Object.entries(sourceKeysBySlot || {})) {
+    const sourceSlot = Number(rawSlot);
+    if (!key || !SLOT_NUMS.includes(sourceSlot)) continue;
+    for (const dest of destinationSlotsFor(pass, sourceSlot, photoMapping)) {
+      const bucket = candidates.get(dest) || [];
+      bucket.push({ sourceSlot, key: String(key) });
+      candidates.set(dest, bucket);
+    }
+  }
+
+  const resolved = [];
+  for (const [dest, bucket] of candidates.entries()) {
+    bucket.sort(
+      (a, b) =>
+        Number(b.sourceSlot === dest) - Number(a.sourceSlot === dest) ||
+        a.sourceSlot - b.sourceSlot,
+    );
+    const winner = bucket[0];
+    resolved.push({
+      slot: dest,
+      pass,
+      sourceSlot: winner.sourceSlot,
+      key: winner.key,
+    });
+  }
+  return resolved.sort((a, b) => a.slot - b.slot);
+}
+
 export function photoMappingLabel(photoMapping) {
   const parts = [];
   for (const pass of ['arrival', 'departure']) {
