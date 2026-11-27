@@ -4,6 +4,7 @@ import {
   REPORTS_FILTER_DEFAULTS,
   isDefaultReportsState,
   isSafeAppPath,
+  isSafeReportEditFrom,
   parseReportsSearch,
   reportEditBackLabel,
   reportEditBackPath,
@@ -85,16 +86,28 @@ test('edit URLs keep the current Reports search string', () => {
   assert.equal(isDefaultReportsState(parseReportsSearch('period=today')), false);
 });
 
-test('report edit paths encode slips and only accept safe from paths', () => {
+test('report edit paths encode slips and only accept allowlisted from paths', () => {
   assert.equal(reportEditPath('WB1234'), '/reports/WB1234/edit');
   assert.equal(
     reportEditPath('WB1234', { from: '/plan-gaps/fill' }),
     '/reports/WB1234/edit?from=%2Fplan-gaps%2Ffill',
   );
+  assert.equal(
+    reportEditPath('WB1234', { from: '/bulk-photos' }),
+    '/reports/WB1234/edit?from=%2Fbulk-photos',
+  );
+  assert.equal(
+    reportEditPath('WB1234', { from: '/bulk-photos?day=today' }),
+    '/reports/WB1234/edit?from=%2Fbulk-photos%3Fday%3Dtoday',
+  );
   assert.equal(reportEditPath('WB1234', { from: '//evil.example' }), '/reports/WB1234/edit');
   assert.equal(reportEditPath('WB1234', { from: 'https://evil.example' }), '/reports/WB1234/edit');
+  assert.equal(reportEditPath('WB1234', { from: '/not-a-route' }), '/reports/WB1234/edit');
+  assert.equal(reportEditPath('WB1234', { from: '/bulk-photos#x' }), '/reports/WB1234/edit');
   assert.equal(isSafeAppPath('/plan-gaps/fill'), true);
   assert.equal(isSafeAppPath('//evil.example'), false);
+  assert.equal(isSafeReportEditFrom('/bulk-photos'), true);
+  assert.equal(isSafeReportEditFrom('/not-a-route'), false);
 });
 
 test('report edit back prefers safe from and ignores it for Reports filters', () => {
@@ -103,9 +116,15 @@ test('report edit back prefers safe from and ignores it for Reports filters', ()
     '/plan-gaps/fill',
   );
   assert.equal(reportEditBackLabel('from=%2Fplan-gaps%2Ffill'), '← Back');
+  assert.equal(reportEditBackPath('from=%2Fbulk-photos'), '/bulk-photos');
+  assert.equal(reportEditBackLabel('from=%2Fbulk-photos'), '← Back');
   assert.equal(
     reportEditBackPath('period=today&status=CLOSED&from=%2F%2Fevil'),
     '/reports?period=today&status=CLOSED',
+  );
+  assert.equal(
+    reportEditBackPath('from=%2Fnot-a-route'),
+    '/reports',
   );
   assert.equal(reportEditBackLabel('period=today'), '← Reports');
 });

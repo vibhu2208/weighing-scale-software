@@ -32,6 +32,7 @@ import {
   tripPhotoUrl,
   vehicleLast4,
 } from '../lib/bulkVehiclePhotos.js';
+import { reportEditPath } from '../lib/reportsListState.js';
 
 const IMAGE_RE = /^image\//;
 const DAY_OPTIONS = [
@@ -904,6 +905,7 @@ export default function BulkPhotoUpload() {
               <th className="p-3">Sync</th>
               <th className="p-3">Images</th>
               <th className="p-3">Photos</th>
+              <th className="p-3">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -911,6 +913,7 @@ export default function BulkPhotoUpload() {
               const slots = expectedPhotoSlots(row);
               const filled = filledPhotoCount(row);
               const sync = syncState(row);
+              const slip = String(row.slip_number || '').trim();
               return (
                 <tr key={row.id} className="border-b border-slate-800/60 align-top">
                   <td className="p-3 font-mono text-xs whitespace-nowrap">
@@ -1028,12 +1031,24 @@ export default function BulkPhotoUpload() {
                       })}
                     </div>
                   </td>
+                  <td className="p-3">
+                    {slip ? (
+                      <Link
+                        to={reportEditPath(slip, { from: '/bulk-photos' })}
+                        className="text-brand-400 hover:underline text-xs"
+                      >
+                        Edit
+                      </Link>
+                    ) : (
+                      <span className="text-slate-600 text-xs">—</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
             {!loading && filteredRows.length === 0 && (
               <tr>
-                <td colSpan={7} className="p-6 text-center text-slate-500">
+                <td colSpan={8} className="p-6 text-center text-slate-500">
                   No remote trips for {dayLabel(day, customDate)}
                   {rows.length ? ' with these filters' : ''}.{' '}
                   <Link to="/plan-gaps/fill" className="text-brand-300 hover:underline">

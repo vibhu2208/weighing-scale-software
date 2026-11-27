@@ -78,12 +78,51 @@ export function isSafeAppPath(path) {
   return true;
 }
 
+/**
+ * Known Report Edit Back targets (pathname only; optional query is allowed).
+ * Keep in sync with routes in App.jsx that open Report Edit via `from`.
+ */
+export const REPORT_EDIT_FROM_PATHS = new Set([
+  '/admin-builder',
+  '/bulk-photos',
+  '/plan-gaps',
+  '/plan-gaps/fill',
+  '/remote-trips',
+  '/remote-trips/import',
+  '/reports',
+  '/settings/advance',
+  '/sync',
+]);
+
+/**
+ * Stricter than isSafeAppPath: pathname must be an allowlisted admin route.
+ * Query strings are kept; hashes and cross-origin forms are rejected.
+ */
+export function isSafeReportEditFrom(path) {
+  if (!isSafeAppPath(path)) return false;
+  try {
+    const url = new URL(path.trim(), 'https://app.local');
+    if (url.origin !== 'https://app.local') return false;
+    if (url.username || url.password || url.hash) return false;
+    const pathname = (url.pathname.replace(/\/+$/, '') || '/');
+    return REPORT_EDIT_FROM_PATHS.has(pathname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeReportEditFrom(path) {
+  const url = new URL(String(path || '').trim(), 'https://app.local');
+  const pathname = url.pathname.replace(/\/+$/, '') || '/';
+  return `${pathname}${url.search}`;
+}
+
 /** Edit URL; optional `from` returns the operator to the page that opened edit. */
 export function reportEditPath(slip, { from } = {}) {
   const base = `/reports/${encodeURIComponent(String(slip || '').trim())}/edit`;
-  if (!isSafeAppPath(from)) return base;
+  if (!isSafeReportEditFrom(from)) return base;
   const params = new URLSearchParams();
-  params.set('from', from);
+  params.set('from', normalizeReportEditFrom(from));
   return `${base}?${params.toString()}`;
 }
 
@@ -91,14 +130,14 @@ export function reportEditPath(slip, { from } = {}) {
 export function reportEditBackPath(searchOrParams) {
   const params = readSearchParams(searchOrParams);
   const from = params.get('from');
-  if (isSafeAppPath(from)) return from.trim();
+  if (isSafeReportEditFrom(from)) return normalizeReportEditFrom(from);
   params.delete('from');
   return reportsListPath(params);
 }
 
 export function reportEditBackLabel(searchOrParams) {
   const params = readSearchParams(searchOrParams);
-  return isSafeAppPath(params.get('from')) ? '← Back' : '← Reports';
+  return isSafeReportEditFrom(params.get('from')) ? '← Back' : '← Reports';
 }
 
 export function isDefaultReportsState(state) {
