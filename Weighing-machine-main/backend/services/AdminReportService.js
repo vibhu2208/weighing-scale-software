@@ -15,6 +15,7 @@ const {
   mergeSnapshotsBySlot,
   photoColumnUpdates,
   setPassSnapshots,
+  parseCameraSnapshots,
 } = require('../utils/tripPhotos');
 const { resolveVehicleType, isHywa } = require('../utils/vehicleTypes');
 const { TICKET_STATUS, TRANSACTION_STATUS } = require('../utils/constants');
@@ -147,6 +148,37 @@ function getClosedReportBySlip(slipNumber) {
   return toPublicTransaction(txn);
 }
 
+/**
+ * Remove tare weight + tare images and reopen the ticket (second-weigh undo).
+ * HYWA: tare is the close pass → clear departure photos + snaps.tare, keep gross/arrival.
+ * Standard: tare is the open pass → clear arrival photos + tare_image_path + snaps.tare.
+ */
+function buildClearTareUpdates(txn, vehicleType) {
+  const hywa = isHywa(vehicleType);
+  const snaps = parseCameraSnapshots(txn.camera_snapshots);
+  snaps.tare = [];
+  const updates = {
+    tare_weight: null,
+    raw_tare_weight: null,
+    tare_image_path: null,
+    camera_snapshots: JSON.stringify(snaps),
+    ticket_status: TICKET_STATUS.OPEN,
+    status: TRANSACTION_STATUS.WEIGHING,
+    timestamp_out: null,
+  };
+  if (hywa) {
+    updates.departure_photo_1 = null;
+    updates.departure_photo_2 = null;
+    updates.departure_photo_3 = null;
+    updates.image_path = null;
+  } else {
+    updates.arrival_photo_1 = null;
+    updates.arrival_photo_2 = null;
+    updates.arrival_photo_3 = null;
+  }
+  return updates;
+}
+
 async function performClosedReportUpdate(data = {}) {
   // Never validate cancel voids (0 kg) as normal weight edits.
   if (looksLikeCancelPayload(data)) {
@@ -164,6 +196,30 @@ async function performClosedReportUpdate(data = {}) {
     { vehicle_type: txn.vehicle?.vehicle_type || txn.vehicle_type },
     txn,
   );
+
+  if (data.clear_tare === true || data.clearTare === true) {
+    if (txn.tare_weight == null) {
+      throw new Error('Ticket has no tare weight to clear');
+    }
+    const updates = buildClearTareUpdates(txn, vehicleType);
+    TransactionService.updateFields(txn.id, updates);
+    const regen = await ReportService.regenerateTripPDF(txn.id).catch(() => ({ ok: false }));
+    const updated = TransactionService.getById(txn.id);
+    logger.info('Cleared tare weight and tare images', {
+      slip: updated.slip_number,
+      transactionId: updated.id,
+      hywa: isHywa(vehicleType),
+      remote: !!data.remote,
+    });
+    return {
+      ok: true,
+      clearedTare: true,
+      transaction: toPublicTransaction(updated),
+      reportPath: regen?.path || null,
+      slip_number: updated.slip_number,
+      transactionId: updated.id,
+    };
+  }
 
   const updates = {};
 

@@ -300,6 +300,44 @@ export default function ReportEdit() {
     }
   }
 
+  async function onClearTare() {
+    if (report?.tare_weight == null || report?.tare_weight === '') {
+      setError('This report has no tare weight to clear');
+      return;
+    }
+    if (
+      !window.confirm(
+        `Clear tare weight and tare images on ${slip}? Keeps gross, reopens the ticket for a fresh close weigh on the weighbridge PC.`,
+      )
+    ) {
+      return;
+    }
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api.editReport(slip, { clear_tare: true });
+      setMessage(
+        `Tare cleared — queued for weighbridge PC (command ${result.command?.id?.slice(0, 8)}…). Status: ${result.command?.status}.`,
+      );
+      const refreshed = await api.getReport(slip);
+      const r = refreshed.report;
+      if (r) {
+        setReport(r);
+        setForm((prev) => ({
+          ...prev,
+          tare_weight: r.tare_weight ?? '',
+          gross_weight: r.gross_weight ?? '',
+          timestamp_out: toDatetimeLocalValue(r.timestamp_out),
+        }));
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function onCancelTicket() {
     const already = String(report?.ticket_status || '').toUpperCase() === 'CANCELLED';
     if (
@@ -538,6 +576,14 @@ export default function ReportEdit() {
         <div className="flex flex-wrap gap-2 pt-2">
           <button type="submit" className="btn-primary" disabled={saving}>
             {saving ? 'Saving…' : 'Save & regenerate on weighbridge'}
+          </button>
+          <button
+            type="button"
+            className="btn-ghost text-sky-300 border border-sky-700/50"
+            disabled={saving || report?.tare_weight == null || report?.tare_weight === ''}
+            onClick={onClearTare}
+          >
+            Clear tare weight &amp; images
           </button>
           <button
             type="button"

@@ -247,8 +247,10 @@ function normalizeAdminSlipNumber(input) {
 router.post('/:slip/edit', async (req, res) => {
   try {
     const siteId = getSiteId();
+    const aliases = siteIdAliases(siteId);
     const slip = String(req.params.slip || '').trim();
     const body = req.body || {};
+    const clearTare = body.clear_tare === true || body.clearTare === true;
     const newSlipNumber = normalizeAdminSlipNumber(body.newSlipNumber || body.slip_number);
     const truckNumber = String(body.truck_number || body.truckNumber || '')
       .trim()
@@ -259,6 +261,7 @@ router.post('/:slip/edit', async (req, res) => {
       slip_number: newSlipNumber || undefined,
       truck_number: truckNumber || undefined,
       truckNumber: truckNumber || undefined,
+      clear_tare: clearTare || undefined,
       gross_weight: body.gross_weight,
       tare_weight: body.tare_weight,
       timestamp_in: body.timestamp_in,
@@ -275,12 +278,46 @@ router.post('/:slip/edit', async (req, res) => {
     const sets = [];
     const params = [];
     let idx = 1;
+
+    if (clearTare) {
+      // Mirror must clear photos explicitly — routine PC sync COALESCE keeps old keys.
+      const mirrorRow = await query(
+        `SELECT vehicle_type, tare_weight FROM transactions_mirror
+         WHERE site_id = ANY($1::text[]) AND UPPER(slip_number) = UPPER($2)
+         ORDER BY updated_at DESC NULLS LAST LIMIT 1`,
+        [aliases, slip],
+      );
+      if (!mirrorRow.rows[0]) {
+        return res.status(404).json({ ok: false, error: 'Report not found' });
+      }
+      if (mirrorRow.rows[0].tare_weight == null) {
+        return res.status(400).json({ ok: false, error: 'Ticket has no tare weight to clear' });
+      }
+      const hywa =
+        String(mirrorRow.rows[0].vehicle_type || '')
+          .trim()
+          .toLowerCase() === 'hywa';
+      sets.push('tare_weight = NULL');
+      sets.push(`ticket_status = $${idx++}`);
+      params.push('OPEN');
+      sets.push('timestamp_out = NULL');
+      if (hywa) {
+        sets.push('departure_photo_1 = NULL');
+        sets.push('departure_photo_2 = NULL');
+        sets.push('departure_photo_3 = NULL');
+      } else {
+        sets.push('arrival_photo_1 = NULL');
+        sets.push('arrival_photo_2 = NULL');
+        sets.push('arrival_photo_3 = NULL');
+      }
+    }
+
     const fields = [
       ['truck_number', truckNumber || undefined],
       ['gross_weight', body.gross_weight],
-      ['tare_weight', body.tare_weight],
+      ['tare_weight', clearTare ? undefined : body.tare_weight],
       ['timestamp_in', body.timestamp_in],
-      ['timestamp_out', body.timestamp_out],
+      ['timestamp_out', clearTare ? undefined : body.timestamp_out],
       ['material', body.material],
       ['customer_name', body.customer_name],
       ['destination', body.destination],
@@ -317,10 +354,10 @@ router.post('/:slip/edit', async (req, res) => {
     }
     if (sets.length) {
       sets.push('updated_at = now()');
-      params.push(siteId, slip);
+      params.push(aliases, slip);
       await query(
         `UPDATE transactions_mirror SET ${sets.join(', ')}
-         WHERE site_id = $${idx++} AND slip_number = $${idx}`,
+         WHERE site_id = ANY($${idx++}::text[]) AND UPPER(slip_number) = UPPER($${idx})`,
         params,
       );
     }
@@ -330,12 +367,40 @@ router.post('/:slip/edit', async (req, res) => {
     const targetSlip = newSlipNumber || slip;
     try {
       const rt = await query(
-        `SELECT id, slip_number FROM remote_trips
+        `SELECT id, slip_number, vehicle_type FROM remote_trips
          WHERE UPPER(slip_number) = UPPER($1) OR UPPER(slip_number) = UPPER($2)
          LIMIT 1`,
         [targetSlip, slip],
       );
       if (rt.rows[0]) {
+        if (clearTare) {
+          const hywa =
+            String(rt.rows[0].vehicle_type || '')
+              .trim()
+              .toLowerCase() === 'hywa';
+          await query(
+            hywa
+              ? `UPDATE remote_trips
+                 SET tare_weight = NULL,
+                     timestamp_out = NULL,
+                     ticket_status = 'OPEN',
+                     departure_photo_1 = NULL,
+                     departure_photo_2 = NULL,
+                     departure_photo_3 = NULL,
+                     updated_at = now()
+                 WHERE id = $1`
+              : `UPDATE remote_trips
+                 SET tare_weight = NULL,
+                     timestamp_out = NULL,
+                     ticket_status = 'OPEN',
+                     arrival_photo_1 = NULL,
+                     arrival_photo_2 = NULL,
+                     arrival_photo_3 = NULL,
+                     updated_at = now()
+                 WHERE id = $1`,
+            [rt.rows[0].id],
+          );
+        }
         if (photoS3Keys.length) {
           const { attachPhotos } = require('../services/remoteTripService');
           await attachPhotos(query, rt.rows[0].id, photoS3Keys);
@@ -372,6 +437,7 @@ router.post('/:slip/edit', async (req, res) => {
       ok: true,
       command: cmd,
       slip_number: newSlipNumber || slip,
+      clearedTare: clearTare || undefined,
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
